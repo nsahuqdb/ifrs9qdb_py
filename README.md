@@ -82,6 +82,11 @@ src/ifrs9qdb/
                   checks on the config and static reference, and the
                   suppressions file (reason, approver, expiry)
   governance.py   approvals, audit log, config snapshots
+  calculator_versions.py  the code-version registry and its fingerprint
+  code_version.py the git state a run was produced from
+  acquisition.py  getting a quarter's extracts in: zip upload, data drops,
+                  a structural check, and recording where they came from
+  ids.py          ids that join, whatever dtype the column was read as
   overlays.py     management overlays over a completed run
   config/         model.yml, model_inputs.yml, overlays.yml
   static/         rating scales, TTC PDs, scenario severities, mappings
@@ -93,7 +98,7 @@ The fixtures under `tests/fixtures/` ship with the repository, so the suite
 means something on a fresh clone with nothing configured:
 
 ```bash
-pytest -q          # 170 passed, 64 skipped
+pytest -q          # 218 passed, 66 skipped
 ```
 
 The reconciliation tests need a real run, and a real run is real portfolio

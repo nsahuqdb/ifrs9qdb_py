@@ -155,6 +155,52 @@ as informational precisely so nobody "fixes" it.
 The ETL now runs the suite as a step of its own and writes `reports/
 validation.csv` and `reports/validation.md` in the R format, column for column.
 
+## Reproducibility — calculator versions, code state, input acquisition
+
+Three R modules had no Python equivalent at all. All three are now ported.
+
+**`calculator_versions.py`.** Deployment does not always go through git -- a
+bank release can be a copied directory -- so the code version is tracked in a
+registry rather than inferred from a SHA. Each run records the version it
+SELECTED and a FINGERPRINT of the code that actually executed. Either alone is
+insufficient: the version can claim what the code is not, and a bare hash names
+nothing. Together they make drift visible, and a test asserts exactly that --
+register v1.0, edit a file, and `matches_registered` turns False.
+
+The fingerprint is an md5 over the sources with their paths, so a RENAMED file
+changes it as much as an edited one, and `__pycache__` is excluded so an
+installed package fingerprints the same as a checkout.
+
+One deliberate difference from the R. The R can execute an archived version by
+sourcing its files into a fresh environment. Python has no clean equivalent --
+rebinding a live package's modules mid-process leaves a state matching neither
+version -- so an archived version here is a directory you install or put on the
+path, and `calc_version_code_dir()` returns it.
+
+**`code_version.py`.** The git SHA, branch, last commit and whether the tree is
+dirty. `dirty` is the one that matters at close: a run produced from a modified
+working tree cannot be reproduced from its SHA, and the record should say so.
+Everything degrades quietly -- a deployment need not be a checkout, and a
+missing SHA is a gap in the record rather than a reason to refuse a run. An
+unknown SHA reads as unknown, never as a mismatch.
+
+**`acquisition.py`.** Getting a quarter's extracts in: extract an uploaded zip,
+list the data team's dated drop folders, run a cheap structural check, and
+record where the inputs came from into the run's own `reports/input_source.yml`.
+Without that last one a run records what it produced and not what it read.
+
+Two details worth keeping:
+
+* A new directory per upload, never a reused one. Two uploads in a session must
+  not be able to mix, and a half-overwritten bundle produces a run nobody can
+  explain afterwards.
+* **The zip extraction refuses a member that would write outside the
+  destination.** `utils::unzip` in the R does not check this, and a zip can name
+  a member `../../etc/passwd`. This is a hardening the R does not have.
+
+The manifest now carries the calculator record and the code state alongside the
+engine version and the validation summary.
+
 ## Reading the extracts — complete
 
 All twelve read. Format is detected from the file's bytes, not its extension:
@@ -331,6 +377,6 @@ staging inputs, which is the `AccountMaster_1` trailing block above.
    taken with the equal-weights StPD underneath it and is not a fair reading.
 2. The `AccountMaster_1` trailing block, which also closes both remaining
    `CustomerStagingFlag` differences.
-3. The governance surface: snapshots, approvals and calculator versions are
-   thinner here than in the R package. Calculator versions, the code
-   fingerprint and zip input acquisition have no Python equivalent yet.
+3. The governance surface. Calculator versions, the code fingerprint and
+   input acquisition are now ported (below); snapshots and approvals are
+   still thinner here than in the R package.

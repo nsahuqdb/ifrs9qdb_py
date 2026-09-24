@@ -27,3 +27,14 @@ from .governance import (  # noqa: F401,E402
 )
 from .validation import validate_run  # noqa: F401,E402
 from .reconcile import build_export, compare_runs, reconcile_report  # noqa: F401,E402
+from .ids import as_id  # noqa: F401,E402
+from .code_version import code_status, get_current_code_sha  # noqa: F401,E402
+from .calculator_versions import (  # noqa: F401,E402
+    calculator_version_for_run, compute_code_fingerprint,
+    current_calculator_version, list_calculator_versions,
+    register_calculator_version, set_active_calculator_version,
+)
+from .acquisition import (  # noqa: F401,E402
+    acquire_inputs_from_zip, list_data_drops, record_input_source,
+    validate_input_directory,
+)

@@ -433,14 +433,32 @@ def _write_manifest(run_dir: Path, run_id: str, input_dir: Path,
     engine version, what was still pending at the time.
     """
     from .. import __version__
+    # The declared calculator version AND a fingerprint of the code that
+    # actually ran. Either alone is insufficient: the version can claim what
+    # the code is not, and a bare hash names nothing.
+    try:
+        from ..calculator_versions import calculator_version_for_run
+        calculator = calculator_version_for_run(root=run_dir.parent.parent)
+    except Exception:
+        calculator = None
+    try:
+        from ..code_version import code_status
+        code = code_status()
+    except Exception:
+        code = None
+
     manifest = {
         "run_id": run_id,
         "created": datetime.now().isoformat(timespec="seconds"),
         "engine_version": __version__,
+        "calculator": calculator,
+        "code": code,
         "input_dir": str(input_dir),
         "reporting_date": extract_date,
         "files_written": result.written,
         "files_pending": result.pending,
+        "validation": result.validation,
         "steps": result.steps,
     }
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2,
+                                                      default=str))
