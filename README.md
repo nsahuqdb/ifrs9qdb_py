@@ -83,6 +83,7 @@ src/ifrs9qdb/
                   suppressions file (reason, approver, expiry)
   governance.py   two-stage sign-off, audit log, config snapshots
   run_status.py   maker-checker, in the R engine's reports/run_status.yml
+  snapshots.py    frozen, versioned config + static, with its own lifecycle
   calculator_versions.py  the code-version registry and its fingerprint
   code_version.py the git state a run was produced from
   acquisition.py  getting a quarter's extracts in: zip upload, data drops,
@@ -99,7 +100,7 @@ The fixtures under `tests/fixtures/` ship with the repository, so the suite
 means something on a fresh clone with nothing configured:
 
 ```bash
-pytest -q          # 247 passed, 67 skipped
+pytest -q          # 279 passed, 67 skipped
 ```
 
 The reconciliation tests need a real run, and a real run is real portfolio

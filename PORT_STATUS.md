@@ -238,6 +238,45 @@ and the Python was writing `manifest.json` at the run root, so neither could
 find the other's maker — which is what separation of duties is checked
 against. The Python now writes where the R reads, and readers accept both.
 
+## Config snapshots — the frozen copy, with its lifecycle
+
+A snapshot freezes the config and the static reference together under a label.
+It exists because "what changed?" is the first question asked of a provision
+that moved, and the answer has to be a file rather than a memory.
+
+The lifecycle is the R's, exactly:
+
+    draft ──► tested ──► pending_final ──► approved ──► archived
+      ▲         │            │   │
+      └─────────┘            │   └──► rejected ──► (clone to a new draft)
+                             └──────► tested
+
+Three things in it are easy to get wrong and all three are pinned by tests:
+
+* **Only a DRAFT is editable.** That is what `tested` is for — the creator
+  locks their own snapshot before impact-testing it, so the numbers being
+  tested cannot move underneath the test.
+* **Separation of duties applies to the FINAL approval only.** The creator may
+  mark their own snapshot tested and submit it; those are their own work. Only
+  the approval is gated.
+* **A child starts from its PARENT, not from live.** "v3 based on v2" begins
+  as v2's frozen content at any depth of the chain. A test changes the live
+  config after v1 is cut and asserts v2 still carries v1's value.
+
+**The detail that would have been lost silently:** the static tables carry
+their provenance in leading `#` lines — which variable, which source, when it
+was last refreshed. A plain read-then-write round trip through pandas deletes
+every one of them. `read_static_csv_with_header` and its writer carry the
+header separately and put it back, and a test round-trips the R app's own
+`non_oil_gdp_history.csv` to prove the seven header lines survive.
+
+The copied `config.yml` is rewritten so its model paths point at the
+snapshot's own frozen files rather than at `config/` — without that, a frozen
+copy reads the LIVE model files, which is the one thing it must not do.
+
+Verified against the R app's own `config_snapshots/ddd`: it reads, lists, and
+its editable file set and comment headers come back intact.
+
 ## Reading the extracts — complete
 
 All twelve read. Format is detected from the file's bytes, not its extension:
@@ -415,8 +454,6 @@ staging inputs, which is the `AccountMaster_1` trailing block above.
 2. The `AccountMaster_1` trailing block, which also closes both remaining
    `CustomerStagingFlag` differences.
 3. The governance surface. Calculator versions, the code fingerprint, input
-   acquisition and maker-checker are now ported (below). Config SNAPSHOTS are
-   still thinner than the R package's: creating, promoting, cloning and
-   editing a snapshot are not here yet.
+   acquisition, maker-checker and config snapshots are now ported (below).
 4. Overlays, reconciliation and the analytics layer are ported in part and
    are the largest remaining gaps by line count.
