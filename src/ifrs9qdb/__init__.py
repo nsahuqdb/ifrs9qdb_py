@@ -34,6 +34,11 @@ from .calculator_versions import (  # noqa: F401,E402
     current_calculator_version, list_calculator_versions,
     register_calculator_version, set_active_calculator_version,
 )
+from .run_status import (  # noqa: F401,E402
+    annotate_runs_with_status, approve_run_status, init_run_status,
+    list_runs_decided, list_runs_pending_approval, read_run_status,
+    reject_run_status, transition_run,
+)
 from .acquisition import (  # noqa: F401,E402
     acquire_inputs_from_zip, list_data_drops, record_input_source,
     validate_input_directory,

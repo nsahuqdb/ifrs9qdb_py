@@ -269,7 +269,7 @@ class TestPipeline:
         from ifrs9qdb.etl.pipeline import run_etl
         from ifrs9qdb.etl.static_ref import PACKAGED_STATIC
         r = run_etl(IN, tmp_path, static_dir=PACKAGED_STATIC)
-        m = json.loads((r.run_dir / "manifest.json").read_text())
+        m = json.loads((r.run_dir / "reports" / "manifest.json").read_text())
         assert m["engine_version"] and m["reporting_date"]
         assert m["files_written"] and "files_pending" in m
 
@@ -279,7 +279,7 @@ class TestPipeline:
         from ifrs9qdb.etl.pipeline import run_etl
         from ifrs9qdb.etl.static_ref import PACKAGED_STATIC
         r = run_etl(IN, tmp_path, static_dir=PACKAGED_STATIC)
-        m = json.loads((r.run_dir / "manifest.json").read_text())
+        m = json.loads((r.run_dir / "reports" / "manifest.json").read_text())
         assert m["reporting_date"] == "6/30/2026"
 
     def test_a_missing_input_folder_fails_with_a_reason(self, tmp_path):

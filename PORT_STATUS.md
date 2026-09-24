@@ -201,6 +201,43 @@ Two details worth keeping:
 The manifest now carries the calculator record and the code state alongside the
 engine version and the validation summary.
 
+## Maker-checker, in the R engine's own file
+
+The two engines are meant to share a `runs/` folder — the app README says so —
+and that only works if a run written by one is readable and approvable by the
+other. The Python had its own two-stage sign-off in `approval.json`; it now
+also writes and reads `reports/run_status.yml`, in the R format, with the same
+state machine:
+
+    official run   -> pending_checker -> approved
+                                      -> rejected
+    unofficial run -> unofficial                     (terminal, no approval)
+
+Only `pending_checker` transitions. A rejected run is re-run, not re-argued.
+
+Two rules carry the control, and both REFUSE rather than warn, because a
+warning that can be scrolled past is not a gate:
+
+* **A reason is required.** An approval with no reason records that somebody
+  clicked, not that somebody decided.
+* **Separation of duties.** Whoever ran the pipeline cannot also approve it,
+  when the config asks for it. Rejection is always allowed — the person who
+  built a run has to be able to withdraw it, and making them find someone else
+  to do that achieves nothing.
+
+A run with no status file is listed as `unknown` and SURFACES in the queue
+rather than being filtered out. It is the case most worth seeing: something
+wrote a run and did not record that it needs approving.
+
+Verified against the R engine's own runs: `run_00001` and `run_00002` both
+read as unofficial, weighted, run by nsahu, and are correctly excluded from
+the pending queue.
+
+**One interop fix this turned up.** The R engine writes `reports/manifest.json`
+and the Python was writing `manifest.json` at the run root, so neither could
+find the other's maker — which is what separation of duties is checked
+against. The Python now writes where the R reads, and readers accept both.
+
 ## Reading the extracts — complete
 
 All twelve read. Format is detected from the file's bytes, not its extension:
@@ -377,6 +414,9 @@ staging inputs, which is the `AccountMaster_1` trailing block above.
    taken with the equal-weights StPD underneath it and is not a fair reading.
 2. The `AccountMaster_1` trailing block, which also closes both remaining
    `CustomerStagingFlag` differences.
-3. The governance surface. Calculator versions, the code fingerprint and
-   input acquisition are now ported (below); snapshots and approvals are
-   still thinner here than in the R package.
+3. The governance surface. Calculator versions, the code fingerprint, input
+   acquisition and maker-checker are now ported (below). Config SNAPSHOTS are
+   still thinner than the R package's: creating, promoting, cloning and
+   editing a snapshot are not here yet.
+4. Overlays, reconciliation and the analytics layer are ported in part and
+   are the largest remaining gaps by line count.

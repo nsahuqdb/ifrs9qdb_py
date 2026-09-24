@@ -208,7 +208,8 @@ def build_export(run, dest_zip, include_inputs: bool = False) -> dict:
                 if p.is_file():
                     add(zf, p, f"config_used/{p.relative_to(cfg)}")
 
-        for name in ("manifest.json", "validation.json", "approval.json",
+        for name in ("reports/manifest.json", "manifest.json",
+                     "validation.json", "approval.json",
                      "audit.jsonl"):
             add(zf, run / name, name)
 

@@ -92,12 +92,19 @@ def next_run_id(runs_dir) -> str:
 
 
 def run_etl(input_dir, runs_dir, reporting_date=None, run_id=None,
-            static_dir=None, config_dir=None, progress=None) -> RunResult:
+            static_dir=None, config_dir=None, progress=None,
+            run_type: str = "unofficial", ecl_scenario: str = "weighted",
+            user: str | None = None) -> RunResult:
     """Build a run from the source extracts.
 
     ``progress`` is called with (step, message) so a caller can show what is
     happening -- reading 117,000 collateral allocations is not instant, and a
     silent minute looks like a hang.
+
+    ``run_type`` decides whether the run enters the approval queue. It defaults
+    to ``unofficial`` -- terminal, no approval -- because a run is not a number
+    anybody books until somebody says it is. An official run must use the
+    weighted ECL; a single scenario is by definition not the reported figure.
     """
     started = time.time()
     input_dir = Path(input_dir)
@@ -323,7 +330,26 @@ def run_etl(input_dir, runs_dir, reporting_date=None, run_id=None,
             result.steps.append({"step": "Validation", "ok": False,
                                  "detail": f"{type(exc).__name__}: {exc}"})
 
-        _write_manifest(run_dir, run_id, input_dir, extract_date, result)
+        _write_manifest(run_dir, run_id, input_dir, extract_date, result,
+                        user=user)
+
+        # The approval queue reads this. Written last, and its failure is
+        # reported loudly: without it a completed run never appears for
+        # sign-off and simply sits there.
+        try:
+            from ..run_status import init_run_status
+            init_run_status(run_dir, run_id, run_type=run_type, by=user,
+                            ecl_scenario=ecl_scenario)
+            result.steps.append({
+                "step": "Run status", "ok": True,
+                "detail": f"{run_type}; "
+                          + ("awaiting checker approval" if run_type == "official"
+                             else "terminal, no approval required")})
+        except Exception as exc:
+            result.steps.append({
+                "step": "Run status", "ok": False,
+                "detail": (f"{type(exc).__name__}: {exc} - the run will NOT "
+                           "appear in the approval queue")})
         result.ok = True
         result.steps.append({
             "step": "Write outputs", "ok": True,
@@ -426,7 +452,8 @@ def _copy_reference(static_dir, out_dir: Path) -> list[str]:
 
 
 def _write_manifest(run_dir: Path, run_id: str, input_dir: Path,
-                    extract_date: str, result: RunResult) -> None:
+                    extract_date: str, result: RunResult,
+                    user: str | None = None) -> None:
     """What produced this run.
 
     Written so a number can be traced back months later: which inputs, which
@@ -447,8 +474,23 @@ def _write_manifest(run_dir: Path, run_id: str, input_dir: Path,
     except Exception:
         code = None
 
+    if not user:
+        import getpass
+        import os
+        user = (os.environ.get("IFRS9_USER") or os.environ.get("USER")
+                or os.environ.get("USERNAME"))
+        if not user:
+            try:
+                user = getpass.getuser()
+            except Exception:
+                user = "unknown"
+
     manifest = {
         "run_id": run_id,
+        # Who ran it. The approval helpers read this to enforce separation of
+        # duties, so a run with no maker recorded cannot be checked against
+        # its approver.
+        "user": user,
         "created": datetime.now().isoformat(timespec="seconds"),
         "engine_version": __version__,
         "calculator": calculator,
@@ -460,5 +502,9 @@ def _write_manifest(run_dir: Path, run_id: str, input_dir: Path,
         "validation": result.validation,
         "steps": result.steps,
     }
-    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2,
+    # reports/, which is where the R engine writes it and therefore where
+    # anything reading a run of either engine's making will look.
+    reports = run_dir / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "manifest.json").write_text(json.dumps(manifest, indent=2,
                                                       default=str))
