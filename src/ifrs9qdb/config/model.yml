@@ -1,0 +1,200 @@
+# PD model definition (models + variables in one file).
+# What to edit and when: see CONFIG_GUIDE.md (How-to in the Config manager).
+schema_version: '1.0'
+ttc_anchor_pd: 0.146
+# ---------------------------------------------------------------------------
+# ECL engine settings  (R/ecl_engine.R and components)
+# ---------------------------------------------------------------------------
+ecl:
+  # Stage 3 provisioning.
+  #
+  #   full_outstanding : ECL = the on-balance outstanding, i.e. a 100% provision
+  #                      (QDB's booking basis; Risk decision, Aug 2026)
+  #   zero             : ECL = 0, matching what LIC returns, on the basis that
+  #                      Stage 3 is booked manually outside the tool
+  #
+  # NOTE: with full_outstanding the FinalEclReport DELIBERATELY DIVERGES from
+  # LIC on Stage 3 rows - LIC reports 0 there. Reconciliation against a LIC
+  # extract will therefore show Stage 3 differences by design. Set to `zero`
+  # to restore like-for-like comparison with LIC.
+  stage3_method: full_outstanding
+
+  # Cap the on-balance ECL at the on-balance exposure.
+  #
+  # A supplied EAD curve can rise ABOVE today's outstanding, because it is the
+  # expected exposure at default over the life of the facility and includes
+  # expected future drawdowns on undrawn commitments. Contract 608989 in run
+  # 324, for example, runs from 1,224 today to 60,224 - 49x. The discounted
+  # loss over that curve can then exceed the balance actually outstanding.
+  #
+  # LIC caps the reported on-balance provision at the on-balance exposure, so
+  # this is parity with LIC, not a divergence. Set to false to see the uncapped
+  # figure (useful when investigating an EAD curve).
+  cap_ecl_at_exposure: true
+
+  # EAD fallback: how to amortise the balance for contracts that have NO
+  # RepaymentSchedule, and therefore no LifeTimeParameterOther curve.
+  # LIC derives such curves internally from the repayment type; holding the
+  # balance flat over-states EAD and therefore ECL.
+  #
+  # shape: bullet | linear | annuity
+  # Match order: (portfolio + payment_type) -> payment_type -> default.
+  #
+  # Defaults are derived from LIC run 324 (extract 2026-06-30) by comparing
+  # reconstructed ECL against LIC's actual Cla Amount Onbal. Business Finance
+  # payment_type 4 is the least-certain row (~32% exact match; bullet matches
+  # 0%) — confirm with EY before relying on it.
+  ead_fallback:
+    default: bullet
+    rules:
+      - portfolio: Business Finance
+        payment_type: "4"
+        shape: linear
+      - portfolio: Business Finance
+        payment_type: "3"
+        shape: bullet
+      - portfolio: Al Dhameen
+        payment_type: "4"
+        shape: bullet
+      - portfolio: Tasdeer
+        payment_type: "3"
+        shape: bullet
+      - portfolio: Off BS
+        payment_type: "3"
+        shape: bullet
+
+horizons:
+  max_maturity: 50
+  n_forecasts: 5
+models:
+  internal_v4_production:
+    description: 'V4 production model: 3 MEVs registered but only Non-Oil GDP is active (weight = 1.0;
+      REPI = 0; DC = 0). Reproduces V4 byte-for-byte against the bundled StPD output.
+
+      '
+    portfolios:
+    - Business Finance
+    - Off BS
+    - Al Dhameen
+    - Tasdeer
+    rating_type: Internal
+    calibration:
+      source: Updated_ETL_File__Test__V4_20211029_-_New_server_link.xlsm — Model Specifications sheet
+        rows 5-7
+      date_reviewed: 2026-05-06
+    mev_components:
+    - variable: VAR_NON_OIL_GDP_GROWTH
+      intercept: -1.54749454211729
+      coefficient: -0.0414145067387472
+      p_value: 0.08
+      standard_deviation: 9.88769105886648
+      weight: 1.0
+    - variable: VAR_QATAR_REAL_ESTATE_INDEX_GROWTH
+      intercept: -1.7119854476588
+      coefficient: -0.90045823075572
+      p_value: 0.165
+      standard_deviation: 0.21949278818348
+      weight: 0.0
+    - variable: VAR_QATAR_DOMESTIC_CREDIT_GROWTH
+      intercept: -1.27119835926007
+      coefficient: -4.58453325004525
+      p_value: 0.241
+      standard_deviation: 0.160242004480723
+      weight: 0.0
+  external_gcc_v7:
+    description: 'External-portfolio model: country-weighted GCC Real GDP Growth as the single MEV. Used
+      for Banks/Investment portfolios.
+
+      '
+    portfolios:
+    - Banks and Fis
+    - Investments
+    rating_type: External
+    calibration:
+      source: V7 Calculations sheet — country weights and growth forecasts
+      date_reviewed: 2026-05-06
+    mev_components:
+    - variable: VAR_GCC_REAL_GDP_GROWTH
+      intercept: null
+      coefficient: null
+      p_value: null
+      standard_deviation: null
+      weight: 1.0
+variables:
+  VAR_NON_OIL_GDP_GROWTH:
+    display_name: Non-Oil Real GDP Growth (%)
+    description: 'Year-on-year growth rate of Qatar''s Non-Oil Real GDP, as published by the Qatar Planning
+      & Statistics Authority. The headline macro driver for the lending-portfolio satellite PD model in
+      V4 production (weight = 1.0; REPI and DC carry weight = 0).
+
+      '
+    units: percentage_points
+    scale: native
+    stress_unit_multiplier: 1
+    source: Qatar Planning & Statistics Authority
+    history_file: data-raw/static/non_oil_gdp_history.csv
+    history_value_column: value
+    history_year_column: year
+    forecast_source:
+      kind: model_inputs_yaml
+      path: mev_forecasts.forecasts
+      column_index: 1
+    deprecated: false
+  VAR_QATAR_REAL_ESTATE_INDEX_GROWTH:
+    display_name: Qatari Real Estate Index Growth
+    description: 'Year-on-year growth of Qatar''s Real Estate Price Index (REPI). Inactive in V4 production
+      (weight = 0). PDF methodology assigns this variable a non-zero weight in the 3-variable extended
+      model.
+
+      '
+    units: fractional
+    scale: percent_to_fraction
+    stress_unit_multiplier: 100
+    source: Qatar Central Bank — REPI series
+    history_file: null
+    forecast_source:
+      kind: model_inputs_yaml
+      path: mev_forecasts.forecasts
+      column_index: 2
+    deprecated: false
+  VAR_QATAR_DOMESTIC_CREDIT_GROWTH:
+    display_name: Qatari Domestic Credit Growth
+    description: 'Year-on-year growth of Qatar''s Domestic Credit aggregate. Inactive in V4 production
+      (weight = 0); enabled in 3-variable extended model.
+
+      '
+    units: fractional
+    scale: percent_to_fraction
+    stress_unit_multiplier: 100
+    source: Qatar Central Bank — DC series
+    history_file: null
+    forecast_source:
+      kind: model_inputs_yaml
+      path: mev_forecasts.forecasts
+      column_index: 3
+    deprecated: false
+  VAR_GCC_REAL_GDP_GROWTH:
+    display_name: Country-weighted GCC Real GDP Growth (%)
+    description: 'Synthetic variable: weighted average of per-country GCC real GDP growth, where weights
+      are each country''s share of GCC nominal GDP in the same year. The dependent variable for the external-portfolio
+      satellite model. Computed at runtime from VAR_GCC_REAL_GDP_GROWTH_BY_COUNTRY and VAR_GCC_NOMINAL_GDP_BY_COUNTRY
+      (which serves as the weight).
+
+      '
+    units: percentage_points
+    scale: native
+    stress_unit_multiplier: 1
+    source: 'Derived: SUMPRODUCT(country_growth, country_share)'
+    history_file: data-raw/static/gcc_real_gdp_growth.csv
+    history_value_column: value
+    history_year_column: year
+    history_group_column: country
+    history_aggregation:
+      method: weighted_mean
+      weight_variable: VAR_GCC_NOMINAL_GDP_BY_COUNTRY
+    forecast_source:
+      kind: model_inputs_yaml
+      path: external_gcc_country_growth
+      aggregation: weighted_mean_by_year
+      weight_path: external_gcc_country_prices
+    deprecated: false

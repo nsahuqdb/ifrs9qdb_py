@@ -1,0 +1,18 @@
+# variable_id: VAR_NON_OIL_GDP_GROWTH
+# display_name: Non-Oil Real GDP Growth (%)
+# units: percentage_points
+# scale: native
+# source: Qatar Planning & Statistics Authority
+# extracted_from: IFRS_9_Scenarios_Probabilities_-_2025_V1.xlsx
+# last_refreshed: 2026-05-06
+year,value
+2015,9.062050635890580
+2016,5.836592259633350
+2017,-0.988412572110603
+2018,2.249205771186760
+2019,2.188676650104020
+2020,-4.491025160316500
+2021,2.832142578523130
+2022,5.682772055278610
+2023,2.098684240995550
+2024,3.400000000000000

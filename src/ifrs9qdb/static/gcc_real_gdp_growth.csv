@@ -1,0 +1,276 @@
+# variable_id: VAR_GCC_REAL_GDP_GROWTH_BY_COUNTRY
+# display_name: GCC Real GDP Growth by Country (%)
+# units: percentage_points
+# scale: native
+# source: IMF World Economic Outlook
+# extracted_from: IMF WEO database
+# last_refreshed: 2026-05-06
+country,year,value
+Bahrain,1980,7.5
+Bahrain,1981,2.8
+Bahrain,1982,6.4
+Bahrain,1983,7.0
+Bahrain,1984,4.2
+Bahrain,1985,-0.9
+Bahrain,1986,0.5
+Bahrain,1987,-1.2
+Bahrain,1988,6.0
+Bahrain,1989,1.0
+Bahrain,1990,3.5
+Bahrain,1991,2.3
+Bahrain,1992,7.1
+Bahrain,1993,7.6
+Bahrain,1994,3.2
+Bahrain,1995,1.9
+Bahrain,1996,3.2
+Bahrain,1997,2.3
+Bahrain,1998,4.8
+Bahrain,1999,6.0
+Bahrain,2000,7.0
+Bahrain,2001,2.5
+Bahrain,2002,3.3
+Bahrain,2003,6.3
+Bahrain,2004,7.0
+Bahrain,2005,6.8
+Bahrain,2006,6.5
+Bahrain,2007,8.3
+Bahrain,2008,6.2
+Bahrain,2009,2.5
+Bahrain,2010,4.3
+Bahrain,2011,1.9
+Bahrain,2012,3.8
+Bahrain,2013,5.3
+Bahrain,2014,4.3
+Bahrain,2015,2.5
+Bahrain,2016,3.8
+Bahrain,2017,5.0
+Bahrain,2018,2.1
+Bahrain,2019,2.1
+Bahrain,2020,-5.9
+Bahrain,2021,4.4
+Bahrain,2022,6.0
+Bahrain,2023,3.0
+Bahrain,2024,3.0
+Kuwait,1982,-9.5
+Kuwait,1983,5.3
+Kuwait,1984,5.2
+Kuwait,1985,-4.3
+Kuwait,1986,8.6
+Kuwait,1987,8.1
+Kuwait,1988,-10.0
+Kuwait,1989,25.9
+Kuwait,1990,-26.2
+Kuwait,1991,-41.0
+Kuwait,1992,82.8
+Kuwait,1993,35.1
+Kuwait,1994,8.6
+Kuwait,1995,1.7
+Kuwait,1996,0.6
+Kuwait,1997,2.5
+Kuwait,1998,3.7
+Kuwait,1999,-1.8
+Kuwait,2000,4.7
+Kuwait,2001,0.2
+Kuwait,2002,3.0
+Kuwait,2003,17.3
+Kuwait,2004,10.2
+Kuwait,2005,10.6
+Kuwait,2006,7.5
+Kuwait,2007,6.0
+Kuwait,2008,2.5
+Kuwait,2009,-7.1
+Kuwait,2010,-2.4
+Kuwait,2011,9.6
+Kuwait,2012,6.6
+Kuwait,2013,1.1
+Kuwait,2014,0.5
+Kuwait,2015,0.6
+Kuwait,2016,2.9
+Kuwait,2017,-4.7
+Kuwait,2018,2.7
+Kuwait,2019,2.3
+Kuwait,2020,-4.8
+Kuwait,2021,2.3
+Kuwait,2022,5.9
+Kuwait,2023,-3.6
+Kuwait,2024,-2.7
+Oman,1980,6.1
+Oman,1981,17.1
+Oman,1982,11.5
+Oman,1983,15.9
+Oman,1984,13.9
+Oman,1985,14.5
+Oman,1986,2.1
+Oman,1987,-4.0
+Oman,1988,5.2
+Oman,1989,3.0
+Oman,1990,8.4
+Oman,1991,6.0
+Oman,1992,8.5
+Oman,1993,6.1
+Oman,1994,3.8
+Oman,1995,4.8
+Oman,1996,2.9
+Oman,1997,6.2
+Oman,1998,2.7
+Oman,1999,0.3
+Oman,2000,6.2
+Oman,2001,4.6
+Oman,2002,-0.8
+Oman,2003,-2.2
+Oman,2004,2.0
+Oman,2005,2.8
+Oman,2006,4.7
+Oman,2007,5.0
+Oman,2008,9.0
+Oman,2009,6.0
+Oman,2010,2.5
+Oman,2011,2.9
+Oman,2012,8.9
+Oman,2013,5.2
+Oman,2014,1.3
+Oman,2015,5.0
+Oman,2016,5.0
+Oman,2017,0.3
+Oman,2018,1.3
+Oman,2019,-1.1
+Oman,2020,-3.4
+Oman,2021,2.6
+Oman,2022,9.6
+Oman,2023,1.3
+Oman,2024,1.0
+Qatar,1980,-1.0
+Qatar,1981,-3.9
+Qatar,1982,-8.2
+Qatar,1983,-5.3
+Qatar,1984,16.0
+Qatar,1985,-13.0
+Qatar,1986,3.7
+Qatar,1987,0.9
+Qatar,1988,4.7
+Qatar,1989,5.3
+Qatar,1990,-14.6
+Qatar,1991,-1.5
+Qatar,1992,10.4
+Qatar,1993,-0.9
+Qatar,1994,1.9
+Qatar,1995,0.4
+Qatar,1996,4.2
+Qatar,1997,27.7
+Qatar,1998,10.3
+Qatar,1999,3.8
+Qatar,2000,6.9
+Qatar,2001,4.5
+Qatar,2002,6.9
+Qatar,2003,4.0
+Qatar,2004,19.2
+Qatar,2005,7.8
+Qatar,2006,28.1
+Qatar,2007,18.2
+Qatar,2008,17.5
+Qatar,2009,13.1
+Qatar,2010,17.7
+Qatar,2011,11.3
+Qatar,2012,4.7
+Qatar,2013,5.6
+Qatar,2014,5.3
+Qatar,2015,4.8
+Qatar,2016,3.1
+Qatar,2017,-1.5
+Qatar,2018,1.2
+Qatar,2019,0.7
+Qatar,2020,-3.6
+Qatar,2021,1.6
+Qatar,2022,4.2
+Qatar,2023,1.2
+Qatar,2024,1.5
+Saudi Arabia,1980,5.8
+Saudi Arabia,1981,3.0
+Saudi Arabia,1982,-16.1
+Saudi Arabia,1983,-11.0
+Saudi Arabia,1984,-4.0
+Saudi Arabia,1985,-7.2
+Saudi Arabia,1986,1.0
+Saudi Arabia,1987,-3.1
+Saudi Arabia,1988,6.6
+Saudi Arabia,1989,0.4
+Saudi Arabia,1990,9.4
+Saudi Arabia,1991,8.2
+Saudi Arabia,1992,4.6
+Saudi Arabia,1993,0.4
+Saudi Arabia,1994,1.0
+Saudi Arabia,1995,0.3
+Saudi Arabia,1996,3.3
+Saudi Arabia,1997,2.6
+Saudi Arabia,1998,2.8
+Saudi Arabia,1999,-0.6
+Saudi Arabia,2000,4.7
+Saudi Arabia,2001,0.3
+Saudi Arabia,2002,-0.7
+Saudi Arabia,2003,8.8
+Saudi Arabia,2004,8.6
+Saudi Arabia,2005,5.9
+Saudi Arabia,2006,3.3
+Saudi Arabia,2007,2.2
+Saudi Arabia,2008,6.2
+Saudi Arabia,2009,-1.1
+Saudi Arabia,2010,5.0
+Saudi Arabia,2011,11.0
+Saudi Arabia,2012,5.4
+Saudi Arabia,2013,2.5
+Saudi Arabia,2014,3.8
+Saudi Arabia,2015,4.5
+Saudi Arabia,2016,1.9
+Saudi Arabia,2017,0.9
+Saudi Arabia,2018,3.2
+Saudi Arabia,2019,1.1
+Saudi Arabia,2020,-3.6
+Saudi Arabia,2021,5.1
+Saudi Arabia,2022,7.5
+Saudi Arabia,2023,-0.8
+Saudi Arabia,2024,1.5
+United Arab Emirates,1980,-1.8
+United Arab Emirates,1981,8.0
+United Arab Emirates,1982,-7.2
+United Arab Emirates,1983,-5.2
+United Arab Emirates,1984,4.5
+United Arab Emirates,1985,-2.5
+United Arab Emirates,1986,-19.3
+United Arab Emirates,1987,5.3
+United Arab Emirates,1988,-2.6
+United Arab Emirates,1989,15.7
+United Arab Emirates,1990,23.6
+United Arab Emirates,1991,2.2
+United Arab Emirates,1992,3.1
+United Arab Emirates,1993,0.3
+United Arab Emirates,1994,7.4
+United Arab Emirates,1995,6.6
+United Arab Emirates,1996,5.4
+United Arab Emirates,1997,8.6
+United Arab Emirates,1998,0.9
+United Arab Emirates,1999,3.8
+United Arab Emirates,2000,12.3
+United Arab Emirates,2001,1.4
+United Arab Emirates,2002,2.4
+United Arab Emirates,2003,8.8
+United Arab Emirates,2004,9.6
+United Arab Emirates,2005,4.9
+United Arab Emirates,2006,9.8
+United Arab Emirates,2007,3.2
+United Arab Emirates,2008,3.2
+United Arab Emirates,2009,-5.2
+United Arab Emirates,2010,5.3
+United Arab Emirates,2011,6.2
+United Arab Emirates,2012,1.8
+United Arab Emirates,2013,5.1
+United Arab Emirates,2014,4.2
+United Arab Emirates,2015,6.8
+United Arab Emirates,2016,5.6
+United Arab Emirates,2017,0.7
+United Arab Emirates,2018,1.3
+United Arab Emirates,2019,1.1
+United Arab Emirates,2020,-5.0
+United Arab Emirates,2021,4.4
+United Arab Emirates,2022,7.5
+United Arab Emirates,2023,3.6
+United Arab Emirates,2024,4.0

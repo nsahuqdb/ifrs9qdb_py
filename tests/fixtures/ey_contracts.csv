@@ -1,0 +1,5 @@
+contract_id,portfolio,rating,bucket,stage,on_balance,eir,payment_type,payment_frequency,deferral,months_remaining,horizon,coll_cov,curve_key,lic_ecl,lic_pd_lifetime
+11,Business Finance,QDB 4+,10,2,113420.69,0.05,4,1,0,10,10,0.359537576,Business Finance|10,2298.318,0.129397176
+22,Off BS,QDB 3+,7,2,200000.0,0.043903792,3,1,0,1,1,0.0,Off BS|7,499.2142,0.005546824
+33,Business Finance,QDB 5+,13,2,66661.98,0.043067339,3,1,0,55,55,0.189299808,Business Finance|13,15759.7779,0.697837763
+44,Off BS,QDB 3-,9,2,80990.625,0.043903792,3,1,0,3,3,0.048438866,Off BS|9,879.0176,0.025437053

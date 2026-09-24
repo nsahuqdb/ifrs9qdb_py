@@ -1,0 +1,6 @@
+scenario,severity_z,description
+Significant Downturn,-1.2815515655446,Negative - Once in 10 years
+Slight Downturn,-0.674489750196081,Negative - Once in 4 years
+Base Case,0.0,Neutral
+Slight Uptrend,0.6744897501960819,Positive - Once in 4 years
+Significant Uptrend,1.2815515655446006,Positive - Once in 10 years

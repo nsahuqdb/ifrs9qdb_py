@@ -1,0 +1,117 @@
+# Per-quarter model inputs: scenario weights + MEV forecasts.
+# Update mev_forecasts each reporting quarter. See CONFIG_GUIDE.md.
+internal_scenario_weights:
+  mode: auto_non_oil_gdp_cdf
+  n_forecast_years: 2
+  explicit_weights:
+    Significant Downturn: 0.1508
+    Slight Downturn: 0.1792
+    Base Case: 0.4799
+    Slight Uptrend: 0.1197
+    Significant Uptrend: 0.0707
+external_scenario_weights:
+  mode: auto_gcc_cdf
+  explicit_weights:
+    Significant Downturn: 0.15709
+    Slight Downturn: 0.1877
+    Base Case: 0.48404
+    Slight Uptrend: 0.11139
+    Significant Uptrend: 0.05978
+external_gcc_country_growth:
+  Bahrain:
+  - 3.2
+  - 2.9
+  - 2.8
+  - 2.8
+  - 2.9
+  Kuwait:
+  - 3.3
+  - 2.5
+  - 2.6
+  - 2.6
+  - 2.6
+  Oman:
+  - 3.1
+  - 4.4
+  - 4.0
+  - 3.6
+  - 3.6
+  Qatar:
+  - 1.9
+  - 5.8
+  - 7.9
+  - 3.5
+  - 1.6
+  Saudi Arabia:
+  - 4.6
+  - 4.4
+  - 3.6
+  - 3.5
+  - 3.5
+  United Arab Emirates:
+  - 5.1
+  - 5.1
+  - 4.7
+  - 4.4
+  - 4.3
+external_gcc_country_prices:
+  Bahrain:
+  - 49.535
+  - 51.694
+  - 53.999
+  - 56.495
+  - 59.235
+  Kuwait:
+  - 161.95
+  - 165.951
+  - 171.06
+  - 177.062
+  - 183.69
+  Oman:
+  - 111.306
+  - 116.185
+  - 121.287
+  - 126.559
+  - 132.641
+  Qatar:
+  - 226.207
+  - 242.135
+  - 262.192
+  - 273.785
+  - 281.832
+  Saudi Arabia:
+  - 1136.58
+  - 1199.156
+  - 1262.326
+  - 1332.093
+  - 1409.058
+  United Arab Emirates:
+  - 568.567
+  - 601.759
+  - 636.705
+  - 673.519
+  - 712.688
+mev_model_weights:
+  mode: from_model_config
+mev_forecasts:
+  forecasts:
+    1:
+    - 4.44
+    - -8.04171085189113
+    - 10.45
+    2:
+    - 2.81
+    - -8.04171085189113
+    - 10.45
+    3:
+    - 2.81
+    - -8.04171085189113
+    - 10.45
+    4:
+    - 2.81
+    - -8.04171085189113
+    - 10.45
+    5:
+    - 2.81
+    - -8.04171085189113
+    - 10.45

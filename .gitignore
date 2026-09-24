@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+
+# Real portfolio data - never committed. Tests read it from IFRS9_REF_RUN.
+runs/
+input/
+output/
+uploads/
+tests/fixtures/FinalEclReport.csv

@@ -1,0 +1,70 @@
+# =============================================================================
+# config/overlays.yml  -  Post-model ECL overlays (management adjustments)
+#
+# Overlays are applied as the LAST step, on each contract's model ECL. They never
+# overwrite the model figure silently: the report gains
+#   Ecl Model Onbal  ->  Overlay Amount  ->  Ecl Final Onbal
+# and an OverlayAuditLog.csv records each overlay's impact and rationale.
+#
+# TYPES (choose exactly one per overlay):
+#   uplift_pct    ECL_final = ECL_model * (1 + value)          value = fraction, e.g. 0.15 for +15%
+#   higher_of     ECL_final = max(ECL_model, value * exposure) value = fraction of exposure in [0,1]
+#   absolute_add  a fixed 'value' amount spread across the matched contracts
+#                 pro-rata by exposure (Exposure On Bal). Zero-exposure set -> 0.
+#
+# LEVEL: contract | customer   (customer expands to all that customer's contracts)
+#
+# SELECTORS (all listed conditions must match):
+#   stage: [1,2]            portfolio: ["Business Finance"]   rating: ["QDB7"]
+#   flag: [watchlist]       customer: ["37000"]              contract_id: ["610056"]
+#   whole_book: true        sector: [...]  (INERT - no source column yet)
+#
+# RULES:
+#   * Stage 3 is never touched (booked manually outside the tool).
+#   * v1 allows AT MOST ONE overlay per contract; overlapping overlays abort the run.
+#   * 'comment' (rationale) is MANDATORY.
+#
+# Delete the examples below or set `overlays: []` to run with no overlays.
+# =============================================================================
+overlays: []
+
+# ---- examples (commented) ---------------------------------------------------
+#   - id: OV-2026Q2-01
+#     name: "Off-BS conservatism"
+#     type: uplift_pct
+#     value: 0.15                     # +15% on model ECL
+#     level: contract
+#     selector:
+#       stage: [2]
+#       portfolio: ["Off BS"]
+#     comment: "Model understates Off-BS lifetime risk pending EY off-balance formula review."
+#     owner: "FRM"
+#     approval_ref: "CRC-2026-014"
+#     effective_date: "2026-06-30"
+#     expiry: "2026-12-31"
+#
+#   - id: OV-2026Q2-02
+#     name: "Watchlist floor"
+#     type: higher_of
+#     value: 0.05                     # ECL at least 5% of exposure
+#     level: customer
+#     selector:
+#       flag: [watchlist]
+#     comment: "Minimum coverage on watchlist names not fully reflected by rating-based PD."
+#     owner: "FRM"
+#     approval_ref: "CRC-2026-014"
+#     effective_date: "2026-06-30"
+#     expiry: "2026-12-31"
+#
+#   - id: OV-2026Q2-03
+#     name: "Named-name legal overlay"
+#     type: absolute_add
+#     value: 5000000                  # QAR 5m spread across the customer's contracts
+#     level: customer
+#     selector:
+#       customer: ["100477"]
+#     comment: "Specific legal exposure on customer 100477 not captured by the model."
+#     owner: "FRM"
+#     approval_ref: "CRC-2026-015"
+#     effective_date: "2026-06-30"
+#     expiry: "2026-09-30"

@@ -1,0 +1,26 @@
+# variable_id: STATIC_PRODUCT_PORTFOLIO_MAPPING
+# description: Maps product_type (account_type in AccountMaster) to a portfolio
+# source_v4: Inputs_Lending Portfolio!AL5:AP15
+# last_refreshed: 2026-05-06
+# notes: Rows with source=v4 imported from V4 workbook; rows with
+#        source=team_added were added by the QDB team to cover product
+#        types observed in production but absent from the V4 mapping.
+#        Each team-added row is implicitly approved at first commit;
+#        future changes should go through a snapshot draft -> review.
+product_type,portfolio,source
+Al Dhameen,Al Dhameen,v4
+LG,Off BS,v4
+LC,Off BS,v4
+Tasdeer,Tasdeer,v4
+Long Term,Business Finance,v4
+Ijara,Business Finance,v4
+Murabaha,Business Finance,v4
+Short Term,Business Finance,v4
+Istinsa,Business Finance,v4
+Tawaraq,Business Finance,v4
+Forward Ijara,Business Finance,v4
+Bai Al Wadiya,Business Finance,team_added
+Fisheries,Business Finance,team_added
+Greenhouse,Business Finance,team_added
+Microfinance,Business Finance,team_added
+Paid guarantees,Business Finance,team_added

@@ -1,0 +1,277 @@
+# variable_id: VAR_GCC_NOMINAL_GDP_BY_COUNTRY
+# display_name: GCC Nominal GDP by Country (USD billions)
+# units: usd_billions
+# scale: native
+# source: IMF World Economic Outlook
+# extracted_from: IMF WEO database
+# last_refreshed: 2026-05-06
+country,year,value
+Bahrain,1980,3.745
+Bahrain,1981,4.228
+Bahrain,1982,4.445
+Bahrain,1983,4.554
+Bahrain,1984,4.727
+Bahrain,1985,4.46
+Bahrain,1986,3.49
+Bahrain,1987,3.78
+Bahrain,1988,4.672
+Bahrain,1989,4.873
+Bahrain,1990,5.176
+Bahrain,1991,5.43
+Bahrain,1992,5.673
+Bahrain,1993,6.241
+Bahrain,1994,6.683
+Bahrain,1995,7.075
+Bahrain,1996,7.357
+Bahrain,1997,7.629
+Bahrain,1998,7.293
+Bahrain,1999,7.905
+Bahrain,2000,9.448
+Bahrain,2001,9.579
+Bahrain,2002,10.001
+Bahrain,2003,11.546
+Bahrain,2004,13.709
+Bahrain,2005,16.647
+Bahrain,2006,19.291
+Bahrain,2007,22.653
+Bahrain,2008,26.803
+Bahrain,2009,23.913
+Bahrain,2010,26.806
+Bahrain,2011,29.915
+Bahrain,2012,31.963
+Bahrain,2013,33.823
+Bahrain,2014,34.773
+Bahrain,2015,32.523
+Bahrain,2016,33.885
+Bahrain,2017,37.205
+Bahrain,2018,39.568
+Bahrain,2019,40.447
+Bahrain,2020,35.838
+Bahrain,2021,40.84
+Bahrain,2022,46.68
+Bahrain,2023,46.08
+Bahrain,2024,47.812
+Kuwait,1981,25.249
+Kuwait,1982,21.583
+Kuwait,1983,20.871
+Kuwait,1984,21.7
+Kuwait,1985,21.445
+Kuwait,1986,17.904
+Kuwait,1987,22.368
+Kuwait,1988,20.69
+Kuwait,1989,24.313
+Kuwait,1990,18.293
+Kuwait,1991,10.826
+Kuwait,1992,19.871
+Kuwait,1993,23.955
+Kuwait,1994,24.859
+Kuwait,1995,27.186
+Kuwait,1996,31.491
+Kuwait,1997,30.35
+Kuwait,1998,25.941
+Kuwait,1999,30.126
+Kuwait,2000,37.714
+Kuwait,2001,34.906
+Kuwait,2002,38.129
+Kuwait,2003,47.869
+Kuwait,2004,59.439
+Kuwait,2005,80.799
+Kuwait,2006,101.548
+Kuwait,2007,114.608
+Kuwait,2008,147.391
+Kuwait,2009,105.992
+Kuwait,2010,115.401
+Kuwait,2011,154.02
+Kuwait,2012,174.066
+Kuwait,2013,174.179
+Kuwait,2014,162.695
+Kuwait,2015,114.606
+Kuwait,2016,109.399
+Kuwait,2017,120.688
+Kuwait,2018,138.655
+Kuwait,2019,140.885
+Kuwait,2020,111.048
+Kuwait,2021,148.455
+Kuwait,2022,183.977
+Kuwait,2023,163.716
+Kuwait,2024,161.822
+Oman,1980,7.269
+Oman,1981,8.849
+Oman,1982,9.285
+Oman,1983,9.733
+Oman,1984,10.726
+Oman,1985,11.916
+Oman,1986,9.433
+Oman,1987,9.89
+Oman,1988,9.613
+Oman,1989,10.743
+Oman,1990,13.395
+Oman,1991,13.0
+Oman,1992,14.274
+Oman,1993,14.321
+Oman,1994,14.808
+Oman,1995,15.821
+Oman,1996,17.512
+Oman,1997,18.154
+Oman,1998,16.044
+Oman,1999,17.833
+Oman,2000,22.259
+Oman,2001,22.206
+Oman,2002,23.066
+Oman,2003,24.734
+Oman,2004,28.379
+Oman,2005,35.507
+Oman,2006,42.578
+Oman,2007,48.3
+Oman,2008,69.805
+Oman,2009,55.454
+Oman,2010,64.994
+Oman,2011,77.497
+Oman,2012,87.409
+Oman,2013,89.936
+Oman,2014,92.699
+Oman,2015,78.711
+Oman,2016,75.129
+Oman,2017,80.857
+Oman,2018,91.506
+Oman,2019,88.061
+Oman,2020,75.909
+Oman,2021,87.323
+Oman,2022,111.944
+Oman,2023,108.811
+Oman,2024,109.993
+Qatar,1980,6.665
+Qatar,1981,7.374
+Qatar,1982,6.467
+Qatar,1983,5.506
+Qatar,1984,5.708
+Qatar,1985,5.339
+Qatar,1986,4.214
+Qatar,1987,4.441
+Qatar,1988,4.26
+Qatar,1989,4.502
+Qatar,1990,6.266
+Qatar,1991,5.579
+Qatar,1992,6.384
+Qatar,1993,5.804
+Qatar,1994,5.946
+Qatar,1995,6.861
+Qatar,1996,7.761
+Qatar,1997,9.976
+Qatar,1998,8.488
+Qatar,1999,11.266
+Qatar,2000,18.085
+Qatar,2001,17.498
+Qatar,2002,19.334
+Qatar,2003,23.716
+Qatar,2004,30.651
+Qatar,2005,44.636
+Qatar,2006,58.629
+Qatar,2007,75.987
+Qatar,2008,112.621
+Qatar,2009,88.196
+Qatar,2010,119.707
+Qatar,2011,167.775
+Qatar,2012,186.834
+Qatar,2013,198.728
+Qatar,2014,206.225
+Qatar,2015,161.74
+Qatar,2016,151.732
+Qatar,2017,161.099
+Qatar,2018,183.335
+Qatar,2019,176.371
+Qatar,2020,144.411
+Qatar,2021,179.732
+Qatar,2022,235.709
+Qatar,2023,213.003
+Qatar,2024,221.406
+Saudi Arabia,1980,164.54
+Saudi Arabia,1981,184.292
+Saudi Arabia,1982,153.24
+Saudi Arabia,1983,129.181
+Saudi Arabia,1984,119.631
+Saudi Arabia,1985,103.894
+Saudi Arabia,1986,86.886
+Saudi Arabia,1987,85.582
+Saudi Arabia,1988,88.138
+Saudi Arabia,1989,95.217
+Saudi Arabia,1990,117.474
+Saudi Arabia,1991,132.047
+Saudi Arabia,1992,136.905
+Saudi Arabia,1993,132.79
+Saudi Arabia,1994,134.995
+Saudi Arabia,1995,143.152
+Saudi Arabia,1996,158.451
+Saudi Arabia,1997,165.742
+Saudi Arabia,1998,146.776
+Saudi Arabia,1999,161.717
+Saudi Arabia,2000,189.515
+Saudi Arabia,2001,184.138
+Saudi Arabia,2002,189.606
+Saudi Arabia,2003,215.808
+Saudi Arabia,2004,258.742
+Saudi Arabia,2005,328.205
+Saudi Arabia,2006,376.398
+Saudi Arabia,2007,415.687
+Saudi Arabia,2008,519.797
+Saudi Arabia,2009,429.098
+Saudi Arabia,2010,528.207
+Saudi Arabia,2011,676.635
+Saudi Arabia,2012,741.85
+Saudi Arabia,2013,753.864
+Saudi Arabia,2014,766.606
+Saudi Arabia,2015,669.485
+Saudi Arabia,2016,666.0
+Saudi Arabia,2017,714.994
+Saudi Arabia,2018,846.584
+Saudi Arabia,2019,838.565
+Saudi Arabia,2020,734.271
+Saudi Arabia,2021,874.157
+Saudi Arabia,2022,1108.571
+Saudi Arabia,2023,1067.583
+Saudi Arabia,2024,1100.706
+United Arab Emirates,1980,41.725
+United Arab Emirates,1981,46.461
+United Arab Emirates,1982,43.205
+United Arab Emirates,1983,39.588
+United Arab Emirates,1984,39.245
+United Arab Emirates,1985,38.519
+United Arab Emirates,1986,30.526
+United Arab Emirates,1987,33.519
+United Arab Emirates,1988,34.069
+United Arab Emirates,1989,39.325
+United Arab Emirates,1990,50.682
+United Arab Emirates,1991,49.3
+United Arab Emirates,1992,51.952
+United Arab Emirates,1993,52.144
+United Arab Emirates,1994,57.395
+United Arab Emirates,1995,63.432
+United Arab Emirates,1996,72.853
+United Arab Emirates,1997,77.167
+United Arab Emirates,1998,75.304
+United Arab Emirates,1999,84.42
+United Arab Emirates,2000,102.987
+United Arab Emirates,2001,103.312
+United Arab Emirates,2002,109.816
+United Arab Emirates,2003,124.346
+United Arab Emirates,2004,147.812
+United Arab Emirates,2005,180.616
+United Arab Emirates,2006,222.117
+United Arab Emirates,2007,257.883
+United Arab Emirates,2008,315.464
+United Arab Emirates,2009,253.547
+United Arab Emirates,2010,300.189
+United Arab Emirates,2011,360.833
+United Arab Emirates,2012,384.61
+United Arab Emirates,2013,400.219
+United Arab Emirates,2014,414.105
+United Arab Emirates,2015,370.276
+United Arab Emirates,2016,369.255
+United Arab Emirates,2017,390.517
+United Arab Emirates,2018,427.049
+United Arab Emirates,2019,417.99
+United Arab Emirates,2020,349.473
+United Arab Emirates,2021,415.179
+United Arab Emirates,2022,502.732
+United Arab Emirates,2023,514.13
+United Arab Emirates,2024,545.053

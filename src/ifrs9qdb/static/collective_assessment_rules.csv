@@ -1,0 +1,13 @@
+sector,dpd_threshold,rating
+Agriculture Sector,0,QDB 4
+Agriculture Sector,1,QDB 8
+Agriculture Sector,31,QDB 8
+Agriculture Sector,61,QDB 8
+Fisheries Sector,0,QDB 4
+Fisheries Sector,1,QDB 7
+Fisheries Sector,31,QDB 8
+Fisheries Sector,61,QDB 9
+Lifestock Sector,0,QDB 4
+Lifestock Sector,1,QDB 7
+Lifestock Sector,31,QDB 7
+Lifestock Sector,61,QDB 9

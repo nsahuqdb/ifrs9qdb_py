@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ifrs9qdb"
+version = "0.26.0"
+description = "IFRS 9 expected credit loss engine, ETL, analytics and stress testing (QDB)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "Qatar Development Bank", email = "frm@qdb.qa" }]
+dependencies = ["numpy>=1.24", "pandas>=2.0", "pyyaml>=6.0", "scipy>=1.10"]
+
+[project.optional-dependencies]
+excel = ["openpyxl>=3.1", "lxml>=5.0"]
+dev = ["pytest>=7.4", "pytest-cov"]
+
+[project.scripts]
+ifrs9qdb = "ifrs9qdb.__main__:main"
+
+[tool.setuptools.package-data]
+ifrs9qdb = ["static/*.csv", "config/*.yml", "etl/static/*.csv"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

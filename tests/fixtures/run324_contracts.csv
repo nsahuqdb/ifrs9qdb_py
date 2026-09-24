@@ -1,0 +1,13 @@
+cid,scenario,stage,pt,f,portfolio,rating,bucket,onbal,eir,collcov,H,lgd,lic
+602332,stage1_amortising,1,4,1,Business Finance,QDB 4,11,123124.6,0.05,0.0,1,0.45,823.8941
+601758,stage1_amortising,1,4,1,Business Finance,QDB 3,8,193296.22,0.05,0.013262546,1,0.4440318543,588.7252
+605701,stage1_bullet,1,3,1,Business Finance,QDB 4+,10,3713.41,0.043067339,0.0,2,0.45,43.1696
+605753,stage1_bullet,1,3,1,Business Finance,QDB 4-,12,29317.6,0.043067339,0.0,4,0.45,896.8247
+606914,stage2_bullet,2,3,1,Business Finance,QDB 6-,18,447468.85,0.041447368,0.053469257,11,0.4259388343499999,65912.14
+606917,stage2_bullet,2,3,1,Business Finance,QDB 6-,18,483359.24,0.041447368,0.053406878,11,0.4259669049,71203.485
+512507,stage2_lgd_floor,2,4,3,Business Finance,QDB 4+,10,6416298.09,0.04,0.995551081,21,0.225,192270.6989
+512627,stage2_lgd_floor,2,4,3,Business Finance,QDB 5,14,2460421.88,0.035,1.243328238,17,0.225,106313.9592
+609964,stage2_uncollateralised,2,4,1,Business Finance,QDB 4,11,112305.56,0.01,0.0,36,0.45,15916.2124
+551877,stage2_uncollateralised,2,4,3,Business Finance,QDB 4+,10,582360.65,0.05,0.0,36,0.45,52296.0551
+519642,stage2_part_collateralised,2,4,3,Business Finance,QDB 4+,10,1846741.19,0.04,0.076380194,11,0.4156289127,64222.4921
+530079,stage2_part_collateralised,2,4,3,Business Finance,QDB 3,8,290447.62,0.05,0.386840922,5,0.2759215851,1921.8933

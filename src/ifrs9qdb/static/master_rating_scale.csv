@@ -1,0 +1,63 @@
+rating,rating_type,external_equivalent,hierarchy
+QDB 1+,Internal,Aaa,1
+QDB 1,Internal,Aa1,2
+QDB 1-,Internal,Aa2,3
+QDB 2+,Internal,Aa3,4
+QDB 2,Internal,A1,5
+QDB 2-,Internal,A2,6
+QDB 3+,Internal,A3,7
+QDB 3,Internal,Baa1,8
+QDB 3-,Internal,Baa2,9
+QDB 4+,Internal,Baa3,10
+QDB 4,Internal,Ba1,11
+QDB 4-,Internal,Ba2,12
+QDB 5+,Internal,Ba3,13
+QDB 5,Internal,B1,14
+QDB 5-,Internal,B2,15
+QDB 6+,Internal,B3,16
+QDB 6,Internal,Caa1,17
+QDB 6-,Internal,Caa2,18
+QDB 7,Internal,Caa3,19
+QDB 8,Internal,Ca,20
+QDB 9,Internal,C,21
+Aaa,External,Aaa,1
+Aa1,External,Aa1,2
+Aa2,External,Aa2,3
+Aa3,External,Aa3,4
+A1,External,A1,5
+A2,External,A2,6
+A3,External,A3,7
+Baa1,External,Baa1,8
+Baa2,External,Baa2,9
+Baa3,External,Baa3,10
+Ba1,External,Ba1,11
+Ba2,External,Ba2,12
+Ba3,External,Ba3,13
+B1,External,B1,14
+B2,External,B2,15
+B3,External,B3,16
+Caa1,External,Caa1,17
+Caa2,External,Caa2,18
+Caa3,External,Caa3,19
+Ca,External,Ca,20
+C,External,C,21
+AAA,External,Aaa,1
+AA+,External,Aa1,2
+AA,External,Aa2,3
+AA-,External,Aa3,4
+A+,External,A1,5
+A,External,A2,6
+A-,External,A3,7
+BBB+,External,Baa1,8
+BBB,External,Baa2,9
+BBB-,External,Baa3,10
+BB+,External,Ba1,11
+BB,External,Ba2,12
+BB-,External,Ba3,13
+B+,External,B1,14
+B,External,B2,15
+B-,External,B3,16
+CCC+,External,Caa1,17
+CCC,External,Caa2,18
+CCC-,External,Caa3,19
+CC,External,Ca,20
