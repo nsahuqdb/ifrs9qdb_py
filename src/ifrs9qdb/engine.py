@@ -28,6 +28,8 @@ __all__ = [
     "compute_lgd",
     "sum_marginal_ecl",
     "fallback_ead_curve",
+    "resolve_ead_shape",
+    "EAD_FALLBACK_RULES",
     "resolve_ead_curve",
     "months_to_maturity",
     "EclConfig",
@@ -82,6 +84,49 @@ def months_to_maturity(maturity, extract, min_months: int = 3) -> int:
     return max(min_months, int(m))
 
 
+MIN_HORIZON_MONTHS = 3
+
+# Which shape a contract with no supplied schedule amortises on, by
+# (portfolio, payment type). Empirical, and matched against the production LIC
+# run rather than inferred from the payment type alone: an unrecognised
+# combination is a BULLET, which is the conservative reading and the one LIC
+# takes.
+EAD_FALLBACK_DEFAULT = "bullet"
+EAD_FALLBACK_RULES: tuple[tuple[str | None, str, str], ...] = (
+    ("Business Finance", "4", "linear"),
+    ("Business Finance", "3", "bullet"),
+    ("Al Dhameen", "4", "bullet"),
+    ("Tasdeer", "3", "bullet"),
+    ("Off BS", "3", "bullet"),
+    # No portfolio: the payment type decides. Type 4 amortises, which is the
+    # point EY's prose answer got wrong and their own workbook settles -- a
+    # flat curve gives roughly 1.8x the LIC figure on their contract 11.
+    (None, "4", "linear"),
+)
+
+
+def resolve_ead_shape(payment_type, portfolio=None, rules=None,
+                      default: str = EAD_FALLBACK_DEFAULT) -> str:
+    """The amortisation shape for a contract with no supplied curve.
+
+    A rule naming a portfolio wins over one that does not, and anything
+    unmatched falls to ``default``. Resolving on the payment type alone was
+    wrong for Al Dhameen, whose type-4 facilities LIC prices as bullets.
+    """
+    rules = EAD_FALLBACK_RULES if rules is None else rules
+    pt = str(payment_type).strip() if payment_type is not None else ""
+    if pt.endswith(".0"):
+        pt = pt[:-2]
+    pf = str(portfolio).strip() if portfolio is not None else ""
+    for rule_pf, rule_pt, shape in rules:
+        if rule_pf is not None and rule_pf == pf and rule_pt == pt:
+            return shape
+    for rule_pf, rule_pt, shape in rules:
+        if rule_pf is None and rule_pt == pt:
+            return shape
+    return default
+
+
 def fallback_ead_curve(
     on_balance: float,
     months_remaining: int,
@@ -89,12 +134,21 @@ def fallback_ead_curve(
     payment_frequency: int | None = 1,
     deferral: int | None = 0,
     horizon: int | None = None,
+    portfolio: str | None = None,
+    min_horizon_months: int = MIN_HORIZON_MONTHS,
 ) -> np.ndarray:
     """Parametric EAD curve for a contract with no supplied schedule.
 
-    Payment type 3 is a bullet -- the balance is outstanding until maturity.
-    Anything else amortises linearly over the periods remaining after any
-    deferral, stepping on the payment frequency.
+    The shape comes from ``resolve_ead_shape``. A linear contract amortises
+    over the periods remaining after any deferral, stepping on the payment
+    frequency; a bullet stays at the balance to maturity.
+
+    One rule overrides the shape. A facility whose maturity is at or before
+    the extract date has had its remaining term FLOORED to
+    ``min_horizon_months``, and it has no remaining amortisation schedule to
+    run: LIC prices it as a bullet over the floored horizon. Amortising it
+    instead understates the provision by a third on a three-month floor, which
+    is where 50 of the 54 remaining differences against the R report came from.
 
     About 24% of a typical QDB book has no supplied curve, and that includes
     every Off BS, Al Dhameen and Tasdeer facility, so this path is not an edge
@@ -103,8 +157,11 @@ def fallback_ead_curve(
     N = max(1, int(months_remaining))
     H = int(horizon) if horizon is not None else N
     H = max(1, min(H, 600))
-    pt = str(payment_type).strip() if payment_type is not None else "3"
-    if pt in ("3", "3.0", "bullet"):
+
+    shape = resolve_ead_shape(payment_type, portfolio)
+    if N <= int(min_horizon_months):
+        shape = "bullet"
+    if shape == "bullet":
         return np.full(H, float(on_balance), dtype=float)
 
     f = max(1, int(payment_frequency or 1))
@@ -128,6 +185,7 @@ def resolve_ead_curve(
     payment_type=None,
     payment_frequency: int | None = 1,
     deferral: int | None = 0,
+    portfolio: str | None = None,
 ) -> np.ndarray | None:
     """The EAD curve the engine prices against.
 
@@ -143,7 +201,8 @@ def resolve_ead_curve(
         if on_balance is None or not np.isfinite(on_balance):
             return None
         curve = fallback_ead_curve(
-            on_balance, months_remaining, payment_type, payment_frequency, deferral
+            on_balance, months_remaining, payment_type, payment_frequency,
+            deferral, portfolio=portfolio
         )
     if stage == 1:
         curve = curve[: min(12, len(curve))]

@@ -3,6 +3,18 @@
 Every output is compared against the file the R pipeline produced from the
 SAME source extracts, so "done" means identical, not plausible.
 
+**The ECL report now reproduces the R engine exactly.** On both reference
+runs, every contract matches to the cent:
+
+| Run | Contracts | R report | Python | Max abs difference |
+| --- | --- | --- | --- | --- |
+| run_00001 | 6,709 | 2,283,041,268.74 | 2,283,041,268.74 | 0.000000 |
+| run_00002 | 6,481 | 2,193,510,515.24 | 2,193,510,515.24 | 0.000000 |
+
+LGD matches on every contract, and the staging rule disagrees on none. The two
+defects that stood in the way are below, under *Collateral netting* and *The
+EAD fallback*.
+
 ```python
 from ifrs9qdb.etl import reconciliation_report
 print(reconciliation_report("out/", "runs/run_00001/Output"))
@@ -509,10 +521,62 @@ with every signed figure to date. It needs a decision, not a patch.
 
 ## Where the ECL numbers stand
 
-Against the R report: exposure agrees to 0.1% (13.94bn against 13.96bn) and
-Stage 3 counts nearly (274 against 276). ECL and the Stage 1/2 split still
-differ. The StPD half of that gap is now closed; what remains traces to the
-staging inputs, which is the `AccountMaster_1` trailing block above.
+Exact. Both reference runs reproduce to the cent, on every contract, with the
+stage and the LGD agreeing on every row too (the table at the top of this
+file). Getting there took two fixes, each silent and each worth more than a
+percent of the provision.
+
+### Collateral netting — the allocation and the haircut were both missing
+
+The netting formula is
+
+    sum over allocations of
+        CollateralValue x AllocationPercentage x (1 - HaircutGeneral)
+
+joining `AccountCollateralAllocation` to `Collateral` to `CollateralType`. The
+loader summed raw `CollateralValue`: no allocation share, no haircut.
+
+Both factors are large. An allocation is a SHARE of a collateral record,
+commonly a fifth of it. And most QDB collateral types carry
+`HaircutGeneral = 1.00` — corporate cheques, comfort assignments, corporate
+guarantees are worth nothing for provisioning. Summing the raw value credited
+contracts with security they do not have, drove their LGD to the 0.225 floor,
+and understated the provision.
+
+It failed in the quiet direction. Nothing raised, every figure looked
+plausible, and the damage was concentrated where nobody was looking:
+
+| | Before | After |
+| --- | --- | --- |
+| Whole book | −2.56% | −0.05% |
+| Stage 1 | −0.35% | −0.001% |
+| Stage 2 | **−9.65%** | −0.19% |
+| Stage 3 | exact | exact |
+| Contracts whose LGD differed | 981 | **0** |
+
+### The EAD fallback — shape by portfolio, and the maturity floor
+
+Two things were wrong in the parametric curve used by the 24% of the book with
+no supplied schedule.
+
+The shape was resolved from the payment type alone — type 3 bullet, anything
+else linear. LIC resolves it from the portfolio AND the payment type, and
+defaults to bullet. Al Dhameen type 4 is a bullet there, not a straight line.
+
+More consequential: a facility whose maturity is at or before the extract date
+has had its remaining term floored to three months, and it has no remaining
+amortisation schedule to run. LIC prices those as bullets over the floored
+horizon. Amortising them instead charges two thirds of the exposure where LIC
+charges three thirds — a third of the provision on each of them, and it
+accounted for 50 of the last 54 differing contracts.
+
+The EY reconciliation keeps the other half of the rule honest: with no
+portfolio to resolve on, type 4 must still amortise. A flat curve gives
+roughly 1.8x the LIC figure on their contract 11, which is the point their
+prose answer got wrong and their own workbook settles.
+
+Both rules are pinned in `tests/test_collateral_and_ead.py`, along with the
+contract-by-contract equality against the reference report.
 
 ## The analytics layer — ported
 
@@ -569,9 +633,11 @@ apart in a review.
 
 ## Next
 
-1. Re-measure the ECL report now that StPD is exact — the previous figure was
-   taken with the equal-weights StPD underneath it and is not a fair reading.
-2. The `AccountMaster_1` trailing block, which also closes both remaining
-   `CustomerStagingFlag` differences.
-3. The two sign questions above, together, with Risk.
-4. Surface the new analytics in the app.
+1. The `AccountMaster_1` trailing block, which also closes both remaining
+   `CustomerStagingFlag` differences. It no longer affects the ECL — the
+   report is exact — but the input files still differ by those rows.
+2. The two sign questions above, together, with Risk: the external scale's
+   growth-to-PD direction, and the scenario weighting outrunning the PD effect
+   under `auto`.
+3. A second pair of runs, to confirm the exact reproduction holds on a quarter
+   these fixes were not measured against.

@@ -38,6 +38,8 @@ __all__ = [
     "conditional_pd", "staging_threshold", "staging_threshold_sweep",
     "advance_curves", "reprofile_curves", "customer_rows",
     "mev_stress", "MEV_WEIGHT_MODES", "stpd_to_curves",
+    "match_rules", "reprice_rules", "filter_rating_type",
+    "order_by_rating", "scenario_ecl_single_run",
 ]
 
 
@@ -860,3 +862,273 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
         "path": path,
         "stpd": stpd_new,
     }
+
+
+# ------------------------------------------------------------- what-if -----
+def match_rules(report: pd.DataFrame, rules) -> dict:
+    """Assign each contract to at most ONE rule, and name the conflicts.
+
+    Rules do not stack. A contract caught by two of them has no defined
+    answer -- applying both in some order would make the result depend on the
+    order, and applying one silently would hide the other -- so it is excluded
+    from repricing and listed instead. This mirrors the overlay feature's
+    no-stacking rule, and for the same reason: an adjustment nobody can
+    reconstruct is worse than one that was refused.
+
+    Returns ``{assignment, conflicts}``: a Series of rule index or NA per
+    contract, and a frame of the contracts more than one rule claimed.
+    """
+    if report is None or len(report) == 0 or not rules:
+        return {"assignment": pd.Series(dtype="Int64"),
+                "conflicts": pd.DataFrame()}
+
+    hits = pd.DataFrame(
+        {j: rule.matches(report).fillna(False).to_numpy()
+         for j, rule in enumerate(rules)}, index=report.index)
+    n_hit = hits.sum(axis=1)
+
+    assignment = pd.Series(pd.NA, index=report.index, dtype="Int64")
+    single = n_hit == 1
+    if single.any():
+        assignment[single] = hits[single].to_numpy().argmax(axis=1)
+
+    clash = n_hit > 1
+    conflicts = pd.DataFrame()
+    if clash.any():
+        labels = [r.label for r in rules]
+        conflicts = pd.DataFrame({
+            "contract": report.loc[clash, "contract"].to_numpy(),
+            "customer": report.loc[clash, "customer"].to_numpy(),
+            "rules": [" + ".join(labels[j] for j in range(len(rules)) if row[j])
+                      for _, row in hits[clash].iterrows()],
+        })
+    return {"assignment": assignment, "conflicts": conflicts}
+
+
+def reprice_rules(inputs: EngineInputs, report: pd.DataFrame, rules,
+                  cfg: EclConfig | None = None) -> dict:
+    """Apply a set of what-if rules and reprice, rule by rule.
+
+    Both sides are priced through the same ``reprice``, so the baseline and
+    the what-if agree by construction. Taking the baseline from the report's
+    own ECL column instead would reintroduce a difference whenever the loaded
+    report predates the current config -- a difference that reads as the
+    what-if having done something.
+
+    A rule naming a ``pd_scenario`` prices its contracts on that scenario's
+    curves. Those contracts are repriced in their own pass, because a curve
+    set applies to a whole repricing; stitching the passes keeps each
+    contract on the curves its rule asked for.
+    """
+    if inputs is None or not inputs.ok:
+        return {"ok": False,
+                "reason": f"Engine inputs missing: {', '.join(inputs.missing)}"
+                if inputs is not None else "No engine inputs."}
+    if report is None or len(report) == 0 or not rules:
+        return {"ok": False, "reason": "Nothing to reprice."}
+
+    base_cfg = cfg or EclConfig()
+    ing = _ingredients(inputs, report)
+    if len(ing) == 0:
+        return {"ok": False,
+                "reason": "The report could not be matched to the inputs."}
+
+    # Matched on the INGREDIENTS, not on the report. The two are row-aligned
+    # only while every contract id is unique on both sides, and a LIC report
+    # can repeat one -- an investment security held twice. Matching here keeps
+    # the lever masks aligned with what is actually being priced.
+    matched = match_rules(ing, rules)
+    assignment = matched["assignment"].reset_index(drop=True)
+    if assignment.notna().sum() == 0:
+        return {"ok": False, "reason": "No contract matched any rule.",
+                "conflicts": matched["conflicts"]}
+
+    before = reprice(inputs, report, cfg=base_cfg)
+
+    # The levers, built per contract from whichever rule claimed it.
+    stage = ing["stage"].fillna(2).astype(int).to_numpy().copy()
+    rating = ing["rating"].astype(str).to_numpy().copy()
+    onbal = pd.to_numeric(ing["on_balance"], errors="coerce").to_numpy().copy()
+    cnet = pd.to_numeric(ing.get("collateral_net"), errors="coerce").fillna(0.0)
+    cnet = cnet.to_numpy().copy()
+    shift = np.zeros(len(ing))
+    scenario_of = np.array([""] * len(ing), dtype=object)
+
+    for j, rule in enumerate(rules):
+        # Int64 holds pd.NA for the unmatched, and NA has no truth value.
+        sel = assignment.eq(j).fillna(False).to_numpy()
+        if not sel.any():
+            continue
+        if rule.stage_to:
+            stage[sel] = int(rule.stage_to)
+        if rule.rating_notches:
+            for i in np.where(sel)[0]:
+                sc = inputs.scale_for(ing.iloc[i].get("rating_type"))
+                if sc:
+                    rating[i] = sc.notch(rating[i], rule.rating_notches)
+        if rule.collateral_pct != 100:
+            cnet[sel] = cnet[sel] * (rule.collateral_pct / 100.0)
+        if rule.exposure_pct != 100:
+            onbal[sel] = onbal[sel] * (rule.exposure_pct / 100.0)
+        if rule.maturity_years:
+            shift[sel] = rule.maturity_years * 12
+        if rule.pd_scenario:
+            scenario_of[sel] = rule.pd_scenario
+
+    def price(curves=None, mask=None):
+        return reprice(inputs, report, stage=pd.Series(stage),
+                       rating=pd.Series(rating),
+                       on_balance=pd.Series(onbal),
+                       collateral_net=pd.Series(cnet),
+                       maturity_shift_months=pd.Series(shift),
+                       pd_curves=curves, cfg=base_cfg)
+
+    after = price()
+    # Contracts on a scenario's curves get their own pass, stitched back in.
+    from .analytics.model_view import read_scenario_stpd
+    for name in {s for s in scenario_of if s}:
+        curves = read_scenario_stpd(inputs.out_dir, name)
+        if not curves:
+            continue
+        curves = {k: np.asarray(v, dtype=float) for k, v in curves.items()}
+        alt = price(curves)
+        sel = scenario_of == name
+        after.loc[sel, "ecl"] = alt.loc[sel, "ecl"].to_numpy()
+
+    d = before[["contract", "customer", "portfolio", "rating", "stage",
+                "exposure"]].copy()
+    d["ecl_before"] = before["ecl"].to_numpy()
+    d["ecl_after"] = after["ecl"].to_numpy()
+    d["rating_after"] = after["rating_after"].to_numpy()
+    d["stage_after"] = after["stage_after"].to_numpy()
+    d["rule"] = [rules[int(j)].label if pd.notna(j) else ""
+                 for j in assignment.to_numpy()]
+    ok = d["ecl_before"].notna() & d["ecl_after"].notna()
+    priced = d[ok].copy()
+    priced["change"] = priced["ecl_after"] - priced["ecl_before"]
+    touched = priced[priced["rule"] != ""]
+
+    by_rule = (touched.groupby("rule")
+               .agg(contracts=("contract", "size"),
+                    customers=("customer", "nunique"),
+                    exposure=("exposure", "sum"),
+                    before=("ecl_before", "sum"), after=("ecl_after", "sum"))
+               .reset_index())
+    if len(by_rule):
+        by_rule["change"] = by_rule["after"] - by_rule["before"]
+
+    return {
+        "ok": True,
+        "before": float(priced["ecl_before"].sum()),
+        "after": float(priced["ecl_after"].sum()),
+        "delta": float(priced["change"].sum()),
+        "priced": int(ok.sum()),
+        "matched": int(assignment.notna().sum()),
+        "conflicts": matched["conflicts"],
+        "by_rule": by_rule,
+        "movers": customer_rows(touched, n=500),
+        "detail": touched.reindex(
+            touched["change"].abs().sort_values(ascending=False).index),
+    }
+
+
+# -------------------------------------------------------- report helpers ---
+def filter_rating_type(report: pd.DataFrame, inputs: EngineInputs,
+                       rating_type: int) -> pd.DataFrame:
+    """Restrict a report to the portfolios on one rating scale.
+
+    The two scales are different models on different grades. Mixing them in a
+    rating chart puts an agency Aa2 beside a QDB 5 as though they meant the
+    same thing.
+    """
+    if report is None or inputs is None:
+        return report
+    keep = [p for p, t in inputs.rating_type_of_portfolio.items()
+            if t == int(rating_type)]
+    if not keep:
+        return report
+    return report[report["portfolio"].isin(keep)]
+
+
+def order_by_rating(df: pd.DataFrame, col: str, levels) -> pd.DataFrame:
+    """Order a frame by the rating scale's own hierarchy, best first.
+
+    Rows carrying a rating not on the scale are dropped rather than sorted to
+    one end: a grade the scale does not contain has no position on it, and
+    putting it first or last invents one.
+    """
+    if df is None or len(df) == 0 or not levels:
+        return df
+    order = {r: i for i, r in enumerate(levels)}
+    keep = df[df[col].astype(str).isin(order)]
+    if len(keep) == 0:
+        return keep
+    return (keep.assign(_o=keep[col].astype(str).map(order))
+            .sort_values("_o").drop(columns="_o").reset_index(drop=True))
+
+
+def scenario_ecl_single_run(inputs: EngineInputs, report: pd.DataFrame,
+                            run_path, scenarios=None,
+                            cfg: EclConfig | None = None) -> dict:
+    """Price the book under each scenario on its own, from ONE run.
+
+    A run that wrote its five per-scenario reports needs none of this --
+    ``analytics.scenario_ecl_from_outputs`` reads them and cannot disagree
+    with the run. This is for the runs that did not: the PD chain is rebuilt
+    from the run's frozen config with the whole probability mass on one
+    scenario at a time, and the book is repriced on each resulting curve set.
+
+    The weighted figure is deliberately absent. Weighting these back up would
+    invite comparison with the booked number, and the two are not the same
+    calculation -- the run weights its MARGINAL PDs before the curves are
+    built, not its finished provisions.
+    """
+    from .analytics.model_view import config_used
+    from .etl.macro import build_stpd_from_static
+    from .etl.static_ref import load_static_reference
+
+    import yaml
+
+    if inputs is None or not inputs.ok:
+        return {"ok": False,
+                "reason": "The run's engine inputs could not be read."}
+    cu = config_used(run_path)
+    if cu is None:
+        return {"ok": False,
+                "reason": "This run has no frozen config (config_used), so "
+                          "the PD chain cannot be rebuilt."}
+    try:
+        static = load_static_reference(cu["static"])
+        model = yaml.safe_load((cu["config"] / "model.yml").read_text(encoding="utf-8"))
+        model_inputs = yaml.safe_load(
+            (cu["config"] / "model_inputs.yml").read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"ok": False, "reason": f"The frozen config could not be read: {exc}"}
+
+    names = list(static["scenario_severity"]["scenario"])
+    wanted = [s for s in (scenarios or names) if s in names]
+    if not wanted:
+        return {"ok": False, "reason": "None of those scenarios are configured."}
+
+    extract = str(report["extract_date"].dropna().iloc[0]) \
+        if "extract_date" in report.columns and report["extract_date"].notna().any() \
+        else ""
+    base_cfg = cfg or EclConfig()
+    out = {}
+    for name in wanted:
+        one_hot = {s: (1.0 if s == name else 0.0) for s in names}
+        try:
+            stpd = build_stpd_from_static(static, model, model_inputs, extract,
+                                          scenario_weights=one_hot)
+        except Exception as exc:
+            return {"ok": False,
+                    "reason": f"Rebuilding the PD chain for {name} failed: {exc}"}
+        curves = stpd_to_curves(stpd)
+        if not curves:
+            return {"ok": False,
+                    "reason": f"The rebuilt StPD for {name} had no curves."}
+        priced = reprice(inputs, report, pd_curves=curves, cfg=base_cfg)
+        out[name] = float(pd.to_numeric(priced["ecl"], errors="coerce").sum())
+
+    return {"ok": True, "ecl": out, "scenarios": wanted,
+            "rebuilt": True, "weighted": None}

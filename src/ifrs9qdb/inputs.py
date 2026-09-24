@@ -138,7 +138,7 @@ class EngineInputs:
         curve = fallback_ead_curve(
             row.get("on_balance"), int(row.get("months_to_mat") or 3),
             row.get("payment_type"), row.get("payment_frequency"),
-            row.get("deferral"),
+            row.get("deferral"), portfolio=row.get("portfolio"),
         )
         return curve[: min(12, len(curve))] if stage == 1 else curve
 
@@ -220,23 +220,57 @@ def load_engine_inputs(out_dir) -> EngineInputs:
                 ead_curves[c] = g.sort_values("m")["v"].to_numpy()
 
     # ---- collateral net per contract --------------------------------
+    # The netting formula, joining allocation -> collateral -> type:
+    #
+    #     sum over allocations of
+    #         CollateralValue x AllocationPercentage x (1 - HaircutGeneral)
+    #
+    # Both factors matter and both were missing. An allocation is a SHARE of a
+    # collateral record, commonly a fifth of it, and most collateral types at
+    # QDB carry HaircutGeneral = 1.00 -- corporate cheques, comfort
+    # assignments, corporate guarantees are worth nothing for provisioning.
+    # Summing raw CollateralValue therefore credited contracts with collateral
+    # they do not have, drove their LGD to the 0.225 floor, and understated
+    # the Stage 2 provision by 9.7% on Business Finance.
+    ctype = _read(out_dir, "CollateralType.csv")
     collateral_net: dict[str, float] = {}
     if alloc is not None and coll is not None:
-        cval = {}
-        cid = _col(coll, "CollateralId")
+        haircut = {}
+        if ctype is not None:
+            tid = _col(ctype, "CollateralTypeId")
+            hc = pd.to_numeric(_col(ctype, "HaircutGeneral"), errors="coerce")
+            if tid is not None and hc is not None:
+                haircut = {str(a): float(b) for a, b in zip(tid.astype(str), hc)
+                           if pd.notna(b)}
+
         cv = _col(coll, "CollateralValue")
         if cv is None:
             cv = _col(coll, "Value")
+        cid = _col(coll, "CollateralId")
+        ctid = _col(coll, "CollateralTypeId")
+        net_value: dict[str, float] = {}
         if cid is not None and cv is not None:
-            cval = {a: float(b) for a, b in
-                    zip(as_id(cid), pd.to_numeric(cv, errors="coerce"))
-                    if pd.notna(b)}
+            types = (ctid.astype(str) if ctid is not None
+                     else pd.Series([""] * len(coll)))
+            for k, v, t in zip(as_id(cid),
+                               pd.to_numeric(cv, errors="coerce"), types):
+                if pd.isna(v):
+                    continue
+                # An unknown type is treated as UNHAIRCUT, matching the engine:
+                # defaulting to a full haircut would silently write collateral
+                # off whenever the type table gained a row.
+                net_value[k] = float(v) * (1.0 - haircut.get(t, 0.0))
+
         acid = _col(alloc, "ContractId")
         acol = _col(alloc, "CollateralId")
+        apct = pd.to_numeric(_col(alloc, "AllocationPercentage"), errors="coerce")
         if acid is not None and acol is not None:
-            for c, k in zip(as_id(acid), as_id(acol)):
-                if k in cval:
-                    collateral_net[c] = collateral_net.get(c, 0.0) + cval[k]
+            if apct is None:
+                apct = pd.Series([1.0] * len(alloc))
+            for c, k, p in zip(as_id(acid), as_id(acol), apct.fillna(0.0)):
+                if k in net_value:
+                    collateral_net[c] = (collateral_net.get(c, 0.0)
+                                         + net_value[k] * float(p))
 
     # ---- contracts, lending and investments -------------------------
     def contracts_from(df):
@@ -279,5 +313,5 @@ def load_engine_inputs(out_dir) -> EngineInputs:
         ok=True, out_dir=out_dir, contracts=contracts, pd_curves=pd_curves,
         ead_curves=ead_curves, collateral_net=collateral_net, scales=scales,
         rating_type_of_portfolio=rt_of_pf,
-        collateral=coll, alloc=alloc, coll_type=_read(out_dir, "CollateralType.csv"),
+        collateral=coll, alloc=alloc, coll_type=ctype,
     )
