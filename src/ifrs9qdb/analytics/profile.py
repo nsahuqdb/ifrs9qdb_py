@@ -15,6 +15,8 @@ Two conventions run through the whole module and are easy to get wrong:
 """
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -624,3 +626,44 @@ def data_quality_detail(d: pd.DataFrame, n: int = 200) -> dict:
                       .sort_values("exposure", ascending=False)
                       .head(n).reset_index(drop=True))
     return out
+
+
+def customer_lookup(report: pd.DataFrame, customer_ids) -> dict:
+    """Look several customers up at once, and say which were not found.
+
+    Ids arrive pasted from a spreadsheet or an email, so any of commas,
+    semicolons, newlines and spaces separate them. The ones that matched and
+    the ones that did not are BOTH returned: a lookup that quietly drops an
+    unknown id lets somebody conclude a name is not in the book when they
+    simply mistyped it.
+
+    PD and LGD are exposure-weighted across the customer's facilities, which is
+    the only aggregation of them that means anything.
+    """
+    from ..ids import as_id
+
+    if report is None or len(report) == 0 or customer_ids is None:
+        return {}
+    if isinstance(customer_ids, str):
+        raw = customer_ids
+    else:
+        raw = ",".join(str(c) for c in customer_ids)
+    ids = [t for t in re.split(r"[,;\s]+", raw.strip()) if t]
+    if not ids:
+        return {}
+
+    key = as_id(report["customer"]).astype("string")
+    sub = report[key.isin(ids)]
+    if len(sub) == 0:
+        return {"found": pd.DataFrame(), "missing": ids}
+
+    cv = customer_view(sub)
+    expo = sub.groupby("customer")["exposure"].sum().clip(lower=1)
+    for col in ("pd", "lgd"):
+        if col in sub.columns:
+            w = (sub["exposure"] * pd.to_numeric(sub[col], errors="coerce")
+                 .fillna(0)).groupby(sub["customer"]).sum()
+            cv[col] = cv["customer"].map(w / expo)
+    found = cv.sort_values("exposure", ascending=False).reset_index(drop=True)
+    return {"found": found,
+            "missing": [i for i in ids if i not in set(found["customer"])]}

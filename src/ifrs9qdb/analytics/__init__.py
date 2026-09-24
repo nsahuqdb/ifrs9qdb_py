@@ -3,8 +3,13 @@ from .attribution import (  # noqa: F401
     coverage_bridge, ecl_factor_attribution, factor_attribution_diagnosis,
     factor_attribution_exact,
 )
+from .model_view import (  # noqa: F401
+    config_used, mev_forecast_table, mev_weights_table,
+    read_scenario_stpd, scenario_severity, scenario_weights,
+)
 from .profile import (  # noqa: F401
-    classify_stage, collateral_bands, concentration, customer_view,
+    classify_stage, collateral_bands, concentration, customer_lookup,
+    customer_view,
     data_quality, data_quality_detail, dpd_profile, exposure_bands, hhi,
     hhi_band, hhi_equivalent_n, lgd_distribution, lorenz_curve,
     maturity_profile,
@@ -13,7 +18,7 @@ from .profile import (  # noqa: F401
 )
 from .risk import (  # noqa: F401
     collateral_analysis, ead_runoff, lgd_floor_stats, lgd_vs_collateral,
-    pd_profile, report_total, segment_matrix,
+    pd_profile, pd_term_structure, report_total, segment_matrix,
 )
 from .scenarios import (  # noqa: F401
     scenario_comparison, scenario_ecl_from_outputs, scenario_files,

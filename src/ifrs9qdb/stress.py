@@ -36,6 +36,7 @@ __all__ = [
     "reverse_stress", "reverse_stress_all", "roll_forward", "tornado",
     "TORNADO_LEVERS", "REVERSE_LEVERS", "stretch_curve", "advance_curve",
     "conditional_pd", "staging_threshold", "staging_threshold_sweep",
+    "advance_curves", "reprofile_curves", "customer_rows",
 ]
 
 
@@ -624,3 +625,76 @@ def staging_threshold_sweep(inputs, report,
         out[f"vs_{reference:g}"] = out["ecl"] - b
         out[f"vs_{reference:g}_pct"] = 100 * (out["ecl"] - b) / max(abs(b), 1.0)
     return out
+
+
+# ---------------------------------------------------- curve bulk edits -----
+def advance_curves(curves: dict, contracts, months: int) -> dict:
+    """Roll a set of EAD curves forward by ``months``.
+
+    A new dict: the caller's curves are the run's own and repricing must not
+    mutate them. That bug is silent -- the first stress looks right and every
+    one after it compounds.
+    """
+    if not curves or months is None or months <= 0:
+        return curves
+    out = dict(curves)
+    for cid in contracts:
+        cur = out.get(str(cid))
+        if cur is None or len(cur) == 0:
+            continue
+        out[str(cid)] = advance_curve(cur, int(round(months)))
+    return out
+
+
+def reprofile_curves(curves: dict, contracts, shift_months: float) -> dict:
+    """Stretch or compress a set of EAD curves by ``shift_months``.
+
+    A term extension, expressed on the curve rather than on the horizon: the
+    balance keeps its own shape -- deferral periods, steps, expected drawdowns
+    -- and simply runs off over a different number of months.
+    """
+    if not curves or not shift_months:
+        return curves
+    out = dict(curves)
+    for cid in contracts:
+        cur = out.get(str(cid))
+        if cur is None or len(cur) == 0:
+            continue
+        out[str(cid)] = stretch_curve(cur, max(1, len(cur) + int(round(shift_months))))
+    return out
+
+
+def customer_rows(rows: pd.DataFrame, n: int | None = 100) -> pd.DataFrame:
+    """Roll a repricing detail up to one row per customer.
+
+    Attributes that vary within a customer collapse to ``"multiple"`` rather
+    than to the first value: a customer with facilities in two portfolios is
+    not in the first one, and picking it would put the whole relationship under
+    the wrong heading. Stage takes the WORST facility, which is how staging
+    works.
+
+    Largest absolute move first, capped at ``n`` -- pass None for all of them.
+    """
+    if rows is None or len(rows) == 0:
+        return pd.DataFrame()
+
+    def one(s: pd.Series) -> str:
+        u = s.dropna().unique()
+        return str(u[0]) if len(u) == 1 else "multiple"
+
+    agg = {"facilities": ("contract", "size"), "exposure": ("exposure", "sum"),
+           "ecl_before": ("ecl_before", "sum"), "ecl_after": ("ecl_after", "sum")}
+    for col, how in (("portfolio", one), ("rating", one),
+                     ("rating_after", one), ("stage", "max"),
+                     ("stage_after", "max")):
+        if col in rows.columns:
+            agg[col] = (col, how)
+
+    out = rows.groupby("customer").agg(**agg).reset_index()
+    out["change"] = out["ecl_after"] - out["ecl_before"]
+    e = out["exposure"].where(out["exposure"] > 0)
+    out["coverage_before"] = 100 * out["ecl_before"] / e
+    out["coverage_after"] = 100 * out["ecl_after"] / e
+    out = out.reindex(out["change"].abs().sort_values(ascending=False).index)
+    out = out.reset_index(drop=True)
+    return out if n is None else out.head(int(n))

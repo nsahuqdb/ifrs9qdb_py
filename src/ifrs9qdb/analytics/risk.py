@@ -15,7 +15,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-__all__ = ["report_total", "pd_profile", "lgd_floor_stats", "lgd_vs_collateral",
+__all__ = ["report_total", "pd_profile", "pd_term_structure",
+           "lgd_floor_stats", "lgd_vs_collateral",
            "collateral_analysis", "ead_runoff", "segment_matrix"]
 
 _PD_BY = ("stage", "portfolio", "rating", "account_type")
@@ -249,3 +250,34 @@ def segment_matrix(d: pd.DataFrame, rows: str = "portfolio",
     else:
         g["value"] = g[value]
     return g[["row", "col", "value", "exposure", "ecl", "contracts"]]
+
+
+def pd_term_structure(inputs, portfolio: str | None = None,
+                      max_month: int = 120) -> pd.DataFrame:
+    """The cumulative and marginal PD curves a run priced on.
+
+    Both, because they answer different questions. The cumulative curve is what
+    the engine multiplies through; the marginal one is where a broken term
+    structure shows -- a step, a flat stretch, a month where the marginal PD
+    goes negative because the curve was built by interpolating the wrong way.
+
+    In percent, since that is how a PD curve is read and discussed.
+    """
+    curves = getattr(inputs, "pd_curves", None) if inputs is not None else None
+    if not curves:
+        return pd.DataFrame()
+    keys = list(curves)
+    if portfolio:
+        keys = [k for k in keys if k.startswith(f"{portfolio}|")]
+    rows = []
+    for k in keys:
+        v = np.asarray(curves[k], dtype=float)
+        n = min(len(v) - 1, int(max_month))
+        if n < 1:
+            continue
+        rows.append(pd.DataFrame({
+            "curve": k, "month": np.arange(1, n + 1),
+            "cum_pd": 100 * v[1:n + 1],
+            "marginal_pd": 100 * np.diff(v[:n + 1]),
+        }))
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()

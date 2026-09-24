@@ -184,3 +184,70 @@ class TestSegmentMatrix:
 
     def test_a_missing_column_is_empty_rather_than_a_crash(self):
         assert len(segment_matrix(synthetic(), rows="sector")) == 0
+
+
+class TestPdTermStructure:
+    @needs_inputs
+    def test_the_curves_only_ever_climb(self, inputs):
+        """A negative marginal PD means the term structure was interpolated
+        the wrong way -- the curve still looks plausible plotted."""
+        from ifrs9qdb.analytics import pd_term_structure
+        t = pd_term_structure(inputs, max_month=60)
+        assert len(t) > 0
+        assert t["marginal_pd"].min() >= -1e-9
+        assert t["cum_pd"].max() <= 100 + 1e-9
+
+    @needs_inputs
+    def test_the_cumulative_curve_is_the_running_sum_of_the_marginal(self, inputs):
+        from ifrs9qdb.analytics import pd_term_structure
+        t = pd_term_structure(inputs, max_month=36)
+        for _, g in t.groupby("curve"):
+            g = g.sort_values("month")
+            assert g["marginal_pd"].cumsum().iloc[-1] == pytest.approx(
+                g["cum_pd"].iloc[-1], abs=1e-9)
+            break
+
+    @needs_inputs
+    def test_a_portfolio_filter_selects_only_its_curves(self, inputs):
+        from ifrs9qdb.analytics import pd_term_structure
+        t = pd_term_structure(inputs, "Business Finance", max_month=12)
+        assert len(t) > 0
+        assert t["curve"].str.startswith("Business Finance|").all()
+        assert len(pd_term_structure(inputs, "No Such Portfolio")) == 0
+
+
+class TestCustomerLookup:
+    @real_only
+    def test_pasted_ids_separated_any_way_are_all_found(self, rep):
+        """They arrive from a spreadsheet or an email, not a form."""
+        from ifrs9qdb.analytics import customer_lookup
+        ids = list(rep["customer"].dropna().unique()[:3])
+        r = customer_lookup(rep, f"{ids[0]}, {ids[1]}\n {ids[2]} ;")
+        assert set(r["found"]["customer"]) == set(ids)
+        assert r["missing"] == []
+
+    @real_only
+    def test_an_id_that_is_not_there_is_reported_not_dropped(self, rep):
+        """Silently dropping it reads as "this customer has no exposure"."""
+        from ifrs9qdb.analytics import customer_lookup
+        real = str(rep["customer"].dropna().iloc[0])
+        r = customer_lookup(rep, [real, "not-a-customer"])
+        assert r["missing"] == ["not-a-customer"]
+        assert len(r["found"]) == 1
+
+    @real_only
+    def test_pd_and_lgd_are_exposure_weighted(self, rep):
+        from ifrs9qdb.analytics import customer_lookup
+        multi = (rep.groupby("customer").size().sort_values(ascending=False)
+                 .index[0])
+        r = customer_lookup(rep, [multi])
+        sub = rep[rep["customer"] == multi]
+        expected = ((sub["exposure"] * sub["pd"].fillna(0)).sum()
+                    / max(sub["exposure"].sum(), 1))
+        assert r["found"]["pd"].iloc[0] == pytest.approx(expected)
+
+    def test_nothing_asked_for_is_nothing_returned(self):
+        from ifrs9qdb.analytics import customer_lookup
+        assert customer_lookup(synthetic(), "") == {}
+        assert customer_lookup(synthetic(), None) == {}
+        assert customer_lookup(None, "A") == {}
