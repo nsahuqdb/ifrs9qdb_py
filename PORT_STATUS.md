@@ -317,6 +317,33 @@ than compounded (otherwise the order of application decides the provision);
 and the approval trail is append-only, so an overlay rejected and later
 approved reads as exactly that.
 
+## Reconciliation — which rows differ, not just which files
+
+`compare_outputs` said which files and columns differed. That is enough to
+know there is a problem and never enough to fix one: the next question is
+always "which rows, and what do they hold?".
+
+`dump_mismatches` answers it, writing up to three files per output:
+
+    <name>_unmatched_actual.csv      keys produced here the reference lacks
+    <name>_unmatched_reference.csv   the other way round
+    <name>_value_diffs.csv           keys in both, values differing, with the
+                                     two values side by side
+
+Only files with a natural key are dumped. Without one the rows can only be
+lined up positionally, and a positional "difference" on a file written in a
+different order is noise that buries the real ones. The key registry was also
+four files short of the R's — `FxRate`, `PortfolioRatingType`, `RatingTypes`
+and `CollateralType` were being compared positionally.
+
+`write_reconciliation_markdown` writes the same comparison as a document, for
+a reviewer rather than a console.
+
+Two things the tests pin: ids are compared as TEXT, so a file written in a
+different order reconciles rather than reporting every row as changed; and a
+run reconciles against itself across all 24 files, which is the check that the
+comparison is not simply reporting everything as different.
+
 ## Reading the extracts — complete
 
 All twelve read. Format is detected from the file's bytes, not its extension:
@@ -495,5 +522,4 @@ staging inputs, which is the `AccountMaster_1` trailing block above.
    `CustomerStagingFlag` differences.
 3. The governance surface. Calculator versions, the code fingerprint, input
    acquisition, maker-checker and config snapshots are now ported (below).
-4. Reconciliation and the analytics layer are ported in part and are the
-   largest remaining gaps by line count.
+4. The analytics layer is the largest remaining gap by line count.

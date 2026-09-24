@@ -125,6 +125,10 @@ KEYS = {
     "StPD.csv": ["PortfolioCode", "PDBucketDim1", "MonthLifetime"],
     "Ratings.csv": ["Rating"],
     "Portfolios.csv": ["PortfolioCode"],
+    "RatingTypes.csv": ["RatingType"],
+    "PortfolioRatingType.csv": ["PortfolioCode", "RatingType"],
+    "FxRate.csv": ["CurrencyCode"],
+    "CollateralType.csv": ["CollateralTypeId"],
 }
 
 
@@ -164,3 +168,194 @@ def reconciliation_report(python_dir, reference_dir) -> str:
             note = "not produced yet"
         lines.append(f"  {mark}{r.file:<36}{note}")
     return "\n".join(lines)
+
+
+# ===========================================================================
+# Investigating a difference.
+#
+# compare_outputs says WHICH files and columns differ. That is enough to know
+# there is a problem and never enough to fix one: the next question is always
+# "which rows, and what do they hold?". These write those rows out so they can
+# be opened side by side.
+# ===========================================================================
+
+def _read_text(p: Path) -> pd.DataFrame:
+    """Read as text, for the same reason compare_file does.
+
+    Contract ids are numeric-looking KEYS; inferring them turns them into
+    floats and every id then compares unequal.
+    """
+    df = pd.read_csv(p, dtype=str, keep_default_na=False, low_memory=False)
+    return df.loc[:, [c for c in df.columns if not str(c).startswith("Unnamed:")]]
+
+
+def _numeric_enough(a: pd.Series, b: pd.Series) -> bool:
+    an, bn = pd.to_numeric(a, errors="coerce"), pd.to_numeric(b, errors="coerce")
+    n = max(len(a), 1)
+    return an.notna().sum() > 0.9 * n and bn.notna().sum() > 0.9 * n
+
+
+def dump_mismatches(python_dir, reference_dir, out_dir,
+                    tol: float = DEFAULT_TOL, files=None) -> pd.DataFrame:
+    """Write the rows that differ, so a difference can be looked at.
+
+    Up to three files per output that has anything to report:
+
+        <name>_unmatched_actual.csv      keys produced here that the reference
+                                         does not have
+        <name>_unmatched_reference.csv   the other way round
+        <name>_value_diffs.csv           keys in both, values differing, with
+                                         the two values side by side
+
+    Only files with a natural key are dumped. Without one the rows can only be
+    lined up positionally, and a positional "difference" on a file written in
+    a different order is noise that buries the real ones.
+    """
+    python_dir, reference_dir = Path(python_dir), Path(reference_dir)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    written = []
+    names = files or sorted(p.name for p in reference_dir.glob("*.csv"))
+    for name in names:
+        if name.startswith("FinalEclReport"):
+            continue
+        key = KEYS.get(name)
+        a_path, b_path = python_dir / name, reference_dir / name
+        if not key or not a_path.is_file() or not b_path.is_file():
+            continue
+        try:
+            a, b = _read_text(a_path), _read_text(b_path)
+        except Exception as exc:
+            written.append({"file": name, "kind": "unreadable", "rows": 0,
+                            "path": "", "note": f"{type(exc).__name__}: {exc}"})
+            continue
+        if any(k not in a.columns or k not in b.columns for k in key):
+            continue
+
+        stem = name[:-4] if name.endswith(".csv") else name
+        sep = "\u0001"
+        ka = a[key].astype(str).agg(sep.join, axis=1)
+        kb = b[key].astype(str).agg(sep.join, axis=1)
+        a = a.assign(_k=ka)
+        b = b.assign(_k=kb)
+
+        only_a = a[~a["_k"].isin(set(kb))]
+        only_b = b[~b["_k"].isin(set(ka))]
+        for frame, kind in ((only_a, "unmatched_actual"),
+                            (only_b, "unmatched_reference")):
+            if len(frame):
+                p = out / f"{stem}_{kind}.csv"
+                frame.drop(columns=["_k"]).to_csv(p, index=False, na_rep="")
+                written.append({"file": name, "kind": kind, "rows": len(frame),
+                                "path": str(p), "note": ""})
+
+        am = a[a["_k"].isin(set(kb))].drop_duplicates("_k").set_index("_k")
+        bm = b[b["_k"].isin(set(ka))].drop_duplicates("_k").set_index("_k")
+        common = [c for c in bm.columns if c in am.columns and c not in key]
+        if not len(am) or not common:
+            continue
+        bm = bm.reindex(am.index)
+
+        diff_mask = pd.Series(False, index=am.index)
+        differing_cols = []
+        for c in common:
+            x, y = am[c], bm[c]
+            if _numeric_enough(x, y):
+                xn = pd.to_numeric(x, errors="coerce").fillna(0.0)
+                yn = pd.to_numeric(y, errors="coerce").fillna(0.0)
+                scale = yn.abs().clip(lower=1.0)
+                col_diff = ((xn - yn).abs() / scale) > tol
+            else:
+                col_diff = x.fillna("").astype(str) != y.fillna("").astype(str)
+            if col_diff.any():
+                differing_cols.append(c)
+                diff_mask |= col_diff
+
+        if not diff_mask.any():
+            continue
+        rows = am.index[diff_mask]
+        side = pd.DataFrame(index=range(len(rows)))
+        for i, k in enumerate(key):
+            side[k] = [r.split(sep)[i] for r in rows]
+        for c in differing_cols:
+            side[f"{c} (python)"] = am.loc[rows, c].to_numpy()
+            side[f"{c} (reference)"] = bm.loc[rows, c].to_numpy()
+        p = out / f"{stem}_value_diffs.csv"
+        side.to_csv(p, index=False, na_rep="")
+        written.append({"file": name, "kind": "value_diffs", "rows": len(side),
+                        "path": str(p),
+                        "note": f"{len(differing_cols)} column(s): "
+                                + ", ".join(differing_cols[:5])})
+
+    cols = ["file", "kind", "rows", "path", "note"]
+    if not written:
+        return pd.DataFrame({c: pd.Series(dtype="object") for c in cols})
+    return pd.DataFrame(written, columns=cols)
+
+
+def write_reconciliation_markdown(python_dir, reference_dir, path,
+                                  tol: float = DEFAULT_TOL) -> Path:
+    """The comparison as a document, for a reviewer rather than a console."""
+    import datetime as _dt
+
+    df = compare_outputs(python_dir, reference_dir, tol=tol)
+    matched = df[df["status"] == "match"] if len(df) else df
+    lines = [
+        "# Reconciliation",
+        f"Generated: {_dt.datetime.now().astimezone():%Y-%m-%d %H:%M:%S %z}",
+        "",
+        f"Produced: `{python_dir}`",
+        f"Reference: `{reference_dir}`",
+        "",
+        f"**{len(matched)} of {len(df)} files match.**",
+        "",
+        "| File | Status | Rows (produced) | Rows (reference) | Columns differing |",
+        "|---|---|---:|---:|---:|",
+    ]
+    def _cell(v) -> str:
+        if v is None or (isinstance(v, float) and v != v):
+            return ""
+        return f"{int(v):,}" if isinstance(v, (int, float)) else str(v)
+
+    for _, r in df.iterrows():
+        lines.append(
+            f"| {r['file']} | {r['status']} | "
+            f"{_cell(r.get('rows_python'))} | {_cell(r.get('rows_r'))} | "
+            f"{_cell(r.get('columns_differing'))} |")
+
+    def _listy(v):
+        """A cell that is absent for THIS row reads back as NaN, not as [].
+
+        pandas fills a ragged column with NaN, so a file that reported no
+        detail gives a float here and iterating it raises. Everything that
+        walks these cells goes through this.
+        """
+        if isinstance(v, (list, tuple)):
+            return list(v)
+        return []
+
+    def _texty(v) -> str:
+        return "" if v is None or (isinstance(v, float) and v != v) else str(v)
+
+    bad = df[df["status"] != "match"] if len(df) else df
+    if len(bad):
+        lines += ["", "## What differs", ""]
+        for _, r in bad.iterrows():
+            lines.append(f"### {r['file']} — {r['status']}")
+            note = _texty(r.get("note"))
+            if note:
+                lines.append(f"- {note}")
+            for m in _listy(r.get("detail")):
+                lines.append(f"- `{m['column']}`: {m['differing_rows']:,} rows")
+            extra, missing = _listy(r.get("extra_columns")), _listy(
+                r.get("missing_columns"))
+            if extra:
+                lines.append("- only in the produced file: " + ", ".join(extra))
+            if missing:
+                lines.append("- only in the reference: " + ", ".join(missing))
+            lines.append("")
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p

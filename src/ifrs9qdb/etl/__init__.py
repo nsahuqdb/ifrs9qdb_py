@@ -14,7 +14,9 @@ from .report import (REPORT_COLUMNS, build_final_ecl_report,  # noqa: F401
                      classify_stage_report)
 from .static_ref import StaticReference, load_static_reference  # noqa: F401
 from .pipeline import PENDING, PRODUCED, RunResult, next_run_id, run_etl  # noqa: F401
-from .reconcile import compare_file, compare_outputs, reconciliation_report  # noqa: F401
+from .reconcile import (KEYS, compare_file, compare_outputs,  # noqa: F401
+                        dump_mismatches, reconciliation_report,
+                        write_reconciliation_markdown)
 from .transform import (OUTPUT_SPECS, build_ead_curves,  # noqa: F401
                         transform_allocation, transform_collateral,
                         transform_customer_master, transform_origination,

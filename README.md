@@ -76,7 +76,8 @@ src/ifrs9qdb/
     macro         the PD chain: MEVs to scaling factors to StPD
     report        FinalEclReport
     pipeline      run_etl end to end, with a manifest
-    reconcile     compare a produced run against a reference
+    reconcile     compare a produced run against a reference, and
+                  write out the rows that differ
   analytics/      walk, staging, concentration, data quality, profiles
   stress.py       what-if, packages, reverse stress, roll-forward
   validation/     114 checks with the R engine's ids, plus 15 pre-flight
@@ -103,7 +104,8 @@ The fixtures under `tests/fixtures/` ship with the repository, so the suite
 means something on a fresh clone with nothing configured:
 
 ```bash
-pytest -q          # 297 passed, 74 skipped
+pytest             # 310 passed, 74 skipped (about 3 minutes;
+                   #   the reconciliation tests read real runs)
 ```
 
 The reconciliation tests need a real run, and a real run is real portfolio
