@@ -169,3 +169,26 @@ class TestReportHelpers:
         d = pd.DataFrame({"rating": ["X"], "ecl": [1.0]})
         assert order_by_rating(d, "rating", None) is d
         assert len(order_by_rating(d, "rating", ["QDB 1"])) == 0
+
+
+class TestDuplicateContractIds:
+    """A contract id is not unique in a LIC book.
+
+    An investment security held in two positions appears twice in the report
+    AND twice in the account master. Joining them on the id squares that: two
+    rows against two rows is four, and the security gets priced twice in every
+    repriced total. The July book has one.
+    """
+
+    @needs_inputs
+    def test_the_ingredients_have_one_row_per_report_row(self, inputs, rep):
+        from ifrs9qdb.stress import _ingredients
+        assert len(_ingredients(inputs, rep)) == len(rep)
+
+    @needs_inputs
+    def test_a_duplicated_id_does_not_get_priced_twice(self, inputs, rep):
+        from ifrs9qdb.stress import _ingredients, reprice
+
+        doubled = pd.concat([rep, rep.iloc[[0]]], ignore_index=True)
+        assert len(_ingredients(inputs, doubled)) == len(doubled)
+        assert len(reprice(inputs, doubled)) == len(doubled)

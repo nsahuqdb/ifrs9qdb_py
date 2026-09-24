@@ -160,8 +160,19 @@ def _ingredients(inputs: EngineInputs, report: pd.DataFrame) -> pd.DataFrame:
                         "collcov", "dpd", "watchlist", "restructured", "local2",
                         "local3", "local4", "local5", "local6", "default_flag",
                         "insolvency") if c in report.columns]
-    m = report[cols].merge(inputs.contracts, on="contract", how="left")
-    return m
+    # The account master is de-duplicated before the join. A contract id is not
+    # unique in a LIC book -- an investment security held in two positions
+    # appears in AccountMaster twice, and in the report twice -- and a plain
+    # merge squares that: two report rows against two master rows is FOUR, so
+    # the security was priced twice and every repriced total carried it twice.
+    # De-duplicating the right side keeps one row per report row, which is what
+    # a repricing is. The second position then prices on the first's balance;
+    # that is a known limitation, and the alternative would be to pair them by
+    # an order the files do not guarantee.
+    facts = inputs.contracts
+    if len(facts) and facts["contract"].duplicated().any():
+        facts = facts.drop_duplicates("contract", keep="first")
+    return report[cols].merge(facts, on="contract", how="left")
 
 
 def reprice(

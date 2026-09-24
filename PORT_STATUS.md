@@ -578,6 +578,23 @@ prose answer got wrong and their own workbook settles.
 Both rules are pinned in `tests/test_collateral_and_ead.py`, along with the
 contract-by-contract equality against the reference report.
 
+### A contract id is not unique
+
+The October book holds one investment security in two positions, so
+`XS2908723328` appears twice in the report AND twice in `AccountMaster`. Three
+places assumed the id was a key, and each failed differently:
+
+* the overlay writer raised `InvalidIndexError` on the lookup, and would have
+  given both rows the same figure had it not — it now aligns by row;
+* the repricing join squared it, two rows against two rows being four, so the
+  security was priced twice in every stress and what-if total — the account
+  master is now de-duplicated before the join;
+* a parity test compared through a merge, which fanned the comparison out —
+  it now compares row by row.
+
+None of them errored in a way anybody would have noticed on a book without a
+repeated id, which is most books.
+
 ## The analytics layer — ported
 
 The R package's analytics are now matched function for function, in six
