@@ -90,6 +90,12 @@ class EngineInputs:
     collateral_net: dict[str, float] = field(default_factory=dict)
     scales: dict[int, RatingScale] = field(default_factory=dict)
     rating_type_of_portfolio: dict[str, int] = field(default_factory=dict)
+    # The raw collateral tables, kept beside the netted figure. The net is what
+    # the engine prices with; these are what answers "netted down from what,
+    # and did every allocation find a record".
+    collateral: pd.DataFrame | None = None
+    alloc: pd.DataFrame | None = None
+    coll_type: pd.DataFrame | None = None
 
     # -- lookups -------------------------------------------------------
     def scale_for(self, rating_type) -> RatingScale | None:
@@ -273,4 +279,5 @@ def load_engine_inputs(out_dir) -> EngineInputs:
         ok=True, out_dir=out_dir, contracts=contracts, pd_curves=pd_curves,
         ead_curves=ead_curves, collateral_net=collateral_net, scales=scales,
         rating_type_of_portfolio=rt_of_pf,
+        collateral=coll, alloc=alloc, coll_type=_read(out_dir, "CollateralType.csv"),
     )

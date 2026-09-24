@@ -20,7 +20,8 @@ portfolio. Both end in the same repricing.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path
 from typing import Iterable
 
 import numpy as np
@@ -33,7 +34,8 @@ from .inputs import EngineInputs
 __all__ = [
     "StressSpec", "Rule", "reprice", "apply_stress", "compare_packages",
     "reverse_stress", "reverse_stress_all", "roll_forward", "tornado",
-    "TORNADO_LEVERS", "stretch_curve", "advance_curve", "conditional_pd",
+    "TORNADO_LEVERS", "REVERSE_LEVERS", "stretch_curve", "advance_curve",
+    "conditional_pd", "staging_threshold", "staging_threshold_sweep",
 ]
 
 
@@ -556,4 +558,69 @@ def tornado(inputs, report, base: StressSpec | None = None,
     if len(out):
         out = out.reindex(out["change"].abs().sort_values(ascending=False).index)
     out.attrs["base"] = base_prov
+    return out
+
+
+# ------------------------------------------------------ staging policy -----
+def staging_threshold(out_dir, default: float = 60) -> float:
+    """The DPD threshold the run actually used.
+
+    A run freezes its staging policy beside its outputs. Sweeping around a
+    hardcoded 60 when the run used something else compares the book against a
+    policy nobody applied.
+    """
+    if out_dir is None:
+        return default
+    p = Path(out_dir)
+    f = p / "staging_thresholds.csv"
+    if not f.is_file():
+        f = p / "Output" / "staging_thresholds.csv"
+    if not f.is_file():
+        return default
+    try:
+        d = pd.read_csv(f)
+    except Exception:
+        return default
+    if not {"key", "value"} <= set(d.columns):
+        return default
+    hit = d.loc[d["key"] == "dpd_stage2_threshold_days", "value"]
+    if len(hit) == 0:
+        return default
+    v = pd.to_numeric(hit.iloc[0], errors="coerce")
+    return default if pd.isna(v) else float(v)
+
+
+def staging_threshold_sweep(inputs, report,
+                            thresholds=(0, 15, 30, 45, 60, 75, 90),
+                            base: StressSpec | None = None,
+                            reference: float = 60,
+                            cfg: EclConfig | None = None) -> pd.DataFrame:
+    """Reprice the book at each candidate Stage 2 DPD threshold.
+
+    The curve this draws is rarely straight: most of the book is staged by
+    watchlist, restructuring and contagion rather than by days past due, so
+    lowering the threshold moves far less than people expect. Showing that is
+    the point -- it is the difference between a policy debate and an argument
+    about a number nobody has tested.
+
+    Everything except the threshold is held at ``base``, so each row differs
+    from its neighbours in exactly one thing.
+    """
+    rows = []
+    for t in thresholds:
+        spec = replace(base or StressSpec(), dpd_threshold=float(t),
+                       name=f"DPD > {t:g}")
+        r = apply_stress(inputs, report, spec, cfg)
+        if not r.get("ok"):
+            continue
+        rows.append({"threshold": float(t), "ecl": r["after"],
+                     "moved": r["moved"], "customers_moved": r["customers_moved"]})
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    ref = out.loc[out["threshold"] == float(reference), "ecl"]
+    if len(ref) == 1:
+        b = float(ref.iloc[0])
+        out[f"vs_{reference:g}"] = out["ecl"] - b
+        out[f"vs_{reference:g}_pct"] = 100 * (out["ecl"] - b) / max(abs(b), 1.0)
     return out

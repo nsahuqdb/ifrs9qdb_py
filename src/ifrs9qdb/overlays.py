@@ -557,25 +557,37 @@ def apply_overlay_to_run(run_path, bundle: dict) -> dict:
                 "overlay_id": bundle.get("id")}
 
     adjusted = res["report"]
-    by_contract = adjusted.set_index(adjusted["contract"].astype(str))
+    out = lic.copy().reset_index(drop=True)
 
-    out = lic.copy()
-    key = out[LIC_COLUMNS["contract"]].astype(str)
+    # Align by ROW, not by contract id. A contract id is not unique in a LIC
+    # report -- an investment security held in two portfolios appears twice, and
+    # the July book has one -- so a lookup keyed on it raises on the duplicate
+    # and, worse, would give both rows the same figure if it did not. The
+    # normalised frame is this frame minus the rows with no contract id at all,
+    # in the same order, which is an alignment that holds whatever the ids do.
     from .ids import as_id
-    key = as_id(key)
+    key = as_id(out[LIC_COLUMNS["contract"]]).astype("string")
+    kept = key.notna() & (key.str.len() > 0)
+    if int(kept.sum()) != len(adjusted):
+        raise RuntimeError(
+            f"overlay rows do not line up with the report: {len(adjusted)} "
+            f"adjusted against {int(kept.sum())} identified rows in {src.name}")
+    rows = out.index[kept.to_numpy()]
 
-    def pull(col):
-        return key.map(by_contract[col]).astype(float).fillna(0.0)
+    def pull(col, fill=0.0):
+        v = pd.Series(fill, index=out.index, dtype=object)
+        v.loc[rows] = adjusted[col].to_numpy()
+        return v
 
-    model = pull("ecl_model")
-    amount = pull("overlay_amount")
+    model = pd.to_numeric(pull("ecl_model"), errors="coerce").fillna(0.0)
+    amount = pd.to_numeric(pull("overlay_amount"), errors="coerce").fillna(0.0)
     out[LIC_COLUMNS["ecl_model"]] = model
     out[LIC_COLUMNS["overlay_amount"]] = amount
     out[LIC_COLUMNS["ecl_final"]] = model + amount
     out[LIC_COLUMNS["ecl"]] = model + amount
     if LIC_COLUMNS["overlay_id"] in out.columns:
-        out[LIC_COLUMNS["overlay_id"]] = key.map(
-            by_contract["overlay_id"]).fillna("")
+        out[LIC_COLUMNS["overlay_id"]] = \
+            pull("overlay_id", "").astype("string").fillna("")
 
     idsafe = _id_safe(bundle.get("id"))
     report_path = out_dir / f"FinalEclReport_overlay_{idsafe}.csv"

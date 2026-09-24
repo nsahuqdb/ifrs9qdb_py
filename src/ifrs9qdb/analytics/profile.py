@@ -538,12 +538,14 @@ def lgd_distribution(d: pd.DataFrame, bins: int = 16) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------- quality -----
-def data_quality(d: pd.DataFrame) -> pd.DataFrame:
-    """Conditions that silently distort a provision. Reported, never corrected."""
-    if d is None or len(d) == 0:
-        return pd.DataFrame()
-    n = len(d)
-    checks = [
+def _quality_checks(d: pd.DataFrame) -> list[tuple]:
+    """The checks themselves: (label, mask, severity, note).
+
+    One list, read by both the summary and the detail. Written twice they
+    drift, and a summary that counts one thing while the drill-down lists
+    another is worse than either alone.
+    """
+    return [
         ("Exposure but zero ECL",
          (d["exposure"] > 0) & (d["ecl"] == 0) & (d["stage"] != 3), "warn",
          "Stage 1 or 2 with a balance but no provision - usually a missing PD "
@@ -571,6 +573,14 @@ def data_quality(d: pd.DataFrame) -> pd.DataFrame:
          d["mob"].notna() & ((d["mob"] < 0) | (d["mob"] > 1200)), "error",
          "A months-on-book outside a sensible range points at a bad open date."),
     ]
+
+
+def data_quality(d: pd.DataFrame) -> pd.DataFrame:
+    """Conditions that silently distort a provision. Reported, never corrected."""
+    if d is None or len(d) == 0:
+        return pd.DataFrame()
+    n = len(d)
+    checks = _quality_checks(d)
     rows = []
     for label, sel, severity, note in checks:
         sel = sel.fillna(False)
@@ -590,3 +600,27 @@ def data_quality(d: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values(["severity", "contracts"],
                            key=lambda s: s.map(order) if s.name == "severity" else -s
                            ).reset_index(drop=True)
+
+
+def data_quality_detail(d: pd.DataFrame, n: int = 200) -> dict:
+    """The contracts behind each data-quality finding.
+
+    A count is an argument; a list of contract ids is something somebody can
+    act on. Largest exposure first and capped at ``n``, because the point is to
+    give an analyst somewhere to start, not to export the book.
+
+    Only checks that actually fired appear, matching the summary.
+    """
+    if d is None or len(d) == 0:
+        return {}
+    cols = [c for c in ("contract", "customer", "portfolio", "rating", "stage",
+                        "exposure", "ecl") if c in d.columns]
+    out = {}
+    for label, sel, _severity, _note in _quality_checks(d):
+        sel = sel.fillna(False)
+        if not sel.any():
+            continue
+        out[label] = (d.loc[sel, cols]
+                      .sort_values("exposure", ascending=False)
+                      .head(n).reset_index(drop=True))
+    return out

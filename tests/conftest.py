@@ -9,8 +9,13 @@ data: customer identifiers, exposures and provisions. That never goes in git.
 Point the environment at a copy instead:
 
     export IFRS9_REF_RUN=/path/to/runs/run_00001    # holds Output/
+    export IFRS9_REF_RUN_PREV=/path/to/runs/run_00000   # optional, the run before
     export IFRS9_SRC_INPUTS=/path/to/extracts       # the raw Oracle files
     pytest -q
+
+``IFRS9_REF_RUN_PREV`` is what the movement analytics want: two real consecutive
+runs. Without it those tests fall back to a perturbed copy of the one run, which
+exercises the arithmetic but not the shape of a real quarter.
 
 Without them those tests skip and say which variable was missing, rather than
 failing or - worse - silently passing on absent data.
@@ -61,6 +66,25 @@ def ref_file(name: str) -> Path | None:
         return out / name
     local = FIXTURES / name
     return local if local.is_file() else None
+
+
+def prev_run() -> Path | None:
+    """The run BEFORE the reference one, for the movement analytics."""
+    p = _from_env("IFRS9_REF_RUN_PREV")
+    if p is None:
+        return None
+    return p.parent if p.name == "Output" else p
+
+
+def prev_file(name: str) -> Path | None:
+    """One CSV from the previous run, or None when no previous run is set."""
+    run = prev_run()
+    if run is None:
+        return None
+    for cand in (run / "Output" / name, run / name):
+        if cand.is_file():
+            return cand
+    return None
 
 
 def src_inputs() -> Path | None:
