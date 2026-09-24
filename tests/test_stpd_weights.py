@@ -200,3 +200,29 @@ class TestAgainstTheReferenceStPD:
         # The reference CSV is written to eight decimals; anything at 1e-8 is
         # the file format. This sits at 1e-15, i.e. the same arithmetic.
         assert d.max() < 1e-12, f"max abs diff {d.max():.3e}"
+
+    @pytest.mark.skipif(ref_output() is None,
+                        reason="set IFRS9_REF_RUN to a run folder holding Output/")
+    def test_the_pipeline_path_reproduces_it_too(self, static):
+        """Through ``_build_stpd``, which is what an actual run calls.
+
+        The direct call above was exact while the pipeline was out by 0.012 on
+        the external scale: it computed the internal weights itself and passed
+        them in, which overrode the per-scale resolution and applied the
+        non-oil GDP weighting to curves driven by GCC growth. Testing only the
+        function the test file imports would have missed it again.
+        """
+        from ifrs9qdb.etl.pipeline import _build_stpd
+
+        ref = pd.read_csv(ref_output() / "StPD.csv", low_memory=False)
+        out = _build_stpd(static, None, str(ref["ExtractDate"].iloc[0]))
+        j = out.merge(ref, on=["PortfolioCode", "PDBucketDim1", "MonthLifetime"],
+                      suffixes=("_got", "_ref"))
+        assert len(j) == len(ref)
+        d = (j["PDLifetime_got"] - j["PDLifetime_ref"]).abs()
+        assert d.max() < 1e-12, f"max abs diff {d.max():.3e}"
+
+        external = j[j["PortfolioCode"].isin(EXTERNAL)]
+        assert len(external) > 0
+        de = (external["PDLifetime_got"] - external["PDLifetime_ref"]).abs()
+        assert de.max() < 1e-12, f"external scale out by {de.max():.3e}"

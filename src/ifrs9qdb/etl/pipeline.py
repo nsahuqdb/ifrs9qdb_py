@@ -26,7 +26,7 @@ from .lending import (build_account_master, transform_investments,
                       transform_lending)
 from .lifetime import build_lifetime_parameter_other
 from .read_inputs import read_all_inputs
-from .macro import build_stpd_from_static, compute_internal_scenario_weights
+from .macro import build_stpd_from_static
 from .reference import build_reference_files
 from .static_ref import load_static_reference
 from .transform import (pick, transform_allocation, transform_collateral,
@@ -393,30 +393,19 @@ def _build_stpd(static, config_dir, extract_date: str):
     """The PD term structures.
 
     Reads the model config from the run's own frozen copy when one is given,
-    and otherwise from the package. Weights are COMPUTED from the non-oil GDP
-    forecast rather than read, because the config runs on
-    `auto_non_oil_gdp_cdf` and the explicit block in the file is a rounded
-    snapshot of that calculation.
-    """
-    import yaml
+    and otherwise from the package.
 
+    The weights are left to ``build_stpd_from_static``, which resolves them
+    SEPARATELY for the two rating scales -- the internal one from the non-oil
+    GDP forecast, the external one from the GCC growth path. Computing one set
+    here and passing it applied the internal weights to the external scale as
+    well, which left the Investments and Banks and FIs curves out by up to
+    0.012 against the reference run while every internal curve stayed exact.
+    """
     model, inputs_yml = load_model_config(config_dir)
     if model is None or inputs_yml is None:
         return None
-
-    weights = None
-    try:
-        fcb = inputs_yml["mev_forecasts"]["forecasts"]
-        n = int(inputs_yml.get("internal_scenario_weights", {})
-                .get("n_forecast_years", 2))
-        gdp = [float(fcb[y][0]) for y in sorted(fcb, key=lambda k: int(k))][:n]
-        hist = static["non_oil_gdp_history"]["value"].to_numpy()
-        weights = compute_internal_scenario_weights(hist, gdp,
-                                                    static["scenario_severity"])
-    except Exception:
-        weights = None
-    return build_stpd_from_static(static, model, inputs_yml, extract_date,
-                                  scenario_weights=weights)
+    return build_stpd_from_static(static, model, inputs_yml, extract_date)
 
 
 def _infer_reporting_date(accounts: pd.DataFrame):
