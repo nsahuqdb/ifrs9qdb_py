@@ -277,6 +277,46 @@ copy reads the LIVE model files, which is the one thing it must not do.
 Verified against the R app's own `config_snapshots/ddd`: it reads, lists, and
 its editable file set and comment headers come back intact.
 
+## Overlays — the bundle, the approval trail, and applying one to a run
+
+The Python had the overlay ENGINE (the three types, the selectors, the
+overlap check) and nothing around it. It now has the rest of the R module:
+the bundle as a person authors it, its approval trail, and applying one to a
+completed run.
+
+A bundle is one management adjustment in the form somebody writes it: an id,
+an owner, a status and a list of RULES, each picking a level, a target, a
+method and a value. It is flattened into single overlays before the engine
+sees it. The separation is not cosmetic -- a bundle is reviewed by people and
+lives in config, while the flattened overlays exist only for the length of one
+calculation.
+
+`apply_overlay_to_run` writes `FinalEclReport_overlay_<id>.csv` and
+`OverlayAuditLog_<id>.csv` beside the model report and never modifies it, so
+the model number and the adjusted one both stay on disk and the difference
+between them is a file anybody can open.
+
+**Verified against the R app's own applied overlay.** Reconstructing `ov1` (a
+10% uplift on Business Finance) from its audit log and applying it to the same
+report reproduces the R output to the cent:
+
+| | Python | R |
+|---|---:|---:|
+| Ecl Model Onbal | 2,283,041,268.74 | 2,283,041,268.74 |
+| Overlay Amount | 75,821,039.70 | 75,821,039.70 |
+| Ecl Final Onbal | 2,358,862,308.44 | 2,358,862,308.44 |
+| Contracts matched | 4,966 | 4,966 |
+
+Same 6,709 x 80 shape, and the audit log carries the R's fifteen columns in
+the R's order.
+
+Three behaviours are pinned because each is a decision rather than an
+accident: `whole_book` means everything EXCEPT Stage 3 (booked manually, so an
+overlay on top would double-count); overlapping overlays are REFUSED rather
+than compounded (otherwise the order of application decides the provision);
+and the approval trail is append-only, so an overlay rejected and later
+approved reads as exactly that.
+
 ## Reading the extracts — complete
 
 All twelve read. Format is detected from the file's bytes, not its extension:
@@ -455,5 +495,5 @@ staging inputs, which is the `AccountMaster_1` trailing block above.
    `CustomerStagingFlag` differences.
 3. The governance surface. Calculator versions, the code fingerprint, input
    acquisition, maker-checker and config snapshots are now ported (below).
-4. Overlays, reconciliation and the analytics layer are ported in part and
-   are the largest remaining gaps by line count.
+4. Reconciliation and the analytics layer are ported in part and are the
+   largest remaining gaps by line count.

@@ -33,6 +33,7 @@ pytest -q
 | LifeTimeParameterOther, 82,478 rows | match |
 | 12 of 18 LIC input files | match |
 | Collateral netting, 5,932 allocations | resolve (were silently missing all) |
+| Overlay applied to a run | matches the R output to the cent |
 | **Validation suite** | **114 checks, R's ids, same INPUT/TRANSFORM/DERIVED split** |
 
 The StPD figure holds against two independent reference runs
@@ -89,7 +90,9 @@ src/ifrs9qdb/
   acquisition.py  getting a quarter's extracts in: zip upload, data drops,
                   a structural check, and recording where they came from
   ids.py          ids that join, whatever dtype the column was read as
-  overlays.py     management overlays over a completed run
+  overlays.py     management overlays: the engine, the bundle a
+                  person authors, its approval trail, and applying
+                  one to a completed run without touching it
   config/         model.yml, model_inputs.yml, overlays.yml
   static/         rating scales, TTC PDs, scenario severities, mappings
 ```
@@ -100,7 +103,7 @@ The fixtures under `tests/fixtures/` ship with the repository, so the suite
 means something on a fresh clone with nothing configured:
 
 ```bash
-pytest -q          # 279 passed, 67 skipped
+pytest -q          # 297 passed, 74 skipped
 ```
 
 The reconciliation tests need a real run, and a real run is real portfolio

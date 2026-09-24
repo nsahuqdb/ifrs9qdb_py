@@ -20,7 +20,13 @@ from .stress import (  # noqa: F401,E402
     Rule, StressSpec, apply_stress, compare_packages, reprice,
     reverse_stress, reverse_stress_all, roll_forward, tornado,
 )
-from .overlays import Overlay, apply_overlays, read_overlays  # noqa: F401,E402
+from .overlays import (  # noqa: F401,E402
+    Overlay, apply_overlay_bundle, apply_overlay_to_run, apply_overlays,
+    bundle_to_overlays, get_overlay, list_applied_overlays, preview_overlays,
+    read_overlay_bundles, read_overlays, remove_applied_overlay,
+    remove_overlay, set_overlay_status, upsert_overlay,
+    validate_overlay_bundle, write_overlay_bundles,
+)
 from .governance import (  # noqa: F401,E402
     AuditLog, approve_run, approval_status, compare_snapshots, read_snapshot,
     take_snapshot,
