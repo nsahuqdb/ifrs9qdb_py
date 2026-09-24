@@ -514,12 +514,64 @@ Stage 3 counts nearly (274 against 276). ECL and the Stage 1/2 split still
 differ. The StPD half of that gap is now closed; what remains traces to the
 staging inputs, which is the `AccountMaster_1` trailing block above.
 
+## The analytics layer — ported
+
+The R package's analytics are now matched function for function, in six
+modules under `ifrs9qdb.analytics` plus the stress additions.
+
+| Module | What it answers |
+| --- | --- |
+| `profile` | where the provision sits: segments, concentration, staging, data quality |
+| `walk` | how it moved, reconciling exactly |
+| `attribution` | *why* it moved — the indicative split, the coverage bridge, and an exact engine-level decomposition |
+| `staging` | why names sit where they sit, and who migrated |
+| `risk` | the parameters themselves: PD curves, LGD floor, collateral, EAD run-off |
+| `scenarios` | the five per-scenario runs, compared and reweighted |
+| `model_view` | what the run froze: its config, scenarios, MEV forecast |
+
+Four results are worth recording, because each is a statement about the port
+rather than about the book:
+
+* **`staging_consistency` finds 0 mismatches over 13,188 contracts.** It
+  re-applies this port's `classify_stage` to two finished R runs and compares
+  against the stage the R engine wrote. Every contract agrees. That is the
+  strongest available evidence that the staging rule was ported rather than
+  approximated.
+* **`factor_attribution_exact` reconciles to machine precision.** It reprices
+  each contract five times through the engine, substituting one ingredient at
+  a time, so the four effects sum to the move by construction. 4,797 of 4,797
+  matched contracts priced; nothing fell into `uncovered`.
+* **`mev_stress` rebuilds the whole PD chain from the run's frozen config and,
+  with no edit, reproduces the run's own provision to 1e-6.** The rebuild is
+  therefore measuring the macro path and not itself.
+* **A domestic MEV shock leaves Investments and Banks and FIs untouched**, as
+  it must: those price off GCC growth. The two rating scales stay separate all
+  the way through the rebuilt chain.
+
+### A second sign question for Risk
+
+Shocking Non-Oil GDP down 2pp across every forecast year:
+
+| Weight mode | Change in provision |
+| --- | --- |
+| `hold` — weights pinned, PD effect only | **+1.16%** |
+| `auto` — weights follow the forecast, as configured | **−0.78%** |
+
+The PD effect alone behaves as expected: a worse path raises the provision.
+With the weights on `auto_non_oil_gdp_cdf` — which is how the production
+config runs — the weighting effect is larger than the PD effect and points the
+other way, so a downturn *reduces* the provision.
+
+This is the same class of finding as the external-scale sign above: the port
+reproduces it rather than correcting it, and it needs a decision from Risk.
+The `weight_mode` switch exists precisely so the two effects can be shown
+apart in a review.
+
 ## Next
 
 1. Re-measure the ECL report now that StPD is exact — the previous figure was
    taken with the equal-weights StPD underneath it and is not a fair reading.
 2. The `AccountMaster_1` trailing block, which also closes both remaining
    `CustomerStagingFlag` differences.
-3. The governance surface. Calculator versions, the code fingerprint, input
-   acquisition, maker-checker and config snapshots are now ported (below).
-4. The analytics layer is the largest remaining gap by line count.
+3. The two sign questions above, together, with Risk.
+4. Surface the new analytics in the app.

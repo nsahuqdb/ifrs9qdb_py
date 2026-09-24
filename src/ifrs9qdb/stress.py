@@ -37,6 +37,7 @@ __all__ = [
     "TORNADO_LEVERS", "REVERSE_LEVERS", "stretch_curve", "advance_curve",
     "conditional_pd", "staging_threshold", "staging_threshold_sweep",
     "advance_curves", "reprofile_curves", "customer_rows",
+    "mev_stress", "MEV_WEIGHT_MODES", "stpd_to_curves",
 ]
 
 
@@ -698,3 +699,164 @@ def customer_rows(rows: pd.DataFrame, n: int | None = 100) -> pd.DataFrame:
     out = out.reindex(out["change"].abs().sort_values(ascending=False).index)
     out = out.reset_index(drop=True)
     return out if n is None else out.head(int(n))
+
+
+# ----------------------------------------------------------- macro path ----
+MEV_WEIGHT_MODES = ("auto", "hold", "custom")
+
+
+def stpd_to_curves(stpd: pd.DataFrame) -> dict[str, np.ndarray]:
+    """An StPD table as the zero-prepended curves the engine prices with."""
+    key = ("PortfolioCode", "PDBucketDim1", "MonthLifetime", "PDLifetime")
+    if stpd is None or not set(key) <= set(stpd.columns):
+        return {}
+    t = pd.DataFrame({
+        "pf": stpd["PortfolioCode"].astype(str),
+        "bk": pd.to_numeric(stpd["PDBucketDim1"], errors="coerce"),
+        "m": pd.to_numeric(stpd["MonthLifetime"], errors="coerce"),
+        "v": pd.to_numeric(stpd["PDLifetime"], errors="coerce"),
+    }).dropna()
+    return {f"{p}|{int(b)}": np.concatenate([[0.0], g.sort_values("m")["v"].to_numpy()])
+            for (p, b), g in t.groupby(["pf", "bk"])}
+
+
+def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
+               mev_new: pd.DataFrame | None = None,
+               shock: dict | None = None,
+               weight_mode: str = "auto",
+               weights: dict | None = None,
+               cfg: EclConfig | None = None) -> dict:
+    """Reprice the book on a different macroeconomic path.
+
+    The whole PD chain is rebuilt from the run's OWN frozen config with the
+    forecast edited, so the shift factors, the scenario curves and the monthly
+    StPD all follow from the new path exactly as they would in a real run.
+    Nothing is adjusted afterwards.
+
+    ``mev_new`` sets individual cells -- a frame of ``year``, ``idx``, ``value``
+    -- and ``shock`` adds a delta to one MEV across every year, keyed by its
+    1-based index. Both may be given; the cells are set first.
+
+    ``weight_mode`` decides what happens to the scenario weights, and it is a
+    genuine choice rather than a detail. The internal weights run on
+    ``auto_non_oil_gdp_cdf``, derived from the first forecast years of this
+    very matrix, so editing non-oil GDP moves the weights AND the curves:
+
+        auto    leave the config alone; the weights follow the new path
+        hold    pin them to what this run used, isolating the PD effect
+        custom  use the weights supplied
+
+    Returns before, after and the split, or ``{"ok": False, "reason": ...}``
+    naming what was missing -- a macro screen that goes blank explains nothing.
+    """
+    from .analytics.model_view import config_used
+    from .etl.macro import build_stpd_from_static
+    from .etl.static_ref import load_static_reference
+
+    import yaml
+
+    if weight_mode not in MEV_WEIGHT_MODES:
+        raise ValueError(f"weight_mode must be one of {MEV_WEIGHT_MODES}")
+    if inputs is None or not inputs.ok:
+        return {"ok": False,
+                "reason": "The run's engine inputs could not be read."}
+    cu = config_used(run_path)
+    if cu is None:
+        return {"ok": False,
+                "reason": "This run has no frozen config (config_used), so "
+                          "the PD chain cannot be rebuilt."}
+    try:
+        static = load_static_reference(cu["static"])
+        model = yaml.safe_load((cu["config"] / "model.yml").read_text(encoding="utf-8"))
+        raw = yaml.safe_load((cu["config"] / "model_inputs.yml")
+                             .read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"ok": False, "reason": f"The frozen config could not be read: {exc}"}
+
+    fc = ((raw or {}).get("mev_forecasts") or {}).get("forecasts")
+    if not fc:
+        return {"ok": False,
+                "reason": "mev_forecasts.forecasts is empty in this run's config."}
+    fc = {y: [float(v) for v in vals] for y, vals in fc.items()}
+
+    # The forecast years are YAML ints in this config and strings in others,
+    # so an edit is matched on the year's VALUE rather than on its type. Keyed
+    # on str() alone, every cell edit silently did nothing.
+    year_key = {str(y): y for y in fc}
+    if mev_new is not None and len(mev_new):
+        for r in mev_new.itertuples(index=False):
+            y = year_key.get(str(r.year))
+            i = int(r.idx) - 1
+            if y is not None and 0 <= i < len(fc[y]):
+                fc[y][i] = float(r.value)
+    for k, delta in (shock or {}).items():
+        i = int(k) - 1
+        delta = float(delta)
+        if delta == 0:
+            continue
+        for y in fc:
+            if 0 <= i < len(fc[y]):
+                fc[y][i] += delta
+    raw["mev_forecasts"]["forecasts"] = fc
+
+    base_internal = (raw.get("internal_scenario_weights") or {}).get("explicit_weights")
+    if weight_mode == "hold":
+        for node in ("internal_scenario_weights", "external_scenario_weights"):
+            if node in raw:
+                raw[node]["mode"] = "explicit"
+    elif weight_mode == "custom" and weights:
+        for node in ("internal_scenario_weights", "external_scenario_weights"):
+            raw.setdefault(node, {})
+            raw[node]["mode"] = "explicit"
+            raw[node]["explicit_weights"] = {k: float(v) for k, v in weights.items()}
+
+    extract = str(report["extract_date"].dropna().iloc[0]) \
+        if "extract_date" in report.columns and report["extract_date"].notna().any() \
+        else ""
+    try:
+        stpd_new = build_stpd_from_static(static, model, raw, extract)
+    except Exception as exc:
+        return {"ok": False, "reason": f"Rebuilding the PD chain failed: {exc}"}
+    curves = stpd_to_curves(stpd_new)
+    if not curves:
+        return {"ok": False, "reason": "The rebuilt StPD had no usable curves."}
+
+    base_cfg = cfg or EclConfig()
+    before = reprice(inputs, report, cfg=base_cfg)
+    after = reprice(inputs, report, pd_curves=curves, cfg=base_cfg)
+
+    d = before[["contract", "customer", "portfolio", "rating", "stage",
+                "exposure"]].copy()
+    d["ecl_before"] = before["ecl"].to_numpy()
+    d["ecl_after"] = after["ecl"].to_numpy()
+    ok = d["ecl_before"].notna() & d["ecl_after"].notna()
+    priced = d[ok].copy()
+    priced["change"] = priced["ecl_after"] - priced["ecl_before"]
+    if len(priced) == 0:
+        return {"ok": False, "reason": "Nothing could be priced on the new path."}
+
+    by_pf = (priced.groupby("portfolio")
+             .agg(contracts=("contract", "size"),
+                  before=("ecl_before", "sum"), after=("ecl_after", "sum"))
+             .reset_index())
+    by_pf["change"] = by_pf["after"] - by_pf["before"]
+
+    path = pd.DataFrame([{"year": int(y), **{f"mev_{i + 1}": v
+                                             for i, v in enumerate(vals)}}
+                         for y, vals in sorted(fc.items(), key=lambda kv: int(kv[0]))])
+
+    return {
+        "ok": True,
+        "before": float(priced["ecl_before"].sum()),
+        "after": float(priced["ecl_after"].sum()),
+        "delta": float(priced["change"].sum()),
+        "priced": int(ok.sum()),
+        "weight_mode": weight_mode,
+        "weights_base": base_internal,
+        "by_portfolio": by_pf.reindex(
+            by_pf["change"].abs().sort_values(ascending=False).index
+        ).reset_index(drop=True),
+        "movers": customer_rows(priced, n=500),
+        "path": path,
+        "stpd": stpd_new,
+    }
