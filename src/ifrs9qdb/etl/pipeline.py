@@ -63,6 +63,7 @@ class RunResult:
     seconds: float = 0.0
     error: str | None = None
     traceback: str = ""
+    validation: dict | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -71,6 +72,7 @@ class RunResult:
             "steps": self.steps, "written": self.written,
             "pending": self.pending, "seconds": round(self.seconds, 1),
             "error": self.error, "traceback": self.traceback,
+            "validation": self.validation,
         }
 
 
@@ -271,6 +273,56 @@ def run_etl(input_dir, runs_dir, reporting_date=None, run_id=None,
             result.steps.append({"step": "ECL report", "ok": False,
                                  "detail": f"{type(exc).__name__}: {exc}"})
 
+        say("validate", "Validating the run…")
+        try:
+            from ..validation import (load_suppressions, suppression_reasons,
+                                      validate_stages,
+                                      write_validation_reports)
+            model_cfg, model_inputs = load_model_config(config_dir)
+            iw = ew = mw = None
+            if model_cfg and model_inputs:
+                from .macro import (external_gcc_forecast,
+                                    gcc_weighted_history,
+                                    resolve_external_scenario_weights,
+                                    resolve_internal_scenario_weights)
+                try:
+                    iw = resolve_internal_scenario_weights(model_inputs, static)
+                    gh = gcc_weighted_history(
+                        static.get("gcc_real_gdp_growth"),
+                        static.get("gcc_gdp_current_prices"))
+                    ew = resolve_external_scenario_weights(
+                        model_inputs, static, gh,
+                        external_gcc_forecast(model_inputs, static, 5))
+                    mw = [c["weight"] for c in
+                          model_cfg["models"]["internal_v4_production"]
+                          ["mev_components"]]
+                except Exception:
+                    pass
+            supp_path = run_dir / "config_used" / "config" / \
+                "validation_suppressions.yml"
+            supp = suppression_reasons(load_suppressions(supp_path))
+            findings = validate_stages(
+                inputs=src, static=static, trans_lending=view,
+                lending_view=flags, trans_investments=inv,
+                investment_view=inv, ltpo=lpo, stpd=stpd,
+                internal_weights=iw, external_weights=ew, mev_weights=mw,
+                reporting_date=extract_date, suppressions=supp)
+            write_validation_reports(findings, run_dir / "reports")
+            summary = findings.summary()
+            result.validation = summary
+            result.steps.append({
+                "step": "Validation", "ok": summary["errors"] == 0,
+                "detail": (f"{summary['checks']} checks, "
+                           f"{summary['errors']} error(s), "
+                           f"{summary['warnings']} warning(s), "
+                           f"{summary['suppressed']} suppressed")})
+        except Exception as exc:
+            # A validation failure must not discard a run that completed: the
+            # outputs are still written and the failure is reported against
+            # its own step.
+            result.steps.append({"step": "Validation", "ok": False,
+                                 "detail": f"{type(exc).__name__}: {exc}"})
+
         _write_manifest(run_dir, run_id, input_dir, extract_date, result)
         result.ok = True
         result.steps.append({
@@ -291,6 +343,26 @@ def run_etl(input_dir, runs_dir, reporting_date=None, run_id=None,
     return result
 
 
+def load_model_config(config_dir=None):
+    """The model config a run should use: its own frozen copy, else the package's.
+
+    A run reproduces a past quarter only if it reads the config THAT run
+    froze, so the run's own directory always wins.
+    """
+    import yaml
+
+    search = []
+    if config_dir:
+        search.append(Path(config_dir))
+    search += [Path.cwd() / "config", Path(__file__).parent.parent / "config"]
+    for d in search:
+        if (d / "model.yml").is_file() and (d / "model_inputs.yml").is_file():
+            return (yaml.safe_load((d / "model.yml").read_text(encoding="utf-8")),
+                    yaml.safe_load((d / "model_inputs.yml").read_text(
+                        encoding="utf-8")))
+    return None, None
+
+
 def _build_stpd(static, config_dir, extract_date: str):
     """The PD term structures.
 
@@ -302,18 +374,7 @@ def _build_stpd(static, config_dir, extract_date: str):
     """
     import yaml
 
-    search = []
-    if config_dir:
-        search.append(Path(config_dir))
-    pkg_cfg = Path(__file__).parent.parent.parent.parent / "pkg"
-    search += [Path.cwd() / "config",
-               Path(__file__).parent.parent / "config"]
-    model = inputs_yml = None
-    for d in search:
-        if (d / "model.yml").is_file() and (d / "model_inputs.yml").is_file():
-            model = yaml.safe_load((d / "model.yml").read_text())
-            inputs_yml = yaml.safe_load((d / "model_inputs.yml").read_text())
-            break
+    model, inputs_yml = load_model_config(config_dir)
     if model is None or inputs_yml is None:
         return None
 

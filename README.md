@@ -33,6 +33,7 @@ pytest -q
 | LifeTimeParameterOther, 82,478 rows | match |
 | 12 of 18 LIC input files | match |
 | Collateral netting, 5,932 allocations | resolve (were silently missing all) |
+| **Validation suite** | **114 checks, R's ids, same INPUT/TRANSFORM/DERIVED split** |
 
 The StPD figure holds against two independent reference runs
 (`run_00001` at 12/31/2025 and `run_00002` at 9/30/2025) using only the
@@ -77,7 +78,9 @@ src/ifrs9qdb/
     reconcile     compare a produced run against a reference
   analytics/      walk, staging, concentration, data quality, profiles
   stress.py       what-if, packages, reverse stress, roll-forward
-  validation/     the check framework and the check set
+  validation/     114 checks with the R engine's ids, plus 15 pre-flight
+                  checks on the config and static reference, and the
+                  suppressions file (reason, approver, expiry)
   governance.py   approvals, audit log, config snapshots
   overlays.py     management overlays over a completed run
   config/         model.yml, model_inputs.yml, overlays.yml

@@ -103,6 +103,58 @@ against raw extracts — that needs the extract set, which is not in the
 reference material available here — so they are a hardening, not a confirmed
 fix.
 
+## Validation — the full suite, with the R engine's ids
+
+The port carried 22 checks against the R engine's 114. It now carries all 114,
+grouped as the R report groups them, and the counts line up exactly with what
+R's own `validation.md` prints:
+
+    Total checks: 114
+    INPUT (57)   the raw extracts, cross-file agreement, config coverage
+    TRANSFORM (28)   the book after shaping, before pricing
+    DERIVED (29)     the curves and weights the engine prices against
+
+plus 15 pre-flight checks on the static reference and `config.yml`, which in
+the R run separately from the 114.
+
+**The ids are the contract, and they match R's exactly.** Suppressions are
+recorded by validator id, so a Python suite with its own ids (`IN001`,
+`TR002`) would silently stop honouring every exception the bank had approved:
+the finding returns as a failure, with nothing to say why. Ported ids mean an
+exception approved against either engine applies to both, and a finding can be
+compared across the two.
+
+A test asserts the parity directly, against a list extracted from the R
+sources and bundled at `tests/r_validator_ids.txt`.
+
+### Suppressions
+
+`validation/suppressions.py` mirrors the R module: a suppressed finding still
+RUNS and is still recorded, and what changes is that its effective severity
+becomes INFO so it stops gating. Each entry carries a reason, an approver and
+an optional expiry; nothing is ever deleted, because the file is the audit
+trail. Omitting the approver falls back to the logged-in user, but passing a
+blank one raises — putting a name in an audit trail that nobody chose is worse
+than refusing.
+
+### What the checks are for
+
+The three StPD defects above are the argument for this suite. Every shape test
+passed while the curves were out by a mean of 0.0058: they stayed monotonic,
+bounded and correctly sized, because a wrong weighting produces a perfectly
+well-formed curve set. So the DERIVED checks assert the things a wrong
+weighting does NOT preserve — that the weights sum to one, that the two scales
+differ from each other, that the curves order correctly by rating, and that a
+zero-TTC bucket still exists.
+
+Verified against the R engine's own output: all 29 DERIVED checks pass on
+`run_00001`, with one INFO finding — 1,849 EAD curves that rise above their
+opening balance, which is the documented revolving-facility case and is pinned
+as informational precisely so nobody "fixes" it.
+
+The ETL now runs the suite as a step of its own and writes `reports/
+validation.csv` and `reports/validation.md` in the R format, column for column.
+
 ## Reading the extracts — complete
 
 All twelve read. Format is detected from the file's bytes, not its extension:
@@ -280,4 +332,5 @@ staging inputs, which is the `AccountMaster_1` trailing block above.
 2. The `AccountMaster_1` trailing block, which also closes both remaining
    `CustomerStagingFlag` differences.
 3. The governance surface: snapshots, approvals and calculator versions are
-   thinner here than in the R package.
+   thinner here than in the R package. Calculator versions, the code
+   fingerprint and zip input acquisition have no Python equivalent yet.
