@@ -34,6 +34,7 @@ import numpy as np
 import pandas as pd
 
 from .transform import pick
+from ..ids import as_id
 
 __all__ = ["build_lifetime_parameter_other", "LPO_COLUMNS"]
 
@@ -79,7 +80,7 @@ def build_lifetime_parameter_other(
         repayment = pd.Series(0.0, index=repayment_schedule.index)
 
     sched = pd.DataFrame({
-        "contract": key.astype(str).str.strip(),
+        "contract": as_id(key),
         "start": start,
         # the balance BEFORE the payment is applied
         "ead": balance.fillna(0.0) + repayment.fillna(0.0),
@@ -99,7 +100,7 @@ def build_lifetime_parameter_other(
         bal = pd.to_numeric(pick(accounts, "ONBALANCE", "OnBalance"),
                             errors="coerce")
         if acid is not None and bal is not None:
-            outstanding = dict(zip(acid.astype(str).str.strip(),
+            outstanding = dict(zip(as_id(acid),
                                    bal.fillna(0.0)))
 
     rows: list[tuple] = []

@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from .transform import at, pick
+from ..ids import as_id
 
 __all__ = ["customer_ids_from_accounts", "derive_customer_flags",
            "investment_customer_ids"]
@@ -46,7 +47,7 @@ def customer_ids_from_accounts(accounts: pd.DataFrame,
     cid = pick(accounts, customer_col, "CustomerId")
     if cid is None:
         cid = at(accounts, 3)
-    ids = cid.astype(str).str.strip()
+    ids = as_id(cid)
     return ids[~ids.duplicated()].reset_index(drop=True)
 
 
@@ -106,7 +107,7 @@ def derive_customer_flags(accounts: pd.DataFrame,
     dpd = pick(accounts, "PASTDUEDAYS", "PASTDUE_DAYS", "PastDueDays")
     worst = {}
     if cid is not None and dpd is not None:
-        w = pd.DataFrame({"c": cid.astype(str).str.strip(),
+        w = pd.DataFrame({"c": as_id(cid),
                           "d": pd.to_numeric(dpd, errors="coerce")})
         worst = w.groupby("c")["d"].max().to_dict()
     out["worst_dpd"] = out["customer_id"].map(worst).fillna(0)
@@ -115,7 +116,7 @@ def derive_customer_flags(accounts: pd.DataFrame,
     restr = {}
     rcol = pick(accounts, "ISRESTRUCTURED", "IsRestructured", "RESTRUCTURED")
     if cid is not None and rcol is not None:
-        w = pd.DataFrame({"c": cid.astype(str).str.strip(),
+        w = pd.DataFrame({"c": as_id(cid),
                           "v": pd.to_numeric(rcol, errors="coerce").fillna(0)})
         restr = w.groupby("c")["v"].max().to_dict()
     out["is_restructured"] = out["customer_id"].map(restr).fillna(0).eq(1)
@@ -132,7 +133,7 @@ def derive_customer_flags(accounts: pd.DataFrame,
                 break
         if scid is None or col is None:
             return pd.Series([False] * n)
-        m = pd.DataFrame({"c": scid.astype(str).str.strip(),
+        m = pd.DataFrame({"c": as_id(scid),
                           "v": pd.to_numeric(col, errors="coerce").fillna(0)})
         lookup = m.groupby("c")["v"].max().to_dict()
         return out["customer_id"].map(lookup).fillna(0).astype(float).eq(1)

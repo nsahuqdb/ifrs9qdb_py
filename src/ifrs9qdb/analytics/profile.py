@@ -93,6 +93,8 @@ def normalise(df: pd.DataFrame) -> pd.DataFrame:
     Maturity only in some configurations, and an analysis that needs them
     should say so itself rather than failing here.
     """
+    from ..inputs import as_id
+
     if df is None or len(df) == 0:
         return pd.DataFrame()
     out = pd.DataFrame(index=df.index)
@@ -106,9 +108,13 @@ def normalise(df: pd.DataFrame) -> pd.DataFrame:
               "default_flag", "watchlist", "insolvency", "restructured",
               "local2", "local3", "local4", "local5", "local6"):
         out[c] = pd.to_numeric(out[c], errors="coerce")
-    for c in ("contract", "customer", "portfolio", "account_type", "rating",
-              "rating_type"):
+    for c in ("portfolio", "account_type", "rating", "rating_type"):
         out[c] = out[c].astype("string")
+    # Ids are join keys, so they go through the same normalisation the engine
+    # inputs use. A column of whole numbers reads as float the moment one value
+    # is blank, and "548840.0" never matches "548840" - silently.
+    for c in ("contract", "customer"):
+        out[c] = as_id(out[c]).astype("string")
 
     out = out[out["contract"].notna() & (out["contract"].str.len() > 0)].copy()
     out["exposure"] = out["exposure"].fillna(0.0)
@@ -549,10 +555,14 @@ def data_quality(d: pd.DataFrame) -> pd.DataFrame:
          "The engine caps this, so rows here mean the cap is off or the run "
          "predates it. The usual cause is an EAD curve carrying expected "
          "drawdowns on an undrawn commitment."),
-        ("Missing rating", d["rating"].isna(), "error",
+        ("Missing rating",
+         d["rating"].isna() | (d["rating"].astype("string").fillna("").str.strip() == ""),
+         "error",
          "No rating means no PD bucket, so no ECL can be computed."),
         ("Missing lifetime PD", d["pd"].isna() & (d["stage"] != 3), "warn",
          "Stage 1 or 2 with no lifetime PD reported."),
+        ("Missing LGD", d["lgd"].isna() & (d["stage"] != 3), "info",
+         "LIC blanks Stage 2 LGD by design; our report populates it."),
         ("Collateral coverage missing", d["collcov"].isna(), "warn",
          "Often an allocation pointing at a collateral record that does not exist."),
         ("Collateral over 100%", d["collcov"].notna() & (d["collcov"] > 1), "info",

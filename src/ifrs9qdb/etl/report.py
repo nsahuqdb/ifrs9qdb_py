@@ -21,6 +21,7 @@ from ..engine import EclConfig, compute_lgd, sum_marginal_ecl
 from ..inputs import load_engine_inputs
 from .customer import apply_staging_rule
 from .transform import pick
+from ..ids import as_id
 
 __all__ = ["REPORT_COLUMNS", "build_final_ecl_report", "classify_stage_report"]
 
@@ -128,7 +129,7 @@ def build_final_ecl_report(run_dir, entity_id: str = "", run_id_label: str = "",
         if cid is None:
             return {}
         v = df[col].astype(str).str.strip().str.upper().isin(("TRUE", "1"))
-        return dict(zip(cid.astype(str).str.strip(), v))
+        return dict(zip(as_id(cid), v))
 
     watch = flag_map(flags, "IsWatchlist")
     dflt = flag_map(flags, "IsDefault")
@@ -141,7 +142,7 @@ def build_final_ecl_report(run_dir, entity_id: str = "", run_id_label: str = "",
         if "customer" in con.columns else None
     if cust_key is None:
         am = _read(out_dir, "AccountMaster_1.csv")
-        lut = dict(zip(am["ContractId"].astype(str),
+        lut = dict(zip(as_id(am["ContractId"]),
                        am["CustomerId"].astype(str))) if am is not None else {}
         cust_key = con["contract"].map(lut)
     cust_key = cust_key.fillna("").astype(str)

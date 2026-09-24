@@ -28,8 +28,9 @@ import numpy as np
 import pandas as pd
 
 from .engine import fallback_ead_curve, months_to_maturity
+from .ids import as_id
 
-__all__ = ["EngineInputs", "load_engine_inputs"]
+__all__ = ["EngineInputs", "load_engine_inputs", "as_id"]
 
 
 def _read(out_dir: Path, name: str) -> pd.DataFrame | None:
@@ -208,7 +209,7 @@ def load_engine_inputs(out_dir) -> EngineInputs:
         mon = pd.to_numeric(_col(lp, "MonthLifetime"), errors="coerce")
         val = pd.to_numeric(_col(lp, "EADLifetime"), errors="coerce")
         if all(x is not None for x in (cid, mon, val)):
-            t = pd.DataFrame({"c": cid.astype(str), "m": mon, "v": val}).dropna()
+            t = pd.DataFrame({"c": as_id(cid), "m": mon, "v": val}).dropna()
             for c, g in t.groupby("c"):
                 ead_curves[c] = g.sort_values("m")["v"].to_numpy()
 
@@ -221,12 +222,13 @@ def load_engine_inputs(out_dir) -> EngineInputs:
         if cv is None:
             cv = _col(coll, "Value")
         if cid is not None and cv is not None:
-            cval = {str(a): float(b) for a, b in
-                    zip(cid, pd.to_numeric(cv, errors="coerce")) if pd.notna(b)}
+            cval = {a: float(b) for a, b in
+                    zip(as_id(cid), pd.to_numeric(cv, errors="coerce"))
+                    if pd.notna(b)}
         acid = _col(alloc, "ContractId")
         acol = _col(alloc, "CollateralId")
         if acid is not None and acol is not None:
-            for c, k in zip(acid.astype(str), acol.astype(str)):
+            for c, k in zip(as_id(acid), as_id(acol)):
                 if k in cval:
                     collateral_net[c] = collateral_net.get(c, 0.0) + cval[k]
 
@@ -237,7 +239,7 @@ def load_engine_inputs(out_dir) -> EngineInputs:
         mat = pd.to_datetime(_col(df, "MaturityDate"), errors="coerce", format="mixed")
         ext = pd.to_datetime(_col(df, "ExtractDate"), errors="coerce", format="mixed")
         out = pd.DataFrame({
-            "contract": _col(df, "ContractId").astype(str),
+            "contract": as_id(_col(df, "ContractId")),
             "portfolio": _col(df, "PortfolioCode").astype(str),
             "rating": _col(df, "Rating").astype(str),
             "on_balance": pd.to_numeric(_col(df, "OnBalance"), errors="coerce"),

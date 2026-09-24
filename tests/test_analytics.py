@@ -209,10 +209,51 @@ class TestAgainstTheRealBook:
         s2 = sd[sd.stage == "Stage 2"].iloc[0]
         assert s2["customers"] < s2["contracts"]
 
+    KNOWN_CHECKS = {
+        "Exposure but zero ECL", "Negative or zero exposure",
+        "ECL exceeds exposure", "Missing rating", "Missing lifetime PD",
+        "Missing LGD", "Collateral coverage missing", "Collateral over 100%",
+        "Implausible months on book",
+    }
+
     @real_only
-    def test_data_quality_finds_the_known_issues(self, rep):
-        dq = data_quality(rep).set_index("check")
-        assert "Implausible months on book" in dq.index
+    def test_data_quality_reports_only_checks_that_fired(self, rep):
+        """A check with no rows is dropped, as in the R.
+
+        Which checks fire is a property of the BOOK, so naming one here would
+        make the test pass or fail on which quarter's run is configured. What
+        must hold is that every row is a known check, carries a count, and is
+        ordered worst first.
+        """
+        dq = data_quality(rep)
+        assert len(dq) > 0
+        assert set(dq["check"]) <= self.KNOWN_CHECKS
+        assert (dq["contracts"] > 0).all()
+        rank = {"error": 0, "warn": 1, "info": 2}
+        assert list(dq["severity"].map(rank)) == sorted(dq["severity"].map(rank))
+        assert (dq["exposure"] >= 0).all()
+
+    def test_every_check_in_the_r_set_is_implemented(self):
+        """The port dropped "Missing LGD" once; this is why it cannot again."""
+        book = pd.DataFrame({
+            "contract": ["a", "b"], "customer": ["c1", "c2"],
+            "exposure": [0.0, 100.0], "ecl": [0.0, 0.0], "stage": [1, 1],
+            "rating": [None, ""], "pd": [np.nan, np.nan], "lgd": [np.nan, np.nan],
+            "collcov": [np.nan, 1.5], "mob": [-1.0, 5000.0],
+        })
+        fired = set(data_quality(book)["check"])
+        assert fired == self.KNOWN_CHECKS - {"ECL exceeds exposure"}
+
+    def test_a_blank_rating_counts_as_missing(self):
+        """R treats "" and NA alike; matching only NA under-reports."""
+        book = pd.DataFrame({
+            "contract": ["a", "b"], "customer": ["c1", "c2"],
+            "exposure": [100.0, 100.0], "ecl": [1.0, 1.0], "stage": [1, 1],
+            "rating": [None, "   "], "pd": [0.1, 0.1], "lgd": [0.5, 0.5],
+            "collcov": [0.5, 0.5], "mob": [10.0, 10.0],
+        })
+        dq = data_quality(book).set_index("check")
+        assert dq.loc["Missing rating", "contracts"] == 2
 
     @real_only
     def test_profiles_conserve_the_total(self, rep):

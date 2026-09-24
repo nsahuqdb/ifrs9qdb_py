@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from .transform import _fmt_date, _num, at, pick
+from ..ids import as_id
 
 __all__ = ["transform_lending", "transform_investments",
            "build_account_master", "ACCOUNT_MASTER_COLUMNS",
@@ -139,12 +140,12 @@ def transform_lending(accounts: pd.DataFrame,
         return pd.DataFrame()
     accounts = drop_repeated_headers(accounts)
 
-    raw_id = pick(accounts, "CONTRACTID", "ContractId").astype(str).str.strip()
+    raw_id = as_id(pick(accounts, "CONTRACTID", "ContractId"))
     out = pd.DataFrame({
         "contract_id_raw": raw_id,
         "contract_id": apply_id_substitutions(raw_id),
         "lim_id": pick(accounts, "LIMID", "LimId", default=""),
-        "customer_id": pick(accounts, "CUSTOMERID", "CustomerId").astype(str).str.strip(),
+        "customer_id": as_id(pick(accounts, "CUSTOMERID", "CustomerId")),
         "account_type": pick(accounts, "ACCOUNTTYPE", "AccountType", default=""),
         "open_date": pick(accounts, "OPENDATE", "OpenDate"),
         "maturity_date": pick(accounts, "MATURITYDATE", "MaturityDate"),
@@ -171,7 +172,7 @@ def transform_lending(accounts: pd.DataFrame,
         cid = pick(customers, "CUSTOMERID", "CustomerId")
         crat = pick(customers, "RATING", "Rating")
         if cid is not None and crat is not None:
-            lut = dict(zip(cid.astype(str).str.strip(), crat.astype(str)))
+            lut = dict(zip(as_id(cid), crat.astype(str)))
             out["rating"] = out["customer_id"].map(lut).fillna("")
 
     # Customer-level worst values, broadcast back to every facility.

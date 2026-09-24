@@ -64,6 +64,45 @@ Equal weights are a plausible-looking number that is never the right answer,
 and they produced a curve set that was monotonic, bounded, correctly shaped
 and wrong — which is exactly the shape of thing the shape tests pass.
 
+## Collateral resolved to zero for the whole book
+
+The collateral stress lever moved the provision by exactly 0.00 at every
+setting, including "remove all collateral". That is not a small number; it is
+the signature of a join returning nothing.
+
+`AccountCollateralAllocation` carries a blank `ContractId`, so pandas reads the
+column as float64 rather than int64, and `astype(str)` renders the ids as
+`"548840.0"`. The account master's column has no blank, reads as int64, and
+renders the same id as `"548840"`. **All 5,932 allocations missed.** Collateral
+netted to zero for every contract, so LGD used none of it and the lever had
+nothing to scale.
+
+Nothing failed. The dictionary was built, it had 5,933 entries, every lookup
+returned the default, and the default is a perfectly reasonable 0.0.
+
+The R is not exposed to this: `as.character()` on an R integer has no trailing
+`.0`. It is a pandas-specific hazard and it will recur wherever an id is used
+as a key, because whether a column has a blank is a property of the QUARTER,
+not of the schema. So ids now go through `ifrs9qdb.ids.as_id()`, which
+normalises int, float and text forms to the same string and blanks a missing
+value rather than letting it become the key `"nan"`.
+
+Worth knowing: `Series.astype(str)` turns a missing value into the STRING
+`"nan"` on pandas 2 and keeps it as `NaN` on pandas 3. The pandas 2 behaviour
+is the more dangerous of the two, because `"nan"` is a usable dictionary key,
+so every missing id collides into one bucket instead of being dropped.
+`as_id()` handles both, with a test for each.
+
+After the fix: 5,932 of 5,933 allocations resolve (the one left is the blank
+row, correctly dropped), halving collateral costs 12.3m and removing it
+entirely costs 87.6m.
+
+The same pattern has been applied to the ETL's id keys in `report.py`,
+`lifetime.py`, `lending.py` and `customer.py`. Those sites are NOT yet verified
+against raw extracts — that needs the extract set, which is not in the
+reference material available here — so they are a hardening, not a confirmed
+fix.
+
 ## Reading the extracts — complete
 
 All twelve read. Format is detected from the file's bytes, not its extension:

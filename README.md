@@ -32,6 +32,7 @@ pytest -q
 | **StPD, all 75,600 rows, both rating scales** | **exact (max abs diff 6.7e-15)** |
 | LifeTimeParameterOther, 82,478 rows | match |
 | 12 of 18 LIC input files | match |
+| Collateral netting, 5,932 allocations | resolve (were silently missing all) |
 
 The StPD figure holds against two independent reference runs
 (`run_00001` at 12/31/2025 and `run_00002` at 9/30/2025) using only the
@@ -89,7 +90,7 @@ The fixtures under `tests/fixtures/` ship with the repository, so the suite
 means something on a fresh clone with nothing configured:
 
 ```bash
-pytest -q          # 151 passed, 59 skipped
+pytest -q          # 170 passed, 64 skipped
 ```
 
 The reconciliation tests need a real run, and a real run is real portfolio
@@ -99,7 +100,7 @@ in git. Point the environment at a copy instead:
 ```bash
 export IFRS9_REF_RUN=/path/to/runs/run_00001     # holds Output/
 export IFRS9_SRC_INPUTS=/path/to/extracts        # the raw Oracle files
-pytest -q
+pytest -q                                        # 205 passed, 29 skipped
 ```
 
 Without them those tests skip and name the variable that was missing, rather

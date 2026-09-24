@@ -83,14 +83,37 @@ class TestStressOnTheRealBook:
         assert r["ok"]
         assert (r["delta"] > 1) if direction == "up" else (r["delta"] < -1)
 
-    def test_asking_for_n_defaults_gives_n(self, book):
-        """Ranking by ECL put already-defaulted customers at the top, so the
-        lever quietly delivered fewer than asked. Ranked by exposure now."""
+    def test_asking_for_n_defaults_picks_n_customers(self, book):
+        """The lever picks N CUSTOMERS by exposure, and keeps every one.
+
+        Ranking by ECL put already-defaulted customers at the top -- they carry
+        a 100% provision by construction -- so the lever delivered fewer
+        defaults than asked for. Ranking by exposure fixed that.
+
+        Fewer than N may actually MOVE, and that is correct: a customer already
+        in Stage 3 is genuinely among the largest and stays in the list rather
+        than being hidden, which is what the R does. What must not happen is
+        the list itself being short.
+        """
         inp, rep, internal = book
         r = apply_stress(inp, rep,
                          StressSpec(name="d", portfolios=internal, default_top_n=5))
         assert len(r["defaulted"]) == 5
-        assert r["customers_moved"] >= 5
+        assert len(set(r["defaulted"])) == 5, "the same customer picked twice"
+
+        scoped = rep[rep["portfolio"].isin(internal)]
+        picked = scoped[scoped["customer"].isin(r["defaulted"])]
+        already = picked.groupby("customer")["stage"].min().eq(3).sum()
+        assert r["customers_moved"] == 5 - already
+
+    def test_the_customers_picked_are_the_largest_by_exposure(self, book):
+        inp, rep, internal = book
+        r = apply_stress(inp, rep,
+                         StressSpec(name="d", portfolios=internal, default_top_n=5))
+        scoped = rep[rep["portfolio"].isin(internal) & (rep["exposure"] > 0)]
+        biggest = (scoped.groupby("customer")["exposure"].sum()
+                   .sort_values(ascending=False).head(5).index)
+        assert set(r["defaulted"]) == set(biggest)
 
     def test_scope_confines_the_change(self, book):
         inp, rep, _ = book
