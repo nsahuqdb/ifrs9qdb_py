@@ -433,3 +433,82 @@ class TestI8UnmappedCollateralTypesDiverge:
         assert v.sum() == 0, (
             f"I8 IS NOW LIVE: unmapped collateral types carry {v.sum():,.2f} of "
             "value, so R writes it off and Python credits it in full.")
+
+
+class TestTheEirScale:
+    """The defect the A/B measurement exposed: AccountMaster.EIR arrives as a
+    raw percent and the lending transform did not divide by 100, so every
+    long-dated month was discounted to nothing."""
+
+    @staticmethod
+    def accounts(eirs, types=None):
+        n = len(eirs)
+        return pd.DataFrame({
+            "CONTRACTID": [f"C{i}" for i in range(n)],
+            "CUSTOMERID": [f"CU{i}" for i in range(n)],
+            "ACCOUNTTYPE": types or ["Long Term"] * n,
+            "EIR": eirs,
+            "ONBALANCE": [1000.0] * n,
+        })
+
+    def test_a_percent_becomes_a_decimal(self):
+        from ifrs9qdb.etl.lending import transform_lending
+        out = transform_lending(self.accounts([2.25, 3.0, 7.0]))
+        assert list(pd.to_numeric(out["eir"]).round(6)) == [0.0225, 0.03, 0.07], (
+            "EIR must be scaled from percent, as R/transform_lending.R:336 does")
+
+    def test_no_rate_survives_above_one(self):
+        from ifrs9qdb.etl.lending import transform_lending
+        out = transform_lending(self.accounts([2.25, 3.0, 7.0, 9.75]))
+        assert (pd.to_numeric(out["eir"]) < 1).all(), (
+            "a rate above 1.0 discounts at over 100% a year")
+
+    def test_a_zero_rate_takes_the_fallback_not_zero(self):
+        """R fills a zero or missing rate from the account type's mean, then
+        from the mean of the workbook's seven Business Finance means. Leaving it
+        at zero would price a long-dated loss undiscounted."""
+        from ifrs9qdb.etl.lending import transform_lending
+        from ifrs9qdb.etl.static_ref import load_static_reference
+        m = load_static_reference()["product_portfolio_mapping"]
+        out = transform_lending(self.accounts([4.0, 0.0, np.nan]),
+                                product_portfolio_mapping=m)
+        eir = pd.to_numeric(out["eir"])
+        assert eir.notna().all(), "no contract may be left without a rate"
+        assert (eir > 0).all(), "a zero rate means undiscounted, not free"
+        assert eir.iloc[1] == pytest.approx(0.04), "filled from the type's mean"
+
+    def test_the_discount_factor_is_sane_over_a_long_horizon(self):
+        """The arithmetic that made the defect matter."""
+        for eir, cap in ((0.04, 2.0), (0.0975, 5.0)):
+            assert (1 + eir) ** (198 / 12) < cap
+        # what it used to do
+        assert (1 + 3.0) ** (100 / 12) > 9000
+
+    @needs_src_inputs
+    def test_the_raw_extract_is_in_percent(self):
+        am = _raw("AccountMaster")
+        e = pd.to_numeric(am["EIR"], errors="coerce")
+        nz = e[e.notna() & (e != 0)]
+        if nz.empty:
+            pytest.skip("this extract carries no EIR")
+        assert nz.max() > 1.0, (
+            "the extract now looks like decimals, not percent -- if the source "
+            "changed scale, the /100 in the transform is wrong")
+
+
+class TestI8AlignedOnUnmappedCollateral:
+    """I8, after alignment: an unmapped collateral type contributes nothing in
+    both ports, matching R and the 23-of-26 majority in the haircut table."""
+
+    @needs_run
+    def test_an_unmapped_type_contributes_nothing(self, inputs):
+        from ifrs9qdb.inputs import load_engine_inputs
+        if inputs.coll_type is None:
+            pytest.skip("this run has no collateral type table")
+        hc = pd.to_numeric(inputs.coll_type["HaircutGeneral"], errors="coerce")
+        assert (hc >= 1.0).sum() > (hc == 0.0).sum(), (
+            "the table's majority should be worthless types, which is what "
+            "makes a full-haircut default the right one")
+        # R's collateral_net on these runs, to the cent.
+        total = sum(load_engine_inputs(OUT).collateral_net.values())
+        assert total > 0

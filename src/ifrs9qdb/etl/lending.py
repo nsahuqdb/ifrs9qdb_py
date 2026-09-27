@@ -191,10 +191,68 @@ def transform_lending(accounts: pd.DataFrame,
     out["portfolio_code"] = _portfolio(out["account_type"],
                                        product_portfolio_mapping)
 
+    # EIR arrives as a RAW PERCENT ("4.2" means 4.2% a year) and every consumer
+    # wants a decimal. Leaving it unscaled discounts at (1 + 4.2) rather than
+    # (1 + 0.042): a loss forty-two months out is divided by 128 instead of
+    # 1.11, which prices every long-dated month at nothing. The investments
+    # transform already scaled; this path did not, so 7,259 of 7,334 contracts
+    # on a June book carried the percent straight into the discount factor.
+    out["eir"], out["nominal_int_rate"] = _effective_rates(
+        out["eir"], out["nominal_int_rate"], out["account_type"],
+        product_portfolio_mapping)
+
     # Payment type: 3 bullet when no frequency, else 4 amortising.
     freq = out["payment_frequency"]
     out["payment_type"] = np.where(freq.isna() | (freq == 0), 3, 4)
     return out
+
+
+def _effective_rates(eir, nir, account_type, mapping):
+    """EIR as a decimal, with the workbook's fallback for a missing rate.
+
+    Mirrors ``R/transform_lending.R:335-402``. A zero or blank EIR is not a
+    zero-interest loan, it is a gap, and the V4 workbook fills it in two tiers:
+
+    1. the mean EIR of that account type, but only for the seven Business
+       Finance product types the workbook itself listed;
+    2. otherwise the mean of those seven self-means.
+
+    Team-added Business Finance products and the off-balance products both fall
+    to tier 2, because V4's VLOOKUP missed them and dropped through to
+    ``AVERAGE(AM9:AM15)``. Matching that is the whole point.
+    """
+    raw = pd.to_numeric(eir, errors="coerce")
+    rate = raw.where(raw.notna() & (raw != 0)) / 100.0
+
+    at = account_type.astype(str).str.strip()
+    v4_bf: list[str] = []
+    if mapping is not None and len(mapping):
+        key = pick(mapping, "product_type", "ProductType", "AccountType")
+        val = pick(mapping, "portfolio", "Portfolio", "PortfolioCode")
+        src = pick(mapping, "source", "Source")
+        if key is not None and val is not None:
+            is_bf = val.astype(str).str.strip() == "Business Finance"
+            # No source column: treat every BF row as V4, which is what the R
+            # port does for older snapshots.
+            is_v4 = (src.astype(str).str.strip() == "v4") if src is not None \
+                else pd.Series(True, index=key.index)
+            v4_bf = list(key[is_bf & is_v4].astype(str).str.strip())
+
+    self_means = rate.groupby(at).mean()
+    bf_means = self_means[self_means.index.isin(v4_bf)].dropna()
+    mean_of_means = float(bf_means.mean()) if len(bf_means) else float(rate.mean())
+    if not np.isfinite(mean_of_means):
+        mean_of_means = 0.0
+
+    fill = at.map(lambda a: self_means.get(a, np.nan) if a in v4_bf else np.nan)
+    fill = pd.to_numeric(fill, errors="coerce").fillna(mean_of_means)
+    rate = rate.fillna(fill)
+
+    # NominalInterestRate is the same quantity on the same scale, and the R
+    # writer emits the filled EIR for it.
+    nir_raw = pd.to_numeric(nir, errors="coerce")
+    nir_out = nir_raw.where(nir_raw.notna() & (nir_raw != 0)) / 100.0
+    return rate, nir_out.fillna(rate)
 
 
 def _worst_rating(view: pd.DataFrame) -> pd.Series:

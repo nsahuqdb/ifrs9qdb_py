@@ -26,7 +26,7 @@ runs for 2025-09-30 and 2025-12-31, and those runs' own
 | I5 | `PastDueDays` is blank on contracts holding 450m, and blank reads as current | **B** |
 | I6 | Ten AccountMaster columns arrive identically zero | **B** |
 | I7 | 1,689 fully duplicated schedule rows, and 117 allocations with no contract id | **B** |
-| I8 | Two collateral types are unmapped, and the two ports treat that oppositely | **B** |
+| I8 | Two collateral types are unmapped; the ports disagreed, now aligned | **B** |
 | I9 | Zero and negative outstanding balances | **C** |
 | X1 | Excel and R/Python disagree on the months before the first payment | **B** |
 | X2 | The `ead_fallback` config block is live in R and inert in Python | **B** |
@@ -37,41 +37,82 @@ runs for 2025-09-30 and 2025-12-31, and those runs' own
 
 ## 1. What I1 costs, in percent
 
-Measured through the engine: each truncated curve is extended to the maturity its
-own `AccountMaster` row reports, and the whole report is recomputed. Two
-reconstructions bracket it — `linear` runs the residual balance to zero in a
-straight line, `slope` continues at the amortisation rate the last two points
-show.
+**Measured directly, the way you asked: change `START_DAT` in the input file and
+re-run everything.** Nothing else was touched — the same extract, the same
+config, the same code, one column repaired (`+100 years` where the year is below
+1950). Full ETL and engine on both, 2026-06-09 extract, 7,334 contracts,
+**staging identical in both runs.**
 
-| | run_00001 (2025-12-31) | run_00002 (2025-09-30) |
-| --- | --- | --- |
-| reported ECL | 2,283,041,269 | 2,193,491,567 |
-| curves extended | 506 | 557 |
-| **total ECL understated by** | **+0.60% to +0.78%** | **+0.43% to +0.60%** |
-| in money | +13.7m to +17.8m | +9.4m to +13.1m |
-| **Stage 2 ECL understated by** | **+2.30% to +2.99%** | **+1.60% to +2.21%** |
-| the affected contracts' own ECL | +2.04% to +2.65% | +1.35% to +1.86% |
-| their coverage (ECL / EAD) | 44.17% → 45.07–45.34% | 41.31% → 41.86–42.07% |
+| | as delivered | dates repaired | change |
+| --- | --- | --- | --- |
+| **total ECL** | 1,765,010,637 | 1,802,745,667 | **+37,735,030 = +2.14%** |
+| Stage 1 | 256,822,194 | 257,009,880 | +187,686 (+0.07%) |
+| **Stage 2** | **533,775,857** | **571,323,201** | **+37,547,344 = +7.03%** |
+| Stage 3 | 974,412,586 | 974,412,586 | 0 (+0.00%) |
+| the 598 contracts that moved | 438,323,391 | 476,058,421 | **+8.61%** |
 
-Stage 1 is unaffected (the horizon is capped at twelve months regardless) and
-Stage 3 is already booked at 100%, so **the entire effect lands in Stage 2.**
+**Stage 2 is understated by 7.0%, and the whole provision by 2.1%.**
 
-**The direction is certain; only the size is an estimate.** Every month the
-curve does not reach adds a non-negative marginal loss, so the reported figure
-can only be too low. Pinning it exactly needs the `RepaymentSchedule` extract for
-those two quarters, which is not held — only the 2026-06-09 one is.
+Stage 3 cannot move: it is booked at 100% of outstanding regardless of the curve
+(**M12**). Stage 1 barely moves, and only for 10 contracts whose curve was
+shorter than twelve months before the repair. **Everything else lands in Stage
+2** — which, on this book, is 4,919 of 7,334 contracts.
 
-**The next quarter looks worse.** In the delivered runs the truncated contracts
-hold **35.1%** of scheduled on-balance exposure. In the 2026-06-09 extract the
-contracts with wrapped dates hold **66.4%** — 1.9× the share. On that book the
-same defect would plausibly cost on the order of **1% to 1.5% of total ECL**,
-though that is a scaling of the measured result, not a measurement.
+The repair lengthened **1,124 curves**, median gain **40 months**, maximum
+**168**. `LifeTimeParameterOther` goes from 80,362 rows to 131,346 and its
+longest curve from month 41 to month 198. The StPD term structures run to 600
+months, so nothing else limits the horizon.
 
-For context on materiality: a 0.6% understatement of the provision is
-2.4× the largest overlay applied in either run, and it is invisible in every
-report the tool produces.
+### This supersedes an earlier, lower estimate
 
----
+An earlier version of this file reported **+0.60% to +0.78%** of total ECL and
+**+2.30% to +2.99%** of Stage 2, measured on the two delivered quarters by
+*reconstructing* the missing tail rather than repairing the source. Those figures
+were too low, for two reasons:
+
+1. **The reconstruction understated the exposure.** Running the residual balance
+   down in a straight line captured **87%** of the true hidden EAD
+   (94.9bn against 108.98bn summed over the hidden months), because these
+   schedules are back-loaded — contract `590851` still carries 26.1m at month 60
+   and 10.1m at month 90.
+2. **More importantly, they were a different book.** The delivered quarters have
+   **35.1%** of scheduled exposure in wrapped contracts; the June 2026 extract
+   has **66.4%**, and far more of it sits in Stage 2. The two measurements are
+   both right about their own quarter.
+
+So: **+2.14% total and +7.03% of Stage 2 is the current, directly measured
+figure**, and it is the one to use. The earlier bracket stands only as a
+measurement of the December and September books, and even there is understated by
+roughly a further 13% from the reconstruction.
+
+### A defect found while doing this
+
+The first attempt at this measurement returned **+0.18%**, which was wrong, and
+the reason was a genuine bug in the Python ETL that this exercise exposed.
+
+`AccountMaster.EIR` arrives as a **raw percent** — the values are 2.25, 2.50,
+3.00, 3.50, 7.00. R divides by 100 (`R/transform_lending.R:336`,
+`eir_raw / 100`). **The Python lending transform did not**, so 4,872 of 7,334
+contracts carried a percent straight into the discount factor:
+
+```
+disc = (1 + eir) ** (t / 12)
+```
+
+At `eir = 3.0` that is `4 ** (t/12)`: a loss at month 42 divided by **128**
+instead of 1.11, and at month 100 by **9,463**. It priced every long-dated month
+at nothing — which is precisely the effect being measured, so the defect hid
+itself.
+
+It is now fixed, along with R's two-tier fallback for a zero or missing rate,
+which the Python path also lacked. The port's EIR now matches R's scale exactly
+(median 0.0439 against R's 0.0434, **maximum 0.0975 in both**). The effect on the
+June book alone, before any date repair, is **1,425,123,668 → 1,765,010,637, or
++23.9%**.
+
+This never touched the delivered runs: the parity test reads the R run's *output*
+CSVs, where EIR is already a decimal, so `transform_lending` was never in that
+path. The exact-reproduction test still passes.
 
 ## 2. Why none of this was flagged in validation
 
@@ -228,21 +269,44 @@ The `m == 0` clause was added precisely so month 0 still gets `OnBalance` when
 `first_schedule_month` goes negative. It fixes month 0 and leaves months 1
 onward to diverge.
 
-**Measured over the whole extract:**
+### How many contracts, and how many months?
+
+**Not all of them, and for most of those it is one month.** The number of
+differing months is exactly `first_surviving_payment_month − 1`, floored at zero,
+so it depends entirely on how soon the contract's next real payment falls:
+
+| first surviving payment at month | contracts | months that differ |
+| --- | --- | --- |
+| 0 | 568 | **0** |
+| 1 | 321 | **0** |
+| 2 | 206 | 1 |
+| 3 | 9 | 2 |
+| 7 | 2 | **6** |
 
 | | |
 | --- | --- |
-| contracts whose curve **values** differ | **187** |
-| months differing | 206 |
+| affected contracts with a surviving payment | 1,106 |
+| **where no month differs** (payment at month 0 or 1) | **889 — 80.4%** |
+| **where months do differ** | **217 — 19.6%** |
+| differing months, total across the book | **236** |
+| per differing contract | median **1**, maximum **6** |
+| contracts whose curve **values** actually differ | **187** |
 | their on-balance exposure | **584,655,155** |
 | contracts whose curve **length** differs | **0** |
 | net curve sum, Excel vs R/Python | **−21,162,763** (−0.11%), mixed sign |
 | largest single contract (`599073`) | **+1,748,551** |
 
-Only 187 of the 1,124 affected contracts differ, because most have their first
-surviving payment at month 0 or 1, leaving no gap for the clause to cover. Curve
-length never differs, since `MAX` is unaffected by dropping negatives as long as
-one non-negative row survives.
+So the "months 1–6" of the worked example is the **extreme case** — only two
+contracts in the book have a six-month gap. Four in five affected contracts have
+no gap at all, because they still have a payment due this month or next.
+
+The 187 is smaller than the 217 because on thirty of them `OnBalance` happens to
+equal the first surviving payment's `BALANCE + REPAYMENT`, so the two clauses
+return the same number. 217 is how many are structurally exposed; 187 is how many
+actually print differently.
+
+Curve **length** never differs, since `MAX` is unaffected by dropping negatives
+as long as one non-negative row survives.
 
 **This divergence exists only because of I1.** Repair the dates and
 `first_schedule_month` is positive in all three, the second clause behaves
@@ -526,7 +590,7 @@ documents this case; R has no id-normalisation helper in its join path.
 
 ---
 
-## I8 — Two collateral types are unmapped, and the ports disagree · **B**
+## I8 — Two collateral types are unmapped; the ports disagreed, now aligned · **B**
 
 `CONFIG_collateral_type_coverage` fires in both runs: collateral types **27 and
 28** are absent from `collateral_types.csv`, so `HaircutGeneral` resolves to NA.
@@ -547,14 +611,29 @@ net_value[k] = float(v) * (1.0 - haircut.get(t, 0.0))
 `haircut.get(t, 0.0)` defaults to **no haircut**, so `1 - 0 = 1` and the row
 contributes its **full value** — aggressive.
 
-These are exact opposites, and the comment beside the Python line claims it is
-"matching the engine", which is wrong.
+These were exact opposites, and the comment beside the Python line claimed it was
+"matching the engine", which was wrong.
 
-**Is it live?** No. All 12 (run_00001) and 7 (run_00002) allocated records of
-types 27 and 28 have **zero `CollateralValue`**, so both paths give 0.00 and
-`collateral_net` agrees to the cent — which is why parity holds. Given **I2**,
-that is luck, not design: the moment a type-27 record arrives with a value, R
-writes it off and Python credits it in full.
+**Which is right?** Neither, strictly — but Python's was indefensible. The
+haircut table has 26 types: **23 carry `haircut_general = 1.00`** (worthless for
+provisioning) and **exactly one carries 0.00** (bank letter of guarantee).
+Defaulting an unknown type to `0.0` therefore treated it as the single most
+generous category in the book. R's effective zero-benefit matches the 88%
+majority.
+
+**What the Excel tool does** settles the question differently: a VLOOKUP miss
+returns `#N/A`, which propagates through the SUM, so the contract's collateral
+becomes `#N/A` and somebody has to fix the mapping. Excel does not pick a side —
+it refuses to compute. That is the right behaviour, and it is what
+`CONFIG_collateral_type_coverage` firing should mean.
+
+**Resolved.** Python now defaults an unmapped type to a **full haircut**, matching
+R and the table's majority. Verified to change nothing today:
+`collateral_net` is **303,941,071.60** and **537,263,040.63** on the two runs —
+identical to R to the cent, because every type-27 and type-28 record carries zero
+value (**I2**). The remaining gap is that both engines still compute silently
+where Excel would refuse; the open item is to make an unmapped type an **ERROR**,
+not to pick a better default.
 
 ---
 
@@ -669,8 +748,9 @@ produces a convex curve and Python a straight line.
 5. **Reconcile the two rule sets and make Python read the config** (X2, X3).
 6. **Decide what a blank DPD means** for the 123 contracts whose customer has
    none (I5), rather than defaulting to current.
-7. **Align the unmapped-collateral-type behaviour** (I8) and fix the Python
-   comment that claims it already matches R.
+7. **Make an unmapped collateral type an ERROR** (I8). The two ports are now
+   aligned on a full haircut, but both still compute silently where Excel
+   returns `#N/A` and forces the mapping to be fixed.
 8. **Ask for the component breakdown and off-balance amounts** (I6), or record
    that the provision cannot be disclosed by component.
 

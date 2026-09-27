@@ -256,10 +256,17 @@ def load_engine_inputs(out_dir) -> EngineInputs:
                                pd.to_numeric(cv, errors="coerce"), types):
                 if pd.isna(v):
                     continue
-                # An unknown type is treated as UNHAIRCUT, matching the engine:
-                # defaulting to a full haircut would silently write collateral
-                # off whenever the type table gained a row.
-                net_value[k] = float(v) * (1.0 - haircut.get(t, 0.0))
+                # An UNMAPPED type takes a FULL haircut, so it contributes
+                # nothing. This matches R, where `1 - NA` is NA and the row is
+                # then zeroed (R/ecl_collateral.R:66-67), and it matches the
+                # table: 23 of 26 mapped types carry haircut_general = 1.00 and
+                # exactly one carries 0.00. Defaulting to 0.0, as this line
+                # used to, treated an unknown type as the single most generous
+                # category in the book. Neither default is really right --
+                # Excel's VLOOKUP returns #N/A and forces the mapping to be
+                # fixed -- so CONFIG_collateral_type_coverage firing is the
+                # signal that matters, not the value chosen here.
+                net_value[k] = float(v) * (1.0 - haircut.get(t, 1.0))
 
         acid = _col(alloc, "ContractId")
         acol = _col(alloc, "CollateralId")
