@@ -12,6 +12,11 @@ One entry, M2, was raised as a defect and is not one. It is kept rather than
 deleted because the wrong reading had already reached two other files, and an
 item that says "this looks wrong and is not" is worth more than a gap.
 
+M15 to M17 came from reading the raw Oracle extracts the app is fed, which
+closed the one link in the EAD chain this register could not previously check.
+M15 is the largest item here and the only one whose cause is outside the model:
+a date the ETL misreads, which the model then prices as fact.
+
 Every figure below is reproducible from `tests/test_methodology_issues.py`,
 which pins the CURRENT behaviour. Those tests are written to fail when an item
 is fixed, so a fix cannot land silently.
@@ -37,6 +42,9 @@ or a naming and documentation problem that keeps producing wrong readings.
 | M12 | Stage 3 is booked at 100% with no recovery | **C** |
 | M13 | Revolving and off-balance-sheet lifetime is contractual | **C** |
 | M14 | Only one macroeconomic variable carries any weight | **C** |
+| M15 | Every schedule beyond 2029 is silently discarded, cutting lifetime | **A** |
+| M16 | The EAD curve adds each instalment's interest to the balance | **B** |
+| M17 | A monthly grid cannot carry the schedule it is built from | **C** |
 
 ---
 
@@ -238,10 +246,16 @@ This also corrects an earlier reading in this register. The rise between
 months 0 and 1 on 271 contracts is the `+ REPAYMENT` add-back, not a drawdown.
 A further 1,171 curves rise again later, which the add-back does not explain.
 
-The raw Oracle `RepaymentSchedule` extract is not held with the runs, so the
-one link that could not be checked is whether that derivation faithfully
-represents the source data. **That is the remaining test to run, and it needs
-the source extracts.**
+Whether that derivation faithfully represents the source data has since been
+tested against the raw `RepaymentSchedule` extract, and the answer is in three
+parts. The derivation is faithful to its own rule — 94.4% of curve points equal
+the `BALANCE + REPAYMENT` the schedule gives, and month 0 equals `OnBalance` on
+**all 5,399 curves without exception**. But the rule itself adds each
+instalment's interest to the balance (**M16**), the grid drops payments that
+share a month (**M17**), and, far more seriously, every payment falling after
+2029 is discarded before the curve is built (**M15**). M15 is the reason 1,124
+contracts are priced over a lifetime that ends in December 2029 whatever their
+maturity date says.
 
 ### The horizon is wrong before the shape is considered
 
@@ -493,16 +507,264 @@ M1, and a single-variable model is thin for a model-validation review.
 
 ---
 
+## M15 — Every schedule beyond 2029 is silently discarded, cutting lifetime · **A**
+
+*This is the largest single finding in the register, and it was invisible until
+the raw extract was read. It is a data-interpretation error in the ETL that the
+model then treats as fact.*
+
+### What the extract contains
+
+`RepaymentSchedule.xlsx` (extract 2026-06-09, 85,160 rows, 5,705 contracts)
+holds **25,466 rows — 29.9% of the file — with `START_DAT` between 1930-01-01
+and 1943-01-30**, spread over **1,124 contracts**. `build_lifetime_parameter_other`
+drops them, with this comment:
+
+> Drop placeholder historical schedule entries (e.g., START_DAT = 1930-01-01)
+> […] These are common when the source system uses a sentinel date for the
+> final balloon payment of a fully-amortising loan
+
+They are not sentinels and they are not placeholders. They are **2030 to 2043
+read through a two-digit-year pivot** — the Excel convention where `30`–`99`
+becomes 1930–1999 and `00`–`29` becomes 2000–2029. The observed range,
+1930–1943, is exactly that boundary.
+
+### Four independent proofs
+
+Add a century to those dates and:
+
+| check | result |
+| --- | --- |
+| the contract's balance path becomes monotone non-increasing | holds |
+| the roll-forward identity holds on every row | 30/30 and 16/16 on the two worked contracts |
+| the last scheduled payment lands on `AccountMaster.MaturityDate` | **1,124 of 1,124 exactly** |
+| the final balance at that payment is 0.00 | holds |
+
+Against the same test, the end month R actually keeps matches the contract's
+own maturity date for **0 of 1,124** contracts, with a median error of **39
+months**. Worked example, contract `520610`:
+
+```
+raw, sorted by START_DAT        repaired (+100y)
+1930-03-17  bal 1,381,651.58    2026-06-17  bal 22,106,426.60
+1930-06-17  bal         0.00    ...
+2026-06-17  bal 22,106,426.60   2030-03-17  bal  1,381,651.58
+...                             2030-06-17  bal         0.00
+2029-12-17  bal  2,763,303.25
+```
+
+`AccountMaster.MaturityDate` for `520610` is **2030-06-17**. The repaired
+schedule's last payment is 2030-06-17 at a zero balance. R keeps the schedule
+only to 2029-12-17, where **2,763,303.25 is still outstanding**.
+
+### Why a dropped row changes the provision
+
+`resolve_ead_curve` takes the horizon from the curve, not from the maturity date:
+
+```r
+curve <- schedule_curves[[cid]]
+if (!is.null(curve) && length(curve) > 0) {
+  H <- length(curve)                     # the maturity date is never consulted
+  if (stage == 1L) H <- min(12L, H)
+  return(list(ead = curve[seq_len(H)], horizon = H, shape = NA_character_))
+}
+```
+
+So dropping the post-2029 rows shortens `end_month`, which shortens `H`, which
+ends the ECL sum early. The PD term structures run to 600 months, so nothing
+else limits it — the truncated EAD curve is the binding constraint.
+
+### It is live in both delivered runs
+
+The fingerprint is unmistakable. December 2029 is month 47 from the
+2025-12-31 extract and month 50 from 2025-09-30:
+
+| | run_00001 (2025-12-31) | run_00002 (2025-09-30) |
+| --- | --- | --- |
+| longest supplied curve, any contract | **month 47** | **month 50** |
+| curves ending exactly there | 506 | 557 |
+| of those, maturity is later | **506 of 506** | **557 of 557** |
+| their on-balance exposure | 1,914,805,490 | 2,074,643,215 |
+| share of scheduled on-balance | 35.1% | 35.1% |
+| months of life cut, median | 34 | 31 |
+| stage 1 / 2 / 3 | 186 / 254 / 66 | 174 / 319 / 64 |
+
+**No curve in either run extends past December 2029.** On a book whose own
+report gives these contracts a median 78 months to maturity, that is not a
+coincidence — it is the 2030 cliff.
+
+### What it costs
+
+Stage 1 is unaffected (`H = min(12, …)`) and Stage 3 is already booked at 100%
+(M12), so the whole effect lands in **Stage 2**. Measured by extending each
+truncated curve to the maturity its own `AccountMaster` row reports and
+recomputing the entire report through the engine — two reconstructions, to
+bracket it: `linear` runs the residual balance to zero in a straight line,
+`slope` continues at the amortisation rate the last two points show.
+
+| | run_00001 | run_00002 |
+| --- | --- | --- |
+| reported ECL | 2,283,041,268.74 | 2,193,491,567.06 |
+| curves extended | 506 | 557 |
+| months added | 20,169 | 21,760 |
+| understated by, `linear` | **+13,709,956** (+0.60%) | **+9,445,688** (+0.43%) |
+| understated by, `slope` | **+17,821,121** (+0.78%) | **+13,055,358** (+0.60%) |
+| as a share of Stage 2 ECL | +2.30% to +2.99% | +1.60% to +2.21% |
+
+Both reconstructions are estimates: the exact figure needs the source extract
+for those two quarters, which is not held. The direction is not an estimate —
+every missing month adds a non-negative marginal loss, so the reported number
+can only be too low.
+
+### What a correct treatment looks like
+
+Read the source dates correctly. A schedule row whose year is below 1950 in an
+extract taken in 2026 is not a historical payment; the pivot has wrapped it.
+Either fix it at the read (`year < 1950` → `+100`), or, better, have the
+extract deliver a four-digit year and make a pre-extract-date schedule row a
+validation error rather than something to drop quietly. Separately,
+`resolve_ead_curve` should not take a lifetime from a file's row count when
+`AccountMaster.MaturityDate` is right there: a curve that ends before maturity
+should be extended or rejected, not believed.
+---
+
+## M16 — The EAD curve adds each instalment's interest to the balance · **B**
+
+*The one-line rule `EAD = BALANCE + REPAYMENT` is documented in both ports as
+"the balance BEFORE this payment is applied". Against the source data it is not
+that. It is the balance plus the interest portion of the next instalment.*
+
+### The identity the data actually satisfies
+
+`REPAYMENT` is principal **plus** interest, and `BALANCE` is the balance after
+the payment. So the balance standing before payment *j* is
+`BALANCE_j + REPAYMENT_j − PROJ_INT_j`. Tested on the 54,007 consecutive
+payment pairs in the 2026-06-09 extract:
+
+| candidate | holds |
+| --- | --- |
+| `prior = BALANCE + REPAYMENT − PROJ_INT` | **49,446 (91.6%)** |
+| `prior = BALANCE + PRINCE_DUE` | 46,656 (58.7%) |
+| `prior = BALANCE + REPAYMENT` — what the engine uses | **12,418 (23.0%)** |
+
+`PRINCE_DUE` is not the amortisation either; on contract `504055` the balance
+steps down by 200,525.61 a quarter while `PRINCE_DUE` reads 173,185.24, and
+`200,525.61 + PROJ_INT` reproduces `REPAYMENT` to the cent.
+
+### Size
+
+Running the shipped derivation on the raw extract and comparing each curve
+point to the payment it came from:
+
+| | |
+| --- | --- |
+| curve points testable | 55,000 |
+| equal to `BALANCE + REPAYMENT` | 51,921 (94.4%) — the code does what it says |
+| equal to the true prior balance | 15,046 (27.4%) |
+| overstatement, aggregate | **+0.43%** (375,583,006 across the curve) |
+| per point | median +0.29%, p95 +1.26%, p99 +1.28%, max **+42.4%** |
+
+That 94.4% is worth reading as a pass: the derivation is faithful to its own
+documented rule, and both ports implement it identically. The rule is what is
+wrong, not the code.
+
+### An independent corroboration
+
+An amortising balance cannot rise. On rows that carry a repayment,
+`BALANCE + REPAYMENT` rises from one payment to the next **3,555 times**; the
+true prior balance rises **369 times**. Nine in ten of those rises are the
+projected interest being added, not anything in the loan.
+
+### What a correct treatment looks like
+
+`EAD = BALANCE + REPAYMENT − PROJ_INT` on rows that carry a repayment, and
+`EAD = BALANCE` on rows that do not (see M17). IFRS 9 measures exposure at
+default, so the balance outstanding is the right quantity; the instalment's
+interest is not exposure, and it is being counted twice — once inside the EAD
+and again through the discount rate. The effect is small and in the opposite
+direction to M15, which is precisely why neither shows up in a total.
+
+---
+
+## M17 — A monthly grid cannot carry the schedule it is built from · **C**
+
+*Two lesser findings from the same test, recorded together because the obvious
+fix for one of them would break the other.*
+
+### Payments that fall in an occupied month disappear
+
+The curve holds one value per contract-month, taken from the first scheduled
+payment after that month. Where two payments fall in the same calendar month
+the second is never looked up: **933 payments across 78 contracts** in the
+2026-06-09 extract. Contracts on fortnightly or split schedules lose roughly
+half their cash flow from the curve's point of view.
+
+### A quarter of the schedule is not a repayment at all
+
+**14,687 of 59,694 future rows (24.6%)** carry `REPAYMENT = 0` with a **rising**
+`BALANCE` — a facility in its grace or drawdown phase, capitalising interest.
+Contract `609199` runs 21,857,894 → 22,931,091 over fourteen months with no
+payment due. For those rows `BALANCE + REPAYMENT` reduces to `BALANCE`, which
+is correct, and the rising curve is correct too: exposure genuinely grows.
+
+This is the trap. **2,918 of the 6,473 rising steps (45%) are legitimate
+accrual.** Forcing the curve to be non-increasing — the obvious guard against
+M16 — would understate every project and construction facility on the book.
+Whatever is done about M16 has to distinguish a repayment row from an accrual
+row, and the `REPAYMENT = 0` flag is what does it.
+
+### For scale
+
+Across all 5,399 curves the delivered EAD sums to 149,662,922,630. Capped to be
+non-increasing it sums to 148,531,385,630 — 0.76% lower. Most of that gap is
+accrual that should be there.
+
+---
+
+## A note on how these were found, and what it says about the suite
+
+M15 to M17 needed the raw extracts. Pointing the suite at them for the first
+time — `IFRS9_SRC_INPUTS` had never been set in any run of it — turned up
+fifteen failures that had nothing to do with the model:
+
+* Five inputs are SQL*Plus HTML behind an `.xls` extension and need `lxml`,
+  which was simply not installed. They reported as "missing input".
+* Eight tests compared the ETL's output against a run's output without
+  checking that the two came from the **same extract**. A June extract against
+  a December run fails on row counts and proves nothing either way.
+* One hardcoded `reporting_date == "6/30/2026"`, and one required a
+  `N rows selected.` footer that a clean Excel export does not have.
+
+None of that changes a reported number, and none of it is in this register's
+scope. It is recorded because the cause is worth naming: **a test that only
+runs when an environment variable is set is a test that does not run.** The
+assertions were written from the R package's documentation rather than from a
+file, and nothing exercised them. The same shape of problem produced the three
+broken imports found earlier in the reconcile endpoints — code paths that only
+fire on a button press.
+
+Those eight now skip with the reason stated (`IFRS9_SRC_INPUTS is extract X and
+IFRS9_REF_RUN is Y`), the reporting date is derived from the extract instead of
+hardcoded, and the two junk-row tests skip when the extract carries no junk.
+No assertion about model behaviour was weakened. With a matched extract and run
+they would run properly for the first time.
+
+---
+
 ## What to test next
 
-Two things this register does not yet answer:
+The EAD chain is now checked end to end: the engine passes the supplied curve
+through untouched (M5), the derivation that builds that curve has been tested
+against the raw extract (M15, M16, M17), and the fallback used where no
+schedule exists has been swept across every parameter it exposes (M5). What
+remains open:
 
-1. **Whether `LifeTimeParameterOther` faithfully represents the raw
-   repayment schedule.** M5 confirms the engine passes the file through
-   untouched, and confirms the derivation rule that builds it, but the raw
-   Oracle `RepaymentSchedule` extract is not held with the runs. Comparing the
-   two needs the source files, and it is the one link in the EAD chain still
-   unchecked.
+1. **How much M15 really costs the two delivered quarters.** The figures in
+   M15 come from extending each truncated curve to its reported maturity,
+   which brackets the answer but does not settle it. The exact number needs
+   the `RepaymentSchedule` extract for 2025-09-30 and 2025-12-31; only the
+   2026-06-09 one is held. With those two files the whole report can be
+   rebuilt from repaired dates and the difference read off directly.
 
 2. **Whether the annual PD term structure itself is right.** M3 is about the
    monthly conversion; the annual curve that feeds it has not been back-tested

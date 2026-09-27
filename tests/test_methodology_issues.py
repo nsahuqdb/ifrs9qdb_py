@@ -21,7 +21,7 @@ from ifrs9qdb.engine import compute_lgd, fallback_ead_curve, sum_marginal_ecl
 from ifrs9qdb.etl.macro import basel_asrf_pit, compute_internal_scenario_weights
 from ifrs9qdb.etl.static_ref import load_static_reference
 
-from conftest import ref_output
+from conftest import needs_src_inputs, ref_output, src_inputs
 
 OUT = ref_output()
 needs_run = pytest.mark.skipif(
@@ -502,3 +502,196 @@ class TestM14OneMevCarriesEverything:
         assert len(zero) >= 2, (
             "M14 may have CHANGED: more than one MEV now carries weight.")
         assert w["weight"].sum() == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------- M15-17 ----
+# These three came from reading the raw Oracle extracts. The synthetic cases
+# run everywhere; the ones that need real data skip with a reason.
+def _schedule(rows):
+    """A RepaymentSchedule frame in the source system's own column names."""
+    return pd.DataFrame(rows, columns=["KEY_1", "POST_DATE", "START_DAT",
+                                       "PRINCE_DUE", "PROJ_INT", "REPAYMENT",
+                                       "BALANCE"])
+
+
+def _accounts(rows):
+    return pd.DataFrame(rows, columns=["ContractId", "OnBalance"])
+
+
+def _curve(sched, accounts, ref="2026-06-09"):
+    from ifrs9qdb.etl.lifetime import build_lifetime_parameter_other
+    lp = build_lifetime_parameter_other(sched, accounts, pd.Timestamp(ref), ref)
+    lp["MonthLifetime"] = pd.to_numeric(lp["MonthLifetime"])
+    lp["EADLifetime"] = pd.to_numeric(lp["EADLifetime"])
+    return lp.sort_values("MonthLifetime").reset_index(drop=True)
+
+
+class TestM15EverythingAfter2029IsDiscarded:
+    """M15: a two-digit-year pivot puts 2030+ payments in 1930+, and the
+    derivation drops them as historical. The ECL horizon is the curve's own
+    length, so the lifetime ends in December 2029."""
+
+    # A loan maturing 2031-06, quarterly, whose last five payments come back
+    # from the extract with their century lost.
+    @staticmethod
+    def wrapped_loan():
+        rows, bal = [], 1000.0
+        for k, d in enumerate(["2026-09-09", "2026-12-09", "2027-03-09",
+                               "2030-03-09", "2030-06-09", "2031-06-09"]):
+            bal -= 150.0
+            y = int(d[:4])
+            shown = f"{y - 100}{d[4:]}" if y >= 2030 else d
+            rows.append(("C1", "2026-06-09", pd.Timestamp(shown),
+                         150.0, 10.0, 160.0, max(bal, 0.0)))
+        return _schedule(rows), _accounts([("C1", 1000.0)])
+
+    def test_the_wrapped_payments_are_dropped(self):
+        sched, acc = self.wrapped_loan()
+        lp = _curve(sched, acc)
+        assert lp["MonthLifetime"].max() == 8, (
+            "M15 may be FIXED: the curve no longer stops at the last payment "
+            f"before 2030 (it now reaches month {lp['MonthLifetime'].max()}). "
+            "If the year pivot is handled, update METHODOLOGY_ISSUES.md.")
+
+    def test_the_curve_ends_with_exposure_still_outstanding(self):
+        """The defect that costs money: the curve does not run down to zero,
+        it simply stops."""
+        sched, acc = self.wrapped_loan()
+        lp = _curve(sched, acc)
+        assert lp["EADLifetime"].iloc[-1] > 0.0
+
+    def test_repairing_the_year_restores_the_full_life(self):
+        """The same loan with four-digit years prices over 60 months, not 9."""
+        sched, acc = self.wrapped_loan()
+        fixed = sched.copy()
+        fixed["START_DAT"] = [d.replace(year=d.year + 100) if d.year < 1950 else d
+                              for d in fixed["START_DAT"]]
+        assert _curve(fixed, acc)["MonthLifetime"].max() == 59
+
+    @needs_run
+    def test_no_supplied_curve_in_the_run_passes_december_2029(self, inputs):
+        """The live fingerprint. Nothing about the book makes December 2029
+        special; the pivot does."""
+        if not inputs.ead_curves:
+            pytest.skip("this run supplies no EAD curves")
+        ext = pd.to_datetime(inputs.contracts["extract_date"], errors="coerce").max()
+        if pd.isna(ext):
+            pytest.skip("no extract date on this run")
+        cliff = (2029 - ext.year) * 12 + (12 - ext.month) - 1
+        longest = max(len(c) for c in inputs.ead_curves.values()) - 1
+        assert longest == cliff, (
+            f"M15: the longest supplied curve reaches month {longest}; the "
+            f"December-2029 cliff for this extract is month {cliff}. If they "
+            "no longer coincide the pivot may be handled — re-check M15.")
+
+    @needs_run
+    def test_the_contracts_stopping_there_all_mature_later(self, inputs):
+        if not inputs.ead_curves:
+            pytest.skip("this run supplies no EAD curves")
+        ext = pd.to_datetime(inputs.contracts["extract_date"], errors="coerce").max()
+        cliff = (2029 - ext.year) * 12 + (12 - ext.month) - 1
+        at = {c for c, v in inputs.ead_curves.items() if len(v) - 1 == cliff}
+        if not at:
+            pytest.skip("no curve ends at the cliff on this run")
+        live = inputs.contracts[inputs.contracts["contract"].isin(at)]
+        beyond = pd.to_numeric(live["months_to_mat"], errors="coerce") > cliff + 1
+        assert beyond.mean() > 0.9, (
+            f"M15: only {beyond.mean():.0%} of the contracts stopping at the "
+            "cliff mature after it. Expected nearly all of them.")
+        assert len(at) > 100
+
+
+class TestM16InterestIsAddedToTheBalance:
+    """M16: `BALANCE + REPAYMENT` is the outstanding balance plus that
+    instalment's projected interest, not the balance before the payment."""
+
+    # Monthly payments at months 1, 2 and 3. Month 1 of the curve looks up the
+    # month-2 payment, whose balance-after is 700 and whose interest is 10 --
+    # so the balance standing before it is 850 and the curve holds 860.
+    @staticmethod
+    def three_payments():
+        return (_schedule([
+            ("C1", "2026-06-09", pd.Timestamp("2026-07-09"), 150.0, 12.0, 162.0, 850.0),
+            ("C1", "2026-06-09", pd.Timestamp("2026-08-09"), 150.0, 10.0, 160.0, 700.0),
+            ("C1", "2026-06-09", pd.Timestamp("2026-09-09"), 150.0, 8.0, 158.0, 550.0)]),
+            _accounts([("C1", 1000.0)]))
+
+    def test_the_curve_carries_the_interest(self):
+        sched, acc = self.three_payments()
+        at1 = float(_curve(sched, acc).query("MonthLifetime == 1")["EADLifetime"].iloc[0])
+        assert at1 == pytest.approx(860.0), (
+            f"M16 may be FIXED: month 1 now holds {at1:.2f}. The balance "
+            "standing before that payment is 850.00; the rule gives 860.00.")
+
+    def test_the_overstatement_is_exactly_the_projected_interest(self):
+        sched, acc = self.three_payments()
+        at1 = float(_curve(sched, acc).query("MonthLifetime == 1")["EADLifetime"].iloc[0])
+        true_prior = 700.0 + 160.0 - 10.0        # = 850, the actual outstanding
+        assert at1 - true_prior == pytest.approx(10.0)
+
+    def test_an_accrual_row_is_not_affected(self):
+        """A grace-period row carries REPAYMENT = 0, so the rule reduces to
+        the balance and is right. M17 explains why that matters."""
+        sched = _schedule([("C1", "2026-06-09", pd.Timestamp(d), 0.0, 0.0, 0.0, b)
+                           for d, b in [("2026-07-09", 1100.0),
+                                        ("2026-08-09", 1200.0),
+                                        ("2026-09-09", 1300.0)]])
+        lp = _curve(sched, _accounts([("C1", 1000.0)]))
+        assert float(lp.query("MonthLifetime == 1")["EADLifetime"].iloc[0]) \
+            == pytest.approx(1200.0)
+
+    @needs_src_inputs
+    def test_the_raw_extract_satisfies_the_other_identity(self):
+        """On the source data, subtracting the projected interest is what
+        makes the roll-forward hold."""
+        src = src_inputs()
+        f = next((p for p in src.iterdir()
+                  if p.stem.lower() == "repaymentschedule"), None)
+        if f is None:
+            pytest.skip("no RepaymentSchedule in IFRS9_SRC_INPUTS")
+        rs = pd.read_excel(f) if f.suffix.startswith(".xls") else pd.read_csv(f)
+        rs["cid"] = rs["KEY_1"].astype(str)
+        rs = rs[rs["START_DAT"].dt.year >= 1950] \
+            .sort_values(["cid", "START_DAT"]).reset_index(drop=True)
+        prev = rs.groupby("cid", sort=False)["BALANCE"].shift(1)
+        m = prev.notna()
+        tol = np.maximum(1.0, prev.abs() * 1e-6)
+        with_int = ((prev - (rs["BALANCE"] + rs["REPAYMENT"]
+                             - rs["PROJ_INT"])).abs() <= tol) & m
+        without = ((prev - (rs["BALANCE"] + rs["REPAYMENT"])).abs() <= tol) & m
+        assert with_int.sum() > 3 * without.sum(), (
+            f"M16: -PROJ_INT holds {with_int.sum()} times, the rule in use "
+            f"{without.sum()}. The source convention may have changed.")
+
+
+class TestM17TheMonthlyGridLosesPayments:
+    """M17: one value per contract-month, and a quarter of the rows are not
+    repayments at all."""
+
+    def test_a_second_payment_in_the_same_month_is_invisible(self):
+        """Two payments in July, then August and September. The curve has one
+        row per month, so the second July payment is never looked up."""
+        sched = _schedule([
+            ("C1", "2026-06-09", pd.Timestamp("2026-07-05"), 150.0, 0.0, 150.0, 850.0),
+            ("C1", "2026-06-09", pd.Timestamp("2026-07-20"), 150.0, 0.0, 150.0, 700.0),
+            ("C1", "2026-06-09", pd.Timestamp("2026-08-05"), 150.0, 0.0, 150.0, 550.0),
+            ("C1", "2026-06-09", pd.Timestamp("2026-09-05"), 150.0, 0.0, 150.0, 400.0)])
+        lp = _curve(sched, _accounts([("C1", 1100.0)]))
+        assert len(lp[lp["MonthLifetime"] == 1]) == 1, "one value per month"
+        held = lp["EADLifetime"].round(2).tolist()
+        assert 850.0 not in held, (
+            f"M17 may be FIXED: the curve {held} now carries the 20 July "
+            "payment (700 + 150). Update METHODOLOGY_ISSUES.md.")
+        assert held == [1100.0, 700.0, 550.0]
+
+    def test_a_rising_curve_can_be_correct(self):
+        """The reason M16 must not be fixed by forcing the curve monotone."""
+        sched = _schedule([("C1", "2026-06-09", pd.Timestamp(d),
+                            0.0, 0.0, 0.0, b)
+                           for d, b in [("2026-07-09", 1100.0),
+                                        ("2026-08-09", 1200.0),
+                                        ("2026-09-09", 1300.0)]])
+        lp = _curve(sched, _accounts([("C1", 1000.0)]))
+        e = lp["EADLifetime"].to_numpy(dtype=float)
+        assert (np.diff(e) >= 0).all() and e[-1] > e[0], (
+            "a grace-period facility should show exposure growing")
