@@ -251,3 +251,39 @@ class TestCustomerLookup:
         assert customer_lookup(synthetic(), "") == {}
         assert customer_lookup(synthetic(), None) == {}
         assert customer_lookup(None, "A") == {}
+
+
+class TestBandingLosesNothing:
+    """Half-open bins drop a value sitting exactly on the final edge.
+
+    LGD is capped at 1.0 and the top edge was 1.0, so the zero-exposure
+    contracts at exactly 1.0 fell out of the most severe bucket — the one
+    anybody reading the chart is looking for. It was 114 contracts on one
+    reference run and 183 on the other, and nothing said so.
+    """
+
+    @real_only
+    @pytest.mark.parametrize("name", ["lgd", "pd", "dpd", "exposure",
+                                      "maturity"])
+    def test_every_contract_with_a_value_lands_in_a_band(self, rep, name):
+        from ifrs9qdb.analytics import (dpd_profile, exposure_bands,
+                                        lgd_distribution, maturity_profile,
+                                        pd_distribution)
+        fn, col = {
+            "lgd": (lgd_distribution, "lgd"),
+            "pd": (pd_distribution, "pd"),
+            "dpd": (dpd_profile, "dpd"),
+            "exposure": (exposure_bands, "exposure"),
+            "maturity": (maturity_profile, "months_to_mat"),
+        }[name]
+        banded = fn(rep)
+        have = int(rep[col].notna().sum())
+        assert int(banded["contracts"].sum()) == have
+
+    def test_a_value_on_the_top_edge_is_in_the_last_band(self):
+        from ifrs9qdb.analytics import lgd_distribution
+        d = synthetic().copy()
+        d["lgd"] = [1.0, 1.0, 0.45, 0.225]
+        out = lgd_distribution(d)
+        assert int(out["contracts"].sum()) == 4
+        assert int(out["contracts"].iloc[-1]) == 2, "the two at 1.0 vanished"

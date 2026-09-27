@@ -429,8 +429,21 @@ def top_contributors(d: pd.DataFrame, n: int = 25,
 
 # ------------------------------------------------------------ dimensions ----
 def _banded(d, col, breaks, labels, extra=None):
+    """Band a column into labelled buckets, losing nothing at either end.
+
+    The bins are half-open, ``[lo, hi)``, so a value sitting exactly ON the
+    final edge falls outside every bin and is silently dropped. That is not
+    hypothetical: LGD is capped at 1.0 and the top edge is 1.0, so the 114
+    zero-exposure contracts at exactly 1.0 vanished from the most severe
+    bucket — the one anybody reading the chart is looking for. The last edge
+    is nudged up by one float so the maximum lands in the last bin; the labels
+    are the lower edges, so they are unaffected.
+    """
     if d is None or len(d) == 0 or d[col].isna().all():
         return pd.DataFrame()
+    breaks = np.asarray(breaks, dtype=float).copy()
+    if np.isfinite(breaks[-1]):
+        breaks[-1] = np.nextafter(breaks[-1], np.inf)
     b = pd.cut(d[col], bins=breaks, labels=labels, right=False,
                include_lowest=True)
     g = d.assign(_b=b).groupby("_b", observed=False)
