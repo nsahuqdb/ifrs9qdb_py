@@ -78,11 +78,16 @@ class TestExport:
         res = build_export(run, tmp_path / "out.zip")
         with zipfile.ZipFile(tmp_path / "out.zip") as z:
             names = z.namelist()
-            assert "Output/FinalEclReport.csv" in names
-            assert "config_used/model.yml" in names
-            assert "manifest.json" in names
-            assert "audit.jsonl" in names
-            assert "README.txt" in names
+        # Everything sits under the run's own folder, so unzipping gives one
+        # self-contained tree rather than scattering CSVs into whatever
+        # directory it was opened in.
+        assert {n.split("/")[0] for n in names} == {"run_00001"}
+        flat = {n.split("/", 1)[1] for n in names}
+        assert "Output/FinalEclReport.csv" in flat
+        assert "config_used/model.yml" in flat
+        assert "manifest.json" in flat
+        assert "audit.jsonl" in flat
+        assert "README.txt" in flat
         assert res["files"] >= 4
 
     def test_missing_pieces_are_named_not_silently_omitted(self, tmp_path):
@@ -94,7 +99,7 @@ class TestExport:
         res = build_export(run, tmp_path / "out.zip")
         assert "approval.json" in res["skipped"]
         with zipfile.ZipFile(tmp_path / "out.zip") as z:
-            readme = z.read("README.txt").decode()
+            readme = z.read("run_00001/README.txt").decode()
         assert "NOT PRESENT" in readme
         assert "never run, not that it passed" in readme
 
@@ -116,5 +121,5 @@ class TestExport:
         (run / "Output" / "x.csv").write_text("a\n1\n")
         build_export(run, tmp_path / "out.zip")
         with zipfile.ZipFile(tmp_path / "out.zip") as z:
-            readme = z.read("README.txt").decode()
+            readme = z.read("run_00001/README.txt").decode()
         assert "DIVERGES" in readme and "Stage 3" in readme
