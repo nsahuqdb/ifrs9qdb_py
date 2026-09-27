@@ -1,0 +1,447 @@
+# Methodology issues — what needs reworking
+
+This is a register of MODEL and CALCULATION problems, not software defects.
+Everything here runs without error and produces plausible-looking numbers. That
+is what makes the list worth having: none of it announces itself.
+
+Nothing in this document has been changed in the code. Each item states what
+the engine does now, the evidence, the size of it, and what a correct treatment
+would look like — so Risk can decide, rather than find a number has moved.
+
+Every figure below is reproducible from `tests/test_methodology_issues.py`,
+which pins the CURRENT behaviour. Those tests are written to fail when an item
+is fixed, so a fix cannot land silently.
+
+**Severity** — **A**: the number is wrong now, and wrong in a direction that
+matters. **B**: the number is wrong but small, or right by accident. **C**: not
+wrong arithmetically, but below what IFRS 9 or a model validator would expect.
+
+| | Issue | Severity |
+| --- | --- | --- |
+| M1 | Scenario weights move the wrong way with the forecast | **A** |
+| M2 | The two rating scales respond to growth in opposite directions | **A** |
+| M3 | Monthly PD accumulates by summing, so curves reach certain default | **A** |
+| M4 | The amortisation step count floors, ending the curve before maturity | **A** |
+| M5 | The EAD fallback does not reproduce the schedules it stands in for | **A** |
+| M6 | Month 1's loss is not discounted | **B** |
+| M7 | Annual PD is split evenly across months rather than as a hazard | **B** |
+| M8 | Scenario weights do not sum to one | **B** |
+| M9 | No quantitative SICR test exists | **C** |
+| M10 | LGD is a single static number, not forward-looking | **C** |
+| M11 | Collateral above ~50% coverage is worth nothing | **C** |
+| M12 | Stage 3 is booked at 100% with no recovery | **C** |
+| M13 | Revolving and off-balance-sheet lifetime is contractual | **C** |
+| M14 | Only one macroeconomic variable carries any weight | **C** |
+
+---
+
+## M1 — Scenario weights move the wrong way with the forecast · **A**
+
+*You raised this one. It is worse than "weird": the weights are an exact mirror
+image of what they should be.*
+
+`compute_internal_scenario_weights` in `etl/macro.py`.
+
+The weights are meant to say how likely each macro scenario is, given the
+forecast. As the non-oil GDP forecast falls, the weight on **Significant
+Downturn** falls and the weight on **Significant Uptrend** rises:
+
+| Non-oil GDP forecast | Sig. Downturn | Slight Downturn | Base | Slight Uptrend | Sig. Uptrend |
+| --- | --- | --- | --- | --- | --- |
+| +6.00% | 0.3365 | 0.2369 | 0.3641 | 0.0464 | 0.0161 |
+| +4.44% *(the run's own)* | 0.2006 | 0.2075 | 0.4598 | 0.0897 | 0.0424 |
+| +2.81% | 0.1011 | 0.1509 | 0.5000 | 0.1491 | 0.0989 |
+| 0.00% | 0.0213 | 0.0565 | 0.3939 | 0.2323 | 0.2960 |
+| −5.00% | 0.0004 | 0.0025 | 0.0766 | 0.1320 | 0.7886 |
+| −10.00% | 0.0000 | 0.0000 | 0.0030 | 0.0132 | **0.9838** |
+
+At a forecast of −10% growth — a depression — the model puts **98.4% weight on
+Significant Uptrend and zero on Significant Downturn**.
+
+**Why.** The band edges are computed as
+
+```python
+cdf = norm.cdf(f + sigma * z_sorted, loc=mu, scale=sigma)
+```
+
+The forecast `f` is inside the value being evaluated, while the distribution
+stays anchored on the historical mean. So the thresholds slide down WITH the
+forecast and never register that it moved. The two arguments are the wrong way
+round. With the threshold fixed on history and the forecast as the new mean —
+
+```python
+cdf = norm.cdf(mu + sigma * z_sorted, loc=f, scale=sigma)
+```
+
+— the same code produces the exact reverse of the table above, which is the
+direction everyone expects. The current output at any forecast equals the
+corrected output read backwards; that symmetry is the fingerprint of a swapped
+pair, not a modelling choice.
+
+**What it costs.** This is the mechanism behind the macro result already
+recorded in `PORT_STATUS.md`: shocking non-oil GDP down 2pp *reduces* the
+provision by 0.78% when the weights are on `auto`, and *raises* it by 1.16%
+when they are held. The weighting effect is larger than the PD effect and
+points the other way, so the provision is currently anti-cyclical by
+construction.
+
+**Also affected.** `compute_external_scenario_weights` uses the same band
+construction on GCC growth and needs checking the same way.
+
+---
+
+## M2 — The two rating scales respond to growth in opposite directions · **A**
+
+Internal scale: `PD = Φ(Φ⁻¹(TTC) + SF)`
+External scale: `PD = Φ((Φ⁻¹(TTC) − √R·SF) / √(1−R))`
+
+Same shift factor, same sign convention, opposite response:
+
+| Shift factor | Internal PD | External PD |
+| --- | --- | --- |
+| −2.0 | 0.00003 | 0.08690 |
+| 0.0 | 0.02000 | 0.01234 |
+| +2.0 | 0.47857 | 0.00087 |
+
+A positive shift factor is better growth in this model's own convention. On
+the internal scale better growth raises PD; on the external scale it lowers
+it. Both cannot be right.
+
+The practical consequence: a downturn **reduces** the provision on Investments
+and Banks & FIs. It is a small book today (73 contracts, 5.8bn exposure,
+1.5m provision) so the effect is currently immaterial in money — but the sign
+is wrong and the exposure is large, so it will not stay immaterial.
+
+The Basel ASRF form on the external side is also worth a second look
+independently: `R = 0.24 − 0.12(1−e^(−50·PD))/(1−e^(−50))` is the **corporate
+supervisory formula for regulatory capital**, which is a stressed,
+through-the-cycle construct. Using it to produce a point-in-time IFRS 9 PD
+mixes two different purposes.
+
+---
+
+## M3 — Monthly PD accumulates by summing, so curves reach certain default · **A**
+
+*The second half of your point (a).*
+
+`convert_to_monthly_stpd` in `etl/macro.py`:
+
+```python
+monthly = annual_marg[idx] / 12.0
+cum = np.minimum(np.cumsum(monthly), pd_cap)   # pd_cap = 1.0
+```
+
+Cumulative PD is a running **sum** of marginals. A probability accumulated by
+summing grows without bound and has to be clipped at 1; accumulated correctly,
+`1 − Π(1−h)`, it approaches 1 but never reaches it.
+
+**Measured on the run's own StPD file (126 curves):**
+
+- **32 curves reach cumulative PD = 1.000000** — certain default. The earliest
+  at **month 114 (9.5 years)**; median month 346.
+- At 10 years the sum overstates cumulative PD by a mean of **+0.163**, worst
+  **+0.364**.
+- At 50 years the mean overstatement is **+0.235**.
+- All 32 saturating curves are ones where the survival accumulation stays below
+  1 — the saturation is entirely an artefact of the method.
+
+The error is concentrated in the weak grades. On `Al Dhameen|1` the two agree
+to four decimals at every horizon; on the worst buckets a lifetime ECL is being
+computed against a PD of exactly 1.
+
+**It is also internally inconsistent.** `stress.conditional_pd`, used by the
+roll-forward, applies the correct survival formula
+`(cum(k+t) − cum(k)) / (1 − cum(k))`. The same codebase therefore treats the
+same curve two different ways depending on which screen you are on.
+
+The code comment says LIC expects the sum. That may be true of the file format,
+but it means the **lifetime ECL for long-dated weak exposures is materially
+overstated**, and it should be a documented, approved deviation rather than a
+comment.
+
+---
+
+## M4 — The amortisation step count floors, ending the curve before maturity · **A**
+
+`fallback_ead_curve` in `engine.py`: `n_steps = max(1, amortising // f)`.
+
+Integer division discards the remainder, so the balance runs to zero early:
+
+| Term | Payment frequency | Steps | Balance reaches zero |
+| --- | --- | --- | --- |
+| 10m | 3m | 3 | month 10 — correct |
+| 14m | 3m | 4 | **month 13 — 1 month early** |
+| 23m | 12m | 1 | **month 13 — 10 months early** |
+
+For a 23-month facility paying annually, **ten months of exposure disappear
+from the ECL**. The contract is priced as if it were repaid in full at month 13.
+
+1,194 contracts carry quarterly frequency and 152 annual, so this is not a
+corner case. Affects only contracts on the fallback curve — but that is 24% of
+the book and every contract the maturity lever touches.
+
+---
+
+## M5 — The EAD fallback does not reproduce the schedules it stands in for · **A**
+
+*This is the test you asked for. It does not pass.*
+
+24% of the book has no supplied schedule and is priced on a parametric curve.
+The other 76% has a real schedule. So the fallback can be back-tested directly:
+build it for the contracts that have a real curve, and compare.
+
+**4,225 contracts on run_00001, comparing the area under the curve** (the
+quantity the PD is multiplied by):
+
+| Agreement with the real schedule | Share |
+| --- | --- |
+| within ±1% | **23.8%** |
+| within ±10% | **43.8%** |
+| within ±25% | 62.6% |
+
+Worst overstatement **+245%**, worst understatement **−100%** (the fallback
+says zero exposure where the real schedule has some).
+
+The aggregate has never looked wrong because the errors are large and cancel:
+
+| | run_00001 | run_00002 |
+| --- | --- | --- |
+| contracts compared | 4,225 | 4,733 |
+| median error | −1.4% | **−7.2%** |
+| interquartile spread | 0.253 | 0.308 |
+| within ±10% | 43.8% | **37.3%** |
+
+The median is far smaller than the spread, so a portfolio total carries almost
+none of the contract-level error. It is also **not stable between quarters** —
+−1.4% one quarter and −7.2% the next — so the cancelling cannot be relied on
+either. A movement analysis between two runs picks up that drift as though it
+were credit.
+
+**Three specific reasons it cannot fit:**
+
+1. **46.7% of real type-4 schedules rise before they fall.** They carry
+   expected drawdowns on undrawn commitments. The fallback is monotonically
+   decreasing and can never produce that shape.
+
+   ```
+   linear (what we build)   1.00  0.92  0.83  0.75  0.67  0.58  0.50 …
+   contract 504055          1.00  1.00  1.00  0.34  0.34  0.34  0.29 …
+   contract 512627          1.00  1.00  0.86  0.86  0.86  0.72  0.72 …
+   ```
+
+2. **An annuity shape fits better than linear on 1,535 contracts against 373**
+   (1,178 ties). The engine already contains an annuity form; the shape rule
+   table never selects it. This looks like a calibration that was never done
+   rather than a decision that was taken.
+
+3. **Only two shapes exist** — bullet and linear — resolved from
+   (portfolio, payment type). Type 4 in Business Finance covers 4,174 of the
+   4,225 and gets one straight line for all of them.
+
+**This is the load-bearing item for stress testing.** The maturity lever in
+stress, what-if and roll-forward re-profiles whichever curve comes back. For
+76% of contracts it stretches a real schedule, which is defensible. For the
+other 24% it stretches a curve that matches reality less than half the time,
+and no output distinguishes the two.
+
+---
+
+## M6 — Month 1's loss is not discounted · **B**
+
+`sum_marginal_ecl` builds `t = np.arange(H)`, so the month-1 marginal loss is
+divided by `(1+EIR)^0 = 1`. A default during month 1 is discounted as though it
+happened on the reporting date.
+
+Across the 6,108 Stage 1 and 2 contracts:
+
+| Convention | Provision | vs current |
+| --- | --- | --- |
+| `t` — current | 867,239,707 | — |
+| `t + 0.5` — mid-period | 865,851,146 | −0.160% |
+| `t + 1` — end of period | 864,465,051 | −0.320% |
+
+About **1.4m to 2.8m of overstatement**. Small, systematic, and free to fix.
+Mid-period is the usual convention where losses are assumed to arrive evenly
+through the month.
+
+---
+
+## M7 — Annual PD is split evenly across months rather than as a hazard · **B**
+
+*The first half of your point (a).*
+
+`monthly = annual_marg[idx] / 12.0` gives every month of a year the same
+marginal PD. The survival-consistent conversion is
+`h = 1 − (1 − p_annual)^(1/12)`.
+
+Taken alone this one is second-order: both reach the same value at the year
+boundary, and the difference within a year is `≈ (11/288)·p²`. It matters for
+two reasons rather than one:
+
+- **Discounting.** A default assumed at a uniform rate is discounted
+  differently from one following a declining-survival hazard. Combined with M6
+  the two biases point the same way.
+- **The 12-month horizon.** Stage 1 uses exactly the first year, so the shape
+  inside that year is the whole calculation for 2,497 contracts.
+
+Fixing M7 without M3 would be pointless — they are the same conversion — but
+M3 is where the money is.
+
+---
+
+## M8 — Scenario weights do not sum to one · **B**
+
+`internal_scenario_weights.explicit_weights` sums to **1.0003**. The engine
+deliberately does not normalise, because normalising would disagree with the R
+implementation, and that behaviour is pinned by a test.
+
+Reproducing the reference is the right call for a port. As a model it means
+every provision is scaled by 1.0003 — about **0.7m on the current book** — for
+no reason anyone intended. Either the published weights should be restated to
+sum to 1, or the normalisation should be applied and the change approved.
+
+Note this only bites when the mode is `explicit`. The production config runs
+`auto_non_oil_gdp_cdf`, where the weights are computed — and the computed
+weights are M1.
+
+---
+
+## M9 — No quantitative SICR test exists · **C**
+
+`classify_stage` takes `dpd, default_flag, watchlist, local_any, portfolio,
+customer`. There is no origination PD, no current-versus-origination
+comparison, no relative-deterioration threshold. Staging is days past due plus
+binary flags plus contagion plus the Tasdeer collective rule.
+
+IFRS 9 requires an assessment of *significant increase in credit risk since
+initial recognition*. A 30-days-past-due backstop and a watchlist flag are
+backstops **to** that assessment, not a substitute for it. As built, a borrower
+whose PD has tripled since origination but who is paying on time and is not
+watchlisted stays in Stage 1.
+
+The report does not even carry an origination PD column, so the test cannot
+currently be computed from the run output — the inputs would need to come
+through the ETL first.
+
+This is the largest gap against the standard in the register.
+
+---
+
+## M10 — LGD is a single static number, not forward-looking · **C**
+
+`compute_lgd(on_balance, collateral_net, base, unsecured_floor,
+zero_exposure_lgd)`. No scenario argument, no time index, no macro input.
+
+Consequences:
+
+- **The same LGD is used in every scenario.** The severe downturn changes PD
+  only. In reality collateral values and recovery rates fall in a downturn,
+  which is where a large part of downturn loss comes from.
+- **LGD does not vary over the lifetime.** A default in month 3 and one in
+  month 200 recover identically.
+- **No discounting of recoveries**, and no realisation period, though
+  `CollateralType.csv` carries a `RealizationPeriod` column that is read and
+  never used.
+
+The base rate is a flat 0.45 for everything unsecured. There is no segmentation
+by product, seniority or collateral type beyond the haircut.
+
+---
+
+## M11 — Collateral above ~50% coverage is worth nothing · **C**
+
+`LGD = base × max(unsecured_floor, (E − C)/E)` with `base = 0.45`,
+`unsecured_floor = 0.5`. Once collateral covers half the exposure the floor
+binds and additional collateral changes nothing.
+
+**127 contracts carry coverage above 50%, holding 109.6m of exposure; 42 are
+covered above 100%.** Each of them is provisioned exactly as if it were covered
+at 50%.
+
+A floor is a reasonable conservatism. A floor this high makes the collateral
+data irrelevant for the contracts that are best secured, which is the opposite
+of where precision is usually wanted, and it means any collateral revaluation
+stress is inert for them — the what-if collateral lever genuinely cannot move
+these contracts.
+
+---
+
+## M12 — Stage 3 is booked at 100% with no recovery · **C**
+
+`stage3_method = "full_outstanding"`: the provision equals the on-balance
+amount. No collateral, no recovery, no discounting, no time to resolution.
+1,415,801,562 of the current 2,283,041,269 provision — **62%** — is set this
+way.
+
+This is QDB's stated basis and it diverges from LIC deliberately, so it is a
+policy rather than a defect. It is in this register because:
+
+- it makes 62% of the provision insensitive to every model input, every
+  scenario and every stress lever;
+- IFRS 9 measures Stage 3 as the present value of expected cash shortfalls,
+  which for a secured defaulted exposure is not the full balance;
+- 42 contracts are collateralised above 100% of exposure, and any that are in
+  Stage 3 are being provisioned in full against collateral that covers them.
+
+---
+
+## M13 — Revolving and off-balance-sheet lifetime is contractual · **C**
+
+Lifetime comes from `months_to_maturity(maturity_date, extract_date)`, floored
+at 3 months.
+
+| Portfolio | n | Median months to maturity |
+| --- | --- | --- |
+| Off BS | 808 | **4.7** |
+| Business Finance | 5,528 | 8.0 |
+| Al Dhameen | 150 | 12.0 |
+| Tasdeer | 150 | 12.0 |
+
+IFRS 9 requires the **behavioural** life for revolving facilities — the period
+over which the entity is exposed to credit risk, which for a revolver that is
+routinely renewed is longer than its contractual term. Off BS at a 4.7-month
+median contractual life is almost certainly being measured over the wrong
+horizon.
+
+The three-month floor is a separate question: a matured facility gets three
+months of exposure at the full balance (see M4), which is an assumption nobody
+has documented.
+
+---
+
+## M14 — Only one macroeconomic variable carries any weight · **C**
+
+`internal_v4_production` has three MEV components:
+
+| MEV | Weight | Coefficient |
+| --- | --- | --- |
+| Non-oil GDP growth | **1.0** | −0.0414 |
+| Qatar real estate index growth | 0.0 | −0.9005 |
+| Qatar domestic credit growth | 0.0 | −4.5845 |
+
+Real estate and domestic credit have large coefficients and zero weight, so
+they contribute nothing. A property-price stress returns exactly zero, and the
+app now says so on the Macro path screen rather than looking broken.
+
+It means the entire forward-looking element of the provision rests on one
+series, with **ten annual observations** behind its distribution
+(mean 2.787, sd 3.738). Ten points is a thin basis for the percentile bands in
+M1, and a single-variable model is thin for a model-validation review.
+
+---
+
+## What to test next
+
+Two things this register does not yet answer:
+
+1. **Whether the annual PD term structure itself is right.** M3 is about the
+   monthly conversion; the annual curve that feeds it has not been back-tested
+   against realised default experience. There is no default history in the run
+   outputs to do it with.
+
+2. **Whether the stress levers move the provision by the right amount**, as
+   opposed to the right direction. M5 shows the EAD lever rests on an
+   unvalidated curve. The PD, rating and collateral levers have no equivalent
+   back-test because there is no realised outcome to compare against — a
+   deliberate hold-out or a back-test against a prior quarter's actuals would
+   be the way in.

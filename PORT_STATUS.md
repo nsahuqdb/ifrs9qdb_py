@@ -675,6 +675,16 @@ writer, the repricing join, the file reconciliation, and a parity test. None
 of them errored in a way anybody would notice on a book without a repeated id,
 which is most books.
 
+## Model issues are tracked separately
+
+The port reproduces the R engine exactly, which says nothing about whether the
+MODEL is right. `METHODOLOGY_ISSUES.md` is the register of what needs
+reworking: fourteen items, five of them wrong in a direction that matters,
+each with its evidence and each pinned by a characterisation test in
+`tests/test_methodology_issues.py` so a fix cannot land unnoticed.
+
+The two sign questions recorded below are M1 and M2 there.
+
 ## Next
 
 1. The `AccountMaster_1` trailing block, which also closes both remaining
