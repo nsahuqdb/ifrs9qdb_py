@@ -616,6 +616,25 @@ for those two quarters, which is not held. The direction is not an estimate —
 every missing month adds a non-negative marginal loss, so the reported number
 can only be too low.
 
+### The shape that does the damage
+
+The loss is not proportional to the months cut, because the truncation lands
+where the principal has barely moved. Contract `599073`, an annual payer:
+
+| | |
+| --- | --- |
+| on balance | 121,636,306 |
+| maturity | 2043-01-30 — **199 months** |
+| payments in the schedule | 17, of which **14 carry a 1930s year** |
+| curve emitted | months 0–30 |
+| balance where the curve stops | **121,580,510 — 100.0% of the exposure** |
+
+Its instalments run from 2.59m up to 17.87m, so the three surviving years retire
+2.6m of 121.6m, and every payment that actually repays the loan is one of the
+fourteen that were dropped. A back-loaded facility is exactly the profile where
+this is worst, and exactly the profile a long project loan has.
+`INPUT_DATA_ISSUES.md` traces this contract through all three implementations.
+
 ### What a correct treatment looks like
 
 Read the source dates correctly. A schedule row whose year is below 1950 in an
