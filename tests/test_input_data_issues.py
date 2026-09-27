@@ -19,7 +19,19 @@ from ifrs9qdb.engine import (EAD_FALLBACK_RULES, fallback_ead_curve,
                              resolve_ead_shape)
 from ifrs9qdb.etl.lifetime import build_lifetime_parameter_other
 
-from conftest import needs_src_inputs, src_inputs
+from conftest import needs_src_inputs, ref_output, src_inputs
+
+OUT = ref_output()
+needs_run = pytest.mark.skipif(
+    OUT is None, reason="set IFRS9_REF_RUN to a run folder holding Output/")
+
+
+@pytest.fixture(scope="module")
+def inputs():
+    if OUT is None:
+        pytest.skip("set IFRS9_REF_RUN")
+    from ifrs9qdb.inputs import load_engine_inputs
+    return load_engine_inputs(OUT)
 
 # The R package's defaults and config/model.yml carry only the rules that name a
 # portfolio. Python adds one that does not. See X4.
@@ -27,14 +39,27 @@ R_CONFIG_RULES = tuple(r for r in EAD_FALLBACK_RULES if r[0] is not None)
 
 
 def _raw(name):
-    """A raw extract table, or skip."""
+    """A raw extract table, or skip.
+
+    Several inputs arrive as Oracle SQL*Plus HTML behind an ``.xls`` extension,
+    so a failed ``read_excel`` is expected and falls back to ``read_html``.
+    """
     src = src_inputs()
     if src is None:
         pytest.skip("set IFRS9_SRC_INPUTS")
     for ext in (".xlsx", ".xls", ".csv"):
         f = src / f"{name}{ext}"
-        if f.is_file():
-            return pd.read_csv(f, dtype=str) if ext == ".csv" else pd.read_excel(f)
+        if not f.is_file():
+            continue
+        if ext == ".csv":
+            return pd.read_csv(f, dtype=str)
+        try:
+            return pd.read_excel(f)
+        except ValueError:
+            try:
+                return pd.read_html(f)[0]
+            except (ImportError, ValueError):
+                pytest.skip(f"{f.name} needs lxml to parse")
     pytest.skip(f"{name} not in IFRS9_SRC_INPUTS")
 
 
@@ -264,3 +289,147 @@ class TestX4TheExtraRuleIsDormantNotAbsent:
             b = fallback_ead_curve(1000, n, "4", portfolio="Al Dhameen")
             l = fallback_ead_curve(1000, n, "4", portfolio="Business Finance")
             assert 0.45 < l.sum() / b.sum() < 0.60
+
+
+class TestI2CollateralHasNoValue:
+    """I2: 97.6% of allocated collateral records carry no value, so the netting
+    formula's first factor is zero and LGD stays unsecured."""
+
+    @needs_src_inputs
+    def test_almost_every_collateral_record_is_unvalued(self):
+        coll = _raw("Collateral")
+        v = pd.to_numeric(coll["COLLATERALVALUE"], errors="coerce").fillna(0)
+        share = (v <= 0).mean()
+        assert share > 0.9, (
+            f"I2 may be improving: only {share:.1%} of collateral records are "
+            "unvalued, down from 97.7%. Update INPUT_DATA_ISSUES.md.")
+
+    @needs_run
+    def test_the_books_security_rests_on_a_handful_of_records(self, inputs):
+        if inputs.collateral is None or inputs.alloc is None:
+            pytest.skip("this run has no collateral tables")
+        coll, alloc = inputs.collateral, inputs.alloc
+        v = pd.to_numeric(coll["CollateralValue"], errors="coerce").fillna(0)
+        allocated = set(alloc["CollateralId"].astype(str))
+        a = coll[coll["CollateralId"].astype(str).isin(allocated)]
+        av = pd.to_numeric(a["CollateralValue"], errors="coerce").fillna(0)
+        valued = int((av > 0).sum())
+        assert valued < 200, (
+            f"I2 may be FIXED: {valued} allocated collateral records now carry "
+            "a value. Update the register.")
+        assert (av <= 0).mean() > 0.9
+
+
+class TestI3OriginationIsEmpty:
+    """I3: the file a relative SICR test would need carries only the id."""
+
+    @needs_src_inputs
+    def test_only_the_id_columns_carry_data(self):
+        o = _raw("Origination")
+        filled = [c for c in o.columns
+                  if (o[c].notna() & (o[c].astype(str).str.strip() != "")).any()]
+        assert len(filled) == 2, (
+            f"I3 may be FIXED: {len(filled)} columns now carry data ({filled}). "
+            "If origination PD and rating have arrived, the relative SICR test "
+            "becomes possible — update INPUT_DATA_ISSUES.md and M9.")
+
+
+class TestI4StagingFlagsDoNotArrive:
+    """I4: is_default, is_insolvency and is_default_in_gcc are never populated,
+    so Stage 3 rests on DPD > 90 alone."""
+
+    @needs_src_inputs
+    def test_three_of_the_five_flags_are_entirely_blank(self):
+        c = _raw("CustomerStagingFlag")
+        # positions 3, 5, 6 in the schema (1-based) -> is_default,
+        # is_insolvency, is_default_in_gcc
+        blank = [i for i, col in enumerate(c.columns, start=1)
+                 if not (c[col].notna() & (c[col].astype(str).str.strip() != "")).any()]
+        assert {3, 5, 6}.issubset(set(blank)), (
+            f"I4 may have CHANGED: the blank positions are now {blank}. If a "
+            "default or insolvency flag has arrived, update the register.")
+
+    @needs_src_inputs
+    def test_the_two_flags_that_do_arrive_carry_signal(self):
+        c = _raw("CustomerStagingFlag")
+        for name in ("ISWATCHLIST", "ISLOCAL1"):
+            col = [x for x in c.columns if str(x).upper() == name]
+            assert col, f"{name} is missing entirely"
+            v = pd.to_numeric(c[col[0]], errors="coerce")
+            assert (v == 1).sum() > 0, f"{name} is present but never set"
+
+
+class TestI7DuplicatedRowsAndOrphanAllocations:
+    @needs_src_inputs
+    def test_the_schedule_repeats_whole_rows(self):
+        rs = _raw("RepaymentSchedule")
+        dup = int(rs.duplicated().sum())
+        assert dup > 0, (
+            "I7 may be FIXED upstream: the schedule no longer repeats rows.")
+
+    @needs_src_inputs
+    def test_every_duplicated_month_is_an_exact_duplicate(self):
+        """The withdrawn half of M17, pinned from the source. If this ever
+        fails, the monthly grid IS losing a real payment."""
+        rs = _raw("RepaymentSchedule")
+        rs = rs.copy()
+        rs["cid"] = rs["KEY_1"].astype(str).str.strip()
+        ref = pd.Timestamp(pd.to_datetime(rs["POST_DATE"], errors="coerce").max())
+        start = pd.to_datetime(rs["START_DAT"], errors="coerce")
+        rs["ml"] = (start.dt.year - ref.year) * 12 + (start.dt.month - ref.month)
+        k = rs[rs["ml"] >= 0]
+        sizes = k.groupby(["cid", "ml"]).size()
+        multi = sizes[sizes > 1]
+        if multi.empty:
+            pytest.skip("no contract-month holds more than one row")
+        vals = ["PRINCE_DUE", "PROJ_INT", "REPAYMENT", "BALANCE"]
+        distinct = k.groupby(["cid", "ml"])[vals].nunique().max(axis=1)
+        assert (distinct.loc[multi.index] == 1).all(), (
+            "a contract-month now holds two DIFFERENT payments, so the monthly "
+            "grid is losing one. M17's withdrawn finding is live again.")
+
+    @needs_src_inputs
+    def test_some_allocations_have_no_contract_id(self):
+        aca = _raw("AccountCollateralAllocation")
+        cid = aca["CONTRACTID"]
+        blank = cid.isna() | (cid.astype(str).str.strip().isin(("", "nan")))
+        assert blank.any(), (
+            "I7 may be FIXED upstream: every allocation now names a contract.")
+
+
+class TestI8UnmappedCollateralTypesDiverge:
+    """I8: R sets an NA haircut row to zero; Python defaults the haircut to
+    zero and credits the full value. Opposite directions."""
+
+    @staticmethod
+    def net(value, pct, haircut, port):
+        if port == "r":
+            contrib = value * pct * (1 - haircut) if haircut is not None else None
+            return 0.0 if contrib is None or not np.isfinite(contrib) else contrib
+        return value * pct * (1 - (haircut if haircut is not None else 0.0))
+
+    def test_the_two_ports_go_opposite_ways_on_an_unmapped_type(self):
+        r = self.net(1_000_000.0, 0.5, None, "r")
+        py = self.net(1_000_000.0, 0.5, None, "py")
+        assert r == 0.0, "R writes an unmapped type off"
+        assert py == 500_000.0, "Python credits it in full"
+
+    def test_they_agree_when_the_type_is_mapped(self):
+        for hc in (0.0, 0.25, 1.0):
+            assert self.net(1_000_000.0, 0.5, hc, "r") == \
+                self.net(1_000_000.0, 0.5, hc, "py")
+
+    @needs_run
+    def test_it_is_latent_because_those_records_are_unvalued(self, inputs):
+        """Why parity still holds to the cent."""
+        if inputs.collateral is None or inputs.coll_type is None:
+            pytest.skip("this run has no collateral tables")
+        mapped = set(inputs.coll_type["CollateralTypeId"].astype(str))
+        coll = inputs.collateral
+        unmapped = coll[~coll["CollateralTypeId"].astype(str).isin(mapped)]
+        if unmapped.empty:
+            pytest.skip("every collateral type is mapped on this run")
+        v = pd.to_numeric(unmapped["CollateralValue"], errors="coerce").fillna(0)
+        assert v.sum() == 0, (
+            f"I8 IS NOW LIVE: unmapped collateral types carry {v.sum():,.2f} of "
+            "value, so R writes it off and Python credits it in full.")

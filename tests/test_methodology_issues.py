@@ -668,20 +668,34 @@ class TestM17TheMonthlyGridLosesPayments:
     """M17: one value per contract-month, and a quarter of the rows are not
     repayments at all."""
 
-    def test_a_second_payment_in_the_same_month_is_invisible(self):
-        """Two payments in July, then August and September. The curve has one
-        row per month, so the second July payment is never looked up."""
+    def test_a_duplicated_row_is_correctly_absorbed(self):
+        """The withdrawn half of M17. Two identical July rows, then August and
+        September: holding one value per month is RIGHT here, because the
+        second row is the same payment twice. All 933 real cases are like
+        this, so the grid is not losing anything."""
+        dupe = ("C1", "2026-06-09", pd.Timestamp("2026-07-05"),
+                150.0, 0.0, 150.0, 850.0)
+        sched = _schedule([
+            dupe, dupe,
+            ("C1", "2026-06-09", pd.Timestamp("2026-08-05"), 150.0, 0.0, 150.0, 700.0),
+            ("C1", "2026-06-09", pd.Timestamp("2026-09-05"), 150.0, 0.0, 150.0, 550.0)])
+        lp = _curve(sched, _accounts([("C1", 1100.0)]))
+        assert len(lp[lp["MonthLifetime"] == 1]) == 1, "one value per month"
+        assert lp["EADLifetime"].round(2).tolist() == [1100.0, 850.0, 700.0]
+
+    def test_a_grid_would_still_lose_a_genuinely_split_month(self):
+        """The latent limitation, pinned so the withdrawal is not read as
+        'the grid is fine'. This book has no such schedule; a fortnightly one
+        would hit it."""
         sched = _schedule([
             ("C1", "2026-06-09", pd.Timestamp("2026-07-05"), 150.0, 0.0, 150.0, 850.0),
             ("C1", "2026-06-09", pd.Timestamp("2026-07-20"), 150.0, 0.0, 150.0, 700.0),
             ("C1", "2026-06-09", pd.Timestamp("2026-08-05"), 150.0, 0.0, 150.0, 550.0),
             ("C1", "2026-06-09", pd.Timestamp("2026-09-05"), 150.0, 0.0, 150.0, 400.0)])
         lp = _curve(sched, _accounts([("C1", 1100.0)]))
-        assert len(lp[lp["MonthLifetime"] == 1]) == 1, "one value per month"
         held = lp["EADLifetime"].round(2).tolist()
         assert 850.0 not in held, (
-            f"M17 may be FIXED: the curve {held} now carries the 20 July "
-            "payment (700 + 150). Update METHODOLOGY_ISSUES.md.")
+            f"the curve {held} now carries the 20 July payment (700 + 150)")
         assert held == [1100.0, 700.0, 550.0]
 
     def test_a_rising_curve_can_be_correct(self):

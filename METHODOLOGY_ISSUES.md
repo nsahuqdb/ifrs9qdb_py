@@ -44,7 +44,7 @@ or a naming and documentation problem that keeps producing wrong readings.
 | M14 | Only one macroeconomic variable carries any weight | **C** |
 | M15 | Every schedule beyond 2029 is silently discarded, cutting lifetime | **A** |
 | M16 | The EAD curve adds each instalment's interest to the balance | **B** |
-| M17 | A monthly grid cannot carry the schedule it is built from | **C** |
+| M17 | The rising curve is half defect and half correct | **C** |
 
 ---
 
@@ -251,8 +251,8 @@ tested against the raw `RepaymentSchedule` extract, and the answer is in three
 parts. The derivation is faithful to its own rule — 94.4% of curve points equal
 the `BALANCE + REPAYMENT` the schedule gives, and month 0 equals `OnBalance` on
 **all 5,399 curves without exception**. But the rule itself adds each
-instalment's interest to the balance (**M16**), the grid drops payments that
-share a month (**M17**), and, far more seriously, every payment falling after
+instalment's interest to the balance (**M16**), the rising curve it produces is
+part artefact and part real (**M17**), and, far more seriously, every payment falling after
 2029 is discarded before the curve is built (**M15**). M15 is the reason 1,124
 contracts are priced over a lifetime that ends in December 2029 whatever their
 maturity date says.
@@ -705,18 +705,30 @@ direction to M15, which is precisely why neither shows up in a total.
 
 ---
 
-## M17 — A monthly grid cannot carry the schedule it is built from · **C**
+## M17 — The rising curve is half defect and half correct · **C**
 
-*Two lesser findings from the same test, recorded together because the obvious
-fix for one of them would break the other.*
+*This item was originally raised as two findings. The first has been tested
+against the source and **withdrawn** — it was my error. The second stands, and it
+is the reason M16 must not be fixed the obvious way.*
 
-### Payments that fall in an occupied month disappear
+### WITHDRAWN: payments sharing a month are not lost
 
-The curve holds one value per contract-month, taken from the first scheduled
-payment after that month. Where two payments fall in the same calendar month
-the second is never looked up: **933 payments across 78 contracts** in the
-2026-06-09 extract. Contracts on fortnightly or split schedules lose roughly
-half their cash flow from the curve's point of view.
+An earlier draft recorded that where two payments fall in the same calendar
+month, the grid holds one value and the second is never looked up — **933
+payments across 78 contracts**.
+
+Checked against the extract, **all 933 are exact duplicates**: identical in
+`PRINCE_DUE`, `PROJ_INT`, `REPAYMENT` and `BALANCE`, not merely in month. Not one
+contract-month in the extract holds two genuinely different payments. **Dropping
+the extra row is correct**, and the grid absorbing it is right rather than wrong.
+
+What is real is upstream: the extract emits **1,689 fully duplicated rows** across
+78 contracts, and nothing checks that it hasn't. That is recorded as **I7** in
+`INPUT_DATA_ISSUES.md`, where it belongs. The monthly grid is not the problem;
+it happens to hide one.
+
+A monthly grid would still lose a genuinely fortnightly schedule. This book does
+not have one, so that is a latent limitation rather than a present defect.
 
 ### A quarter of the schedule is not a repayment at all
 
@@ -737,6 +749,20 @@ row, and the `REPAYMENT = 0` flag is what does it.
 Across all 5,399 curves the delivered EAD sums to 149,662,922,630. Capped to be
 non-increasing it sums to 148,531,385,630 — 0.76% lower. Most of that gap is
 accrual that should be there.
+
+### The tool already noticed, and explained it away
+
+`DERIVED_LTPO_ead_nonincreasing` failed in both delivered runs — **1,849**
+contracts in run_00001 and **2,297** in run_00002 with a rising EAD. It is one of
+only **two INFO-severity checks in a suite of 114**, so it never gates, and its
+message supplies the reason before anyone asks: *"expected for revolving/
+off-balance products and contracts with interest/fee accrual baked into the
+schedule"*.
+
+That is half right, which is the worst kind. About 45% of the rises are the
+genuine accrual it describes; the rest are M16's projected interest. The check
+found a real symptom and its own message classified it as normal. See §2 of
+`INPUT_DATA_ISSUES.md`.
 
 ---
 
