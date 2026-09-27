@@ -648,6 +648,33 @@ reproduces it rather than correcting it, and it needs a decision from Risk.
 The `weight_mode` switch exists precisely so the two effects can be shown
 apart in a review.
 
+## The surface is complete
+
+Every public function in the R package's analytics and stress surface has a
+Python counterpart, and every one of them is reachable from the app's API.
+The R Shiny app's twenty-four analytics tabs all have a page here, and the
+app carries one thing the R app has that took porting rather than translating:
+the assistant.
+
+Four defects turned up while wiring the last pieces, each silent in its own
+way:
+
+* the ETL pipeline weighted the external rating scale with the internal
+  scenario weights (up to 1.2e-2 of cumulative PD);
+* a value sitting exactly on a band's top edge was dropped from its chart
+  (114 and 183 contracts on the two runs, in the most severe LGD bucket);
+* three of the app's endpoints — reconcile, output summary and run export —
+  imported the engine with a relative path that reaches beyond their package,
+  so every one raised on its first call while the page that uses them rendered
+  perfectly. A render check is not a functional check;
+* the file reconciliation indexed both sides on a key that is not unique,
+  which made a comparison of the real pair of runs raise rather than report.
+
+A contract id turned out not to be a key in four separate places: the overlay
+writer, the repricing join, the file reconciliation, and a parity test. None
+of them errored in a way anybody would notice on a book without a repeated id,
+which is most books.
+
 ## Next
 
 1. The `AccountMaster_1` trailing block, which also closes both remaining
