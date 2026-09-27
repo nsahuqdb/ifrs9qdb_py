@@ -354,11 +354,16 @@ class TestInvestments:
                          key=["ContractId"])
         assert r["status"] == "match", r.get("detail")
 
-    def test_both_ids_are_sequential_surrogates(self):
-        """The extract names the counterparty; LIC will not take that as a key."""
+    def test_ids_are_the_extracts_own(self):
+        """As R writes them and as both delivered runs carry them: the account
+        id, and the counterparty NAME as the customer. This test used to pin
+        1..n surrogates, and never ran -- it sits behind the same-extract guard
+        -- so nothing noticed that R had never done that."""
         am2 = self.build()
-        assert list(am2["ContractId"]) == [str(i) for i in range(1, len(am2) + 1)]
-        assert list(am2["CustomerId"]) == list(am2["ContractId"])
+        raw = read_all_inputs(IN)["AccountMasterInvestments"]
+        assert list(am2["ContractId"]) == list(
+            raw["CONTRACTID"].astype(str).str.strip())
+        assert not am2["CustomerId"].str.fullmatch(r"\d+").all()
 
     def test_rates_stored_in_percent_are_detected(self):
         """3.8 must become 0.038, and 0.038 must stay put."""

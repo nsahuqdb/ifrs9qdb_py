@@ -24,15 +24,21 @@ __all__ = ["customer_ids_from_accounts", "derive_customer_flags",
 
 
 def investment_customer_ids(investment_accounts: pd.DataFrame) -> pd.Series:
-    """Surrogate customer ids for the investment book: 1, 2, 3 ... one per row.
+    """Customer ids for the investment book: the counterparty NAME, one per row.
 
-    The investment extract identifies customers by NAME, which LIC will not
-    accept as a key, so the pipeline assigns a sequential id per account row.
-    That is why this file has 73 rows against 62 distinct names -- it is keyed
-    on the account, not on the counterparty.
+    As ``R/transform_investments.R`` writes it (``customer_id_inv``) and as
+    both delivered runs carry it -- ``DUKHAN BANK`` repeated once per holding.
+    Keyed on the account, so a counterparty with several holdings repeats.
+
+    This used to return 1, 2, 3 ..., on the belief that LIC will not accept a
+    name as a key. The output LIC actually received uses the names.
     """
-    n = 0 if investment_accounts is None else len(investment_accounts)
-    return pd.Series(range(1, n + 1), dtype=int).astype(str)
+    if investment_accounts is None or not len(investment_accounts):
+        return pd.Series([], dtype=str)
+    from .lending import drop_repeated_headers
+    accts = drop_repeated_headers(investment_accounts)
+    name = pick(accts, "CUSTOMERID", "CustomerId", default="")
+    return name.astype(str).str.strip().reset_index(drop=True)
 
 
 def customer_ids_from_accounts(accounts: pd.DataFrame,

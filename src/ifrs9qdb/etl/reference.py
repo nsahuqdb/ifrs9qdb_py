@@ -15,6 +15,8 @@ import re
 import numpy as np
 import pandas as pd
 
+from .transform import r_format_numeric
+
 __all__ = ["build_reference_files"]
 
 
@@ -100,12 +102,15 @@ def build_reference_files(static, extract_date: str) -> dict[str, pd.DataFrame]:
                 for r, h, t in zip(rating, hier, rtype)],
             "Hierarchy": hier.astype("Int64"),
         })
-        # One row per (type, hierarchy): the external scale lists several agency
-        # grades against the same bucket, and LIC wants the bucket once.
+        # EVERY grade on the scale, internal first and then external, each by
+        # hierarchy -- as R's write_ratings and both delivered runs (62 rows).
+        # An earlier version kept one external grade per hierarchy on the belief
+        # that LIC wants each bucket once; that dropped all twenty S&P grades,
+        # and the engine resolves a holding's PD bucket through this file, so an
+        # investment rated BBB+ found no bucket and was priced at zero.
         r = r.dropna(subset=["Hierarchy"])
-        r = r[~r.duplicated(subset=["RatingType", "Hierarchy"])]
-        out["Ratings.csv"] = r.sort_values(["RatingType", "Hierarchy"]
-                                           ).reset_index(drop=True)
+        out["Ratings.csv"] = r.sort_values(["RatingType", "Hierarchy"],
+                                           kind="stable").reset_index(drop=True)
 
         out["RatingTypes.csv"] = pd.DataFrame({
             "ExtractDate": extract_date,
@@ -143,7 +148,8 @@ def build_reference_files(static, extract_date: str) -> dict[str, pd.DataFrame]:
             "ExtractDate": extract_date,
             "CurrencyCode": _col(fx, "currency_code", "currency",
                                  "CurrencyCode").astype(str),
-            "FXRate": pd.to_numeric(_col(fx, "fx_rate", "rate", "FXRate"),
-                                    errors="coerce"),
+            # Formatted as R's fmt_numeric does, to a common number of
+            # decimals: 1.000 and 3.645, not 1.0 and 3.645.
+            "FXRate": r_format_numeric(_col(fx, "fx_rate", "rate", "FXRate")),
         })
     return out

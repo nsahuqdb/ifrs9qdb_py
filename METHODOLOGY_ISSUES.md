@@ -595,26 +595,20 @@ coincidence — it is the 2030 cliff.
 
 ### What it costs
 
-Stage 1 is unaffected (`H = min(12, …)`) and Stage 3 is already booked at 100%
-(M12), so the whole effect lands in **Stage 2**. Measured by extending each
-truncated curve to the maturity its own `AccountMaster` row reports and
-recomputing the entire report through the engine — two reconstructions, to
-bracket it: `linear` runs the residual balance to zero in a straight line,
-`slope` continues at the amortisation rate the last two points show.
+**Superseded figures removed.** This section first reported +2.30% to +2.99% of
+Stage 2 for December, from a method that found only the contracts ending exactly
+at December 2029 and missed 393 others. The reconciled figures, measured by the R
+package itself on the June extract and with real repaired schedules on December,
+are in `INPUT_DATA_ISSUES.md` §1:
 
-| | run_00001 | run_00002 |
+| book | Stage 2 ECL understated | total ECL understated |
 | --- | --- | --- |
-| reported ECL | 2,283,041,268.74 | 2,193,491,567.06 |
-| curves extended | 506 | 557 |
-| months added | 20,169 | 21,760 |
-| understated by, `linear` | **+13,709,956** (+0.60%) | **+9,445,688** (+0.43%) |
-| understated by, `slope` | **+17,821,121** (+0.78%) | **+13,055,358** (+0.60%) |
-| as a share of Stage 2 ECL | +2.30% to +2.99% | +1.60% to +2.21% |
+| **June 2026** — R, raw extract, dates repaired in the input | **+6.81%** (+38.50m) | **+2.01%** |
+| **December 2025** — all 861 truncated curves, real schedules | **+3.70%** (+22.02m) | **+0.96%** |
 
-Both reconstructions are estimates: the exact figure needs the source extract
-for those two quarters, which is not held. The direction is not an estimate —
-every missing month adds a non-negative marginal loss, so the reported number
-can only be too low.
+Stage 1 is capped at twelve months and Stage 3 is booked at 100% (M12), so the
+whole effect is Stage 2. The direction was never an estimate — every missing
+month adds a non-negative marginal loss.
 
 ### The shape that does the damage
 

@@ -35,84 +35,58 @@ runs for 2025-09-30 and 2025-12-31, and those runs' own
 
 ---
 
-## 1. What I1 costs, in percent
+## 1. What I1 costs, in percent — reconciled
 
-**Measured directly, the way you asked: change `START_DAT` in the input file and
-re-run everything.** Nothing else was touched — the same extract, the same
-config, the same code, one column repaired (`+100 years` where the year is below
-1950). Full ETL and engine on both, 2026-06-09 extract, 7,334 contracts,
-**staging identical in both runs.**
+This section has been revised three times, and the figures moved each time. The
+table below is the final position; the one after it says what was wrong with each
+earlier figure, so the history is on the record rather than quietly replaced.
+
+### The answer
+
+| book | how it was measured | contracts truncated | **Stage 2 ECL** | **total ECL** |
+| --- | --- | --- | --- | --- |
+| **June 2026** (latest) | **the R package itself**, run on the raw extract twice — as delivered, and with only `START_DAT` repaired in the input file | 1,106 curves | **+6.81%** (+38.50m) | **+2.01%** |
+| **December 2025** (delivered run) | every truncated curve extended with the **real repaired schedule** of the same loan from the June extract, recomputed through the engine | 861 | **+3.70%** (+22.02m) | **+0.96%** |
+
+**June, in full** — R and the Python port now produce identical reports from the
+raw extract (7,334 of 7,334 stages agree, largest per-contract difference 0.0002):
 
 | | as delivered | dates repaired | change |
 | --- | --- | --- | --- |
-| **total ECL** | 1,765,010,637 | 1,802,745,667 | **+37,735,030 = +2.14%** |
-| Stage 1 | 256,822,194 | 257,009,880 | +187,686 (+0.07%) |
-| **Stage 2** | **533,775,857** | **571,323,201** | **+37,547,344 = +7.03%** |
-| Stage 3 | 974,412,586 | 974,412,586 | 0 (+0.00%) |
-| the 598 contracts that moved | 438,323,391 | 476,058,421 | **+8.61%** |
+| total ECL | 1,916,701,233 | 1,955,197,029 | **+38,495,796 = +2.01%** |
+| Stage 1 | 376,891,584 | 376,891,734 | +150 (+0.00%) |
+| **Stage 2** | **565,397,063** | **603,892,709** | **+38,495,646 = +6.81%** |
+| Stage 3 | 974,412,586 | 974,412,586 | 0 |
 
-**Stage 2 is understated by 7.0%, and the whole provision by 2.1%.**
+Stage 3 cannot move — it is booked at 100% of outstanding (**M12**). Stage 1 is
+capped at twelve months. The whole effect is Stage 2.
 
-Stage 3 cannot move: it is booked at 100% of outstanding regardless of the curve
-(**M12**). Stage 1 barely moves, and only for 10 contracts whose curve was
-shorter than twelve months before the repair. **Everything else lands in Stage
-2** — which, on this book, is 4,919 of 7,334 contracts.
+**December, in full:** 2,283,041,269 → 2,305,060,413 (+0.96%); Stage 2
+595,880,001 → 617,899,145 (+3.70%). 468 of the truncated curves stop exactly at
+December 2029 and **393 stop earlier** — annual and quarterly payers whose last
+surviving payment falls before the cliff, like the eighteen-year annual loan in §4.
+The December figure is a close lower bound: 1,606 December contracts had matured
+or closed by June, so their repaired schedules are not available (951 of them
+Stage 2, 49.0m of Stage 2 ECL). Contracts that closed within six months are
+short-dated and unlikely to have had post-2029 payments.
 
-The repair lengthened **1,124 curves**, median gain **40 months**, maximum
-**168**. `LifeTimeParameterOther` goes from 80,362 rows to 131,346 and its
-longest curve from month 41 to month 198. The StPD term structures run to 600
-months, so nothing else limits the horizon.
+**Why June is larger than December.** In June **67%** of contracts are Stage 2,
+against 54% in December, and the loans the date wrap truncates carry **79%** of
+Stage 2 ECL, against 62%. June's Stage 2 book is both larger and far more
+concentrated in exactly the long-dated lending this defect cuts short.
 
-### This supersedes an earlier, lower estimate
+### What was wrong with each earlier figure
 
-An earlier version of this file reported **+0.60% to +0.78%** of total ECL and
-**+2.30% to +2.99%** of Stage 2, measured on the two delivered quarters by
-*reconstructing* the missing tail rather than repairing the source. Those figures
-were too low, for two reasons:
+| figure given earlier | book | what was wrong |
+| --- | --- | --- |
+| Stage 2 **+2.30% to +2.99%**, total +0.60% to +0.78% | December | Found truncated contracts by looking for curves that stop **exactly at December 2029** — 506 of them. That misses every contract whose last surviving payment is earlier in 2029: **393 more**. It also ran the missing tail down in a straight line, which captured 87% of the true exposure. |
+| Stage 2 **+7.03%**, total +2.14% | June | Ran through the **Python** ETL, which did not yet reproduce R from raw inputs. It priced 949 facilities at zero and dropped every maturity date (§5), which shrank the Stage 2 base the percentage is taken of. R's own figure is +6.81%. |
+| total **+0.18%** | June | The Python ETL left EIR in percent, discounting every long-dated month to nothing (§5). |
 
-1. **The reconstruction understated the exposure.** Running the residual balance
-   down in a straight line captured **87%** of the true hidden EAD
-   (94.9bn against 108.98bn summed over the hidden months), because these
-   schedules are back-loaded — contract `590851` still carries 26.1m at month 60
-   and 10.1m at month 90.
-2. **More importantly, they were a different book.** The delivered quarters have
-   **35.1%** of scheduled exposure in wrapped contracts; the June 2026 extract
-   has **66.4%**, and far more of it sits in Stage 2. The two measurements are
-   both right about their own quarter.
-
-So: **+2.14% total and +7.03% of Stage 2 is the current, directly measured
-figure**, and it is the one to use. The earlier bracket stands only as a
-measurement of the December and September books, and even there is understated by
-roughly a further 13% from the reconstruction.
-
-### A defect found while doing this
-
-The first attempt at this measurement returned **+0.18%**, which was wrong, and
-the reason was a genuine bug in the Python ETL that this exercise exposed.
-
-`AccountMaster.EIR` arrives as a **raw percent** — the values are 2.25, 2.50,
-3.00, 3.50, 7.00. R divides by 100 (`R/transform_lending.R:336`,
-`eir_raw / 100`). **The Python lending transform did not**, so 4,872 of 7,334
-contracts carried a percent straight into the discount factor:
-
-```
-disc = (1 + eir) ** (t / 12)
-```
-
-At `eir = 3.0` that is `4 ** (t/12)`: a loss at month 42 divided by **128**
-instead of 1.11, and at month 100 by **9,463**. It priced every long-dated month
-at nothing — which is precisely the effect being measured, so the defect hid
-itself.
-
-It is now fixed, along with R's two-tier fallback for a zero or missing rate,
-which the Python path also lacked. The port's EIR now matches R's scale exactly
-(median 0.0439 against R's 0.0434, **maximum 0.0975 in both**). The effect on the
-June book alone, before any date repair, is **1,425,123,668 → 1,765,010,637, or
-+23.9%**.
-
-This never touched the delivered runs: the parity test reads the R run's *output*
-CSVs, where EIR is already a decimal, so `transform_lending` was never in that
-path. The exact-reproduction test still passes.
+The direction was never in doubt — every month the curve does not reach adds a
+non-negative marginal loss — but two of the three earlier sizes were understated
+and one was measured through code that did not yet match R. The figures above
+were produced by R itself, and the Python port now matches R exactly.
 
 ## 2. Why none of this was flagged in validation
 
@@ -360,6 +334,98 @@ profile where this is worst, and the profile most exposed to it.
 
 ---
 
+## 5. R and Python consistency, and the Excel tool
+
+### How this was checked
+
+R was installed in this environment (4.3.3) and the R package run on its own
+tests: **239 pass**, including all four EY reconciliation contracts and all
+twelve run-324 goldens, which the R package documents as matching LIC exactly.
+One R test fails — `test-analytics.R:219`, on the staging-threshold analytic — and
+it is off the ECL path.
+
+Then **both ETLs were run on the same raw extract** (2026-06-09), with the same
+config and static data (the Python package's copies are byte-identical to the R
+package's `inst/`), and every output file compared cell by cell.
+
+That comparison had never been made. The engine had been proven against R, but
+only from R's *output* files — so the Python ETL, raw extract to those files, was
+never tested against anything. It disagreed on seven things.
+
+### What differed, and what it cost
+
+| # | divergence | Python did | R does | effect on the June book |
+| --- | --- | --- | --- | --- |
+| 1 | EIR scale | left the raw percent (3.0) | divides by 100, two-tier fallback for zero | discounting at 300% a year; ECL **−24%** |
+| 2 | maturity column | looked for `MATURITYDATE` only | reads the truncated `MATURITYDAT` | every maturity blank; 1,567 fallback contracts floored; **−22.4m** |
+| 3 | maturity extension | not implemented | matured → reporting date + 365 days | part of the −22.4m |
+| 4 | rating chain | kept the literal "Unrated" | V4 Transformation!Z: sector rule by DPD, else segment fallback | **949 facilities priced at zero; −129.3m** |
+| 5 | worst-grade ladder | hard-coded; missing QDB 1+, 6+, 6-, listing non-existent QDB 10–12 | master-scale hierarchy | none on this extract; latent |
+| 6 | `Ratings.csv` | one external grade per bucket (42 rows) | all 62 grades | 2 investments rated BBB+ found no PD bucket |
+| 7 | investment ids | 1..n surrogates | the extract's account id and counterparty name | traceability only |
+
+Plus smaller ones, all fixed: `Origination` ids not substituted for 1,006
+off-balance contracts; a SQL*Plus header row written into the allocation file as
+data; dates zero-padded where R does not pad; a zero payment frequency written as
+`0` rather than blank; StPD probabilities in scientific notation (`6.27e-05`)
+where R writes sixteen fixed decimals — a CSV reader that rejects exponents would
+misread the whole term structure.
+
+Every one is now fixed to match R, and **both ETLs produce identical output**:
+all 18 files agree cell for cell, and the final reports agree on all 7,334
+contracts to within 0.0002.
+
+**Several of these had comments asserting the wrong behaviour was required** —
+"LIC wants the bucket once", "LIC will not accept a name as a key", "matching
+the zero-padded reference is the requirement". Both delivered R runs, which are
+what LIC actually received, contradict all three.
+
+`tests/test_r_parity.py` now runs the R package itself whenever R is installed and
+`IFRS9_SRC_INPUTS` is set, and fails if any output file or any contract's ECL
+diverges. That is the test whose absence let seven defects through.
+
+### What remains different, deliberately or cosmetically
+
+* **Row order** in three files: R writes each EAD curve by ascending month, the
+  port by descending, and StPD and the staging-flag file are grouped differently.
+  LIC keys all three; the parity test compares by key.
+* **Numeric formatting** otherwise: R writes fixed decimals in places, the port
+  writes the value. Compared numerically, identical.
+* **Balances at the fourth decimal.** R formats a column to seven significant
+  figures of its smallest value, so 7852.9968 is written 7852.997. The port now
+  does the same, so the two match — but it is worth knowing that R's writer
+  rounds balances, by under 0.0005.
+
+### What R does that the register should know
+
+* **Origination PD and rating are always written blank**, whatever the extract
+  holds (`.build_origination_rows`). So the relative SICR test is unavailable by
+  construction, not only because `Origination` arrives empty (**I3**) — filling
+  the extract would change nothing until the writer changes.
+* **The maturity extension is strictly `<`.** `staging_thresholds.csv` describes
+  it as "If Maturity Date **<=** Reporting Date". The code and the V4 formula it
+  cites use `<`, so a facility maturing on the reporting date is not extended. The
+  description is wrong, or the code is; they should not disagree.
+
+### The Excel tool
+
+**It could not be compared directly — the workbook is not in anything available
+here.** The R package names it
+(`Updated_ETL_File__Test__V4_20211029_-_New_server_link.xlsm`) and documents each
+formula it replicates, cell by cell. What is verified:
+
+* the R package reproduces the four EY contracts and twelve LIC run-324 contracts
+  exactly, per its own golden tests, which pass here;
+* the Python port reproduces the R package exactly, from raw extract to report;
+* on the wrapped dates specifically, R and Excel **differ on months 1 to *n*
+  before the first surviving payment** (§3) — 187 contracts on this extract — and
+  on nothing else in the EAD derivation.
+
+What is not verified: anything the workbook does that the R package does not
+document. Closing that needs the workbook and the same extract run through it.
+
+---
+
 ## I1 — Schedule dates lose their century · **A**
 
 **25,466 of 85,160 rows (29.9%), across 1,124 contracts**, carry `START_DAT`
@@ -473,9 +539,17 @@ Two checks touch this file — `INPUT_Origination_contractid_unique` and
 `XFILE_AM_contract_in_origination`. Both verify the **join**. Both pass. Neither
 notices the file carries no data.
 
-**Handling:** all three implementations read the blanks as missing and fall back
-to the absolute staging triggers (DPD, watchlist, restructuring). None warns that
-the relative test is unavailable.
+**Handling:** all three implementations fall back to the absolute staging
+triggers (DPD, watchlist, restructuring), and none warns that the relative test
+is unavailable.
+
+**Filling the extract would not fix it.** R writes `OriginationPD12M` and
+`OriginationRating` **blank on every row regardless of the source**
+(`.build_origination_rows`, one blank row per account), and both delivered runs
+carry exactly that. The Python port used to pass the source values through; it
+now matches R (§5). So the relative SICR test is unavailable by construction:
+the source must send origination data **and** the writer must be changed to pass
+it on.
 
 ---
 

@@ -25,10 +25,12 @@ feed the engine values it is about to overwrite.
 """
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 
-from .transform import _fmt_date, _num, at, pick
+from .transform import _fmt_date, _num, at, pick, r_format_numeric
 from ..ids import as_id
 
 __all__ = ["transform_lending", "transform_investments",
@@ -134,8 +136,19 @@ ACCOUNT_MASTER_COLUMNS = [
 def transform_lending(accounts: pd.DataFrame,
                       product_portfolio_mapping: pd.DataFrame | None = None,
                       customers: pd.DataFrame | None = None,
-                      rating_overrides: dict | None = None) -> pd.DataFrame:
-    """Per-contract lending view, with the customer-level values resolved."""
+                      rating_overrides: dict | None = None,
+                      industry: pd.DataFrame | None = None,
+                      static: dict | None = None,
+                      reporting_date=None) -> pd.DataFrame:
+    """Per-contract lending view, with the customer-level values resolved.
+
+    Mirrors ``R/transform_lending.R``. ``static`` is the reference data
+    (master rating scale, collective-assessment rules, segment fallbacks,
+    industry-to-sector mapping, staging thresholds); when omitted the packaged
+    copy is used, which is byte-identical to the R package's ``inst/static``.
+    ``industry`` is the IndustryCode extract, which the rating chain needs to
+    find a customer's sector.
+    """
     if accounts is None or len(accounts) == 0:
         return pd.DataFrame()
     accounts = drop_repeated_headers(accounts)
@@ -148,7 +161,10 @@ def transform_lending(accounts: pd.DataFrame,
         "customer_id": as_id(pick(accounts, "CUSTOMERID", "CustomerId")),
         "account_type": pick(accounts, "ACCOUNTTYPE", "AccountType", default=""),
         "open_date": pick(accounts, "OPENDATE", "OpenDate"),
-        "maturity_date": pick(accounts, "MATURITYDATE", "MaturityDate"),
+        # The SQL export truncates the alias to eleven characters, so the
+        # column arrives as MATURITYDAT. Missing it left every maturity blank.
+        "maturity_date": pick(accounts, "MATURITYDATE", "MATURITYDAT",
+                              "MaturityDate"),
         # The lending rating is a CUSTOMER attribute and is not carried on the
         # account rows at all -- it is joined from the customer master below.
         "rating": "",
@@ -168,21 +184,37 @@ def transform_lending(accounts: pd.DataFrame,
                          "CURRENCY", default="QAR"),
     })
 
+    if static is None:
+        from .static_ref import load_static_reference
+        static = load_static_reference()
+    scale = _master_scale(static)
+
+    cust_rating = pd.Series(np.nan, index=out.index, dtype=object)
     if customers is not None and len(customers):
         cid = pick(customers, "CUSTOMERID", "CustomerId")
         crat = pick(customers, "RATING", "Rating")
         if cid is not None and crat is not None:
-            lut = dict(zip(as_id(cid), crat.astype(str)))
-            out["rating"] = out["customer_id"].map(lut).fillna("")
+            lut = dict(zip(as_id(cid), crat.astype(str).str.strip()))
+            cust_rating = out["customer_id"].map(lut)
 
-    # Customer-level worst values, broadcast back to every facility.
+    # Customer-level worst DPD, broadcast back to every facility.
     worst_dpd = out.groupby("customer_id")["past_dues_days"].transform("max")
     out["past_dues_worst"] = worst_dpd.fillna(0)
 
-    # Worst rating: the weakest grade the customer holds anywhere. Ranked by
-    # position in the scale, so "worst" means furthest down the ladder rather
-    # than alphabetically last.
-    out["rating_worst"] = _worst_rating(out)
+    # The rating chain, V4 Transformation!Z. A customer grade counts only if it
+    # is on the master scale; "Unrated" is not, and must not reach the engine
+    # as a grade, because it has no PD bucket and prices the facility at zero.
+    sector = _customer_sector(out["customer_id"], industry,
+                              static.get("industry_sector_mapping"))
+    external = cust_rating.where(cust_rating.isin(set(scale["rating"])))
+    out["rating"] = _derive_rating_lending(
+        external, sector, out["past_dues_worst"], out["account_type"],
+        static.get("collective_assessment_rules"),
+        static.get("segment_fallback_ratings"))
+
+    # Worst rating per customer, on the HIERARCHY, written back as the internal
+    # label at that position -- Transformation!AB/AC.
+    out["rating_worst"] = _worst_rating(out, scale)
     if rating_overrides:
         ov = out["customer_id"].map({str(k): v for k, v in rating_overrides.items()})
         out["rating_worst"] = ov.where(ov.notna() & (ov != ""), out["rating_worst"])
@@ -201,9 +233,15 @@ def transform_lending(accounts: pd.DataFrame,
         out["eir"], out["nominal_int_rate"], out["account_type"],
         product_portfolio_mapping)
 
+    out["maturity_date"] = _extend_maturity(
+        out["maturity_date"], reporting_date,
+        static.get("staging_thresholds"))
+
+    # A zero frequency is "no schedule", written blank, as R does.
+    freq = out["payment_frequency"].where(out["payment_frequency"] != 0)
+    out["payment_frequency"] = freq
     # Payment type: 3 bullet when no frequency, else 4 amortising.
-    freq = out["payment_frequency"]
-    out["payment_type"] = np.where(freq.isna() | (freq == 0), 3, 4)
+    out["payment_type"] = np.where(freq.isna(), 3, 4)
     return out
 
 
@@ -255,27 +293,141 @@ def _effective_rates(eir, nir, account_type, mapping):
     return rate, nir_out.fillna(rate)
 
 
-def _worst_rating(view: pd.DataFrame) -> pd.Series:
-    """The weakest rating each customer holds, broadcast to all their contracts.
+def _master_scale(static: dict) -> pd.DataFrame:
+    """The master rating scale: rating, rating_type, hierarchy."""
+    ms = static.get("master_rating_scale")
+    if ms is None or not len(ms):
+        return pd.DataFrame(columns=["rating", "rating_type", "hierarchy"])
+    return pd.DataFrame({
+        "rating": pick(ms, "rating", "Rating").astype(str).str.strip(),
+        "rating_type": pick(ms, "rating_type", "RatingType").astype(str).str.strip(),
+        "hierarchy": pd.to_numeric(pick(ms, "hierarchy", "Hierarchy"),
+                                   errors="coerce"),
+    })
 
-    Ranked on the QDB internal ladder. An unrecognised grade sorts as unknown
-    rather than as the worst, so a typo cannot silently downgrade a customer.
+
+def _customer_sector(customer_id: pd.Series, industry: pd.DataFrame | None,
+                     mapping: pd.DataFrame | None) -> pd.Series:
+    """Sector per facility, from the customer's industry DESCRIPTION.
+
+    Mirrors ``lookup_sector``: the first four characters of the description
+    are the ISIC code with its leading zero ("0113 Growing of vegetables"),
+    which the numeric INDUST column has lost (113).
     """
-    order = ["QDB 1", "QDB 1-", "QDB 2+", "QDB 2", "QDB 2-", "QDB 3+", "QDB 3",
-             "QDB 3-", "QDB 4+", "QDB 4", "QDB 4-", "QDB 5+", "QDB 5", "QDB 5-",
-             "QDB 6", "QDB 7", "QDB 8", "QDB 9", "QDB 10", "QDB 11", "QDB 12"]
-    rank = {r: i for i, r in enumerate(order)}
-    r = view["rating"].astype(str).str.strip()
-    score = r.map(rank)
-    tmp = pd.DataFrame({"c": view["customer_id"], "r": r, "s": score})
-    idx = tmp.groupby("c")["s"].transform("max")
-    # map the worst score back to its label, per customer
-    best_label = (tmp.dropna(subset=["s"])
-                  .sort_values("s")
-                  .groupby("c")
-                  .last()["r"])
-    out = view["customer_id"].map(best_label)
-    return out.where(out.notna(), r)
+    none = pd.Series(np.nan, index=customer_id.index, dtype=object)
+    if industry is None or not len(industry) or mapping is None or not len(mapping):
+        return none
+    cid = pick(industry, "CUSTOMERID", "CustomerId")
+    desc = pick(industry, "DESCRIPTION", "INDUSTRYDESCRIPTION",
+                "IndustryDescription")
+    if cid is None or desc is None:
+        return none
+    by_customer = dict(zip(as_id(cid), desc.astype(str)))
+    code = pick(mapping, "industry_code", "IndustryCode").astype(str).str.strip()
+    code = code.str.replace(r"\.0$", "", regex=True).str.zfill(4)
+    sector_of = dict(zip(code, pick(mapping, "sector", "Sector").astype(str)))
+    prefix = customer_id.map(by_customer).astype(str).str[:4]
+    return prefix.map(sector_of)
+
+
+def _derive_rating_lending(external: pd.Series, sector: pd.Series,
+                           dpd_worst: pd.Series, account_type: pd.Series,
+                           rules: pd.DataFrame | None,
+                           fallback: pd.DataFrame | None) -> pd.Series:
+    """The per-facility rating, V4 Transformation!Z (``derive_rating_lending``).
+
+    1. The customer's own grade, when it is on the master scale.
+    2. Otherwise, for Agriculture, Fisheries and Livestock customers, the
+       collective-assessment grade for their worst days past due
+       (``VLOOKUP(dpd, ..., TRUE)``: the largest threshold not above it).
+    3. Otherwise the segment fallback: Al Dhameen facilities take the Al
+       Dhameen grade, everything else the unrated-customer grade.
+    """
+    out = external.astype(object).copy()
+    has = out.notna() & (out.astype(str).str.strip() != "")
+    out[~has] = np.nan
+    needs = ~has
+    sec = sector.astype(str).str.strip().str.lower().where(sector.notna())
+    dpd = pd.to_numeric(dpd_worst, errors="coerce").fillna(0).to_numpy()
+
+    if rules is not None and len(rules):
+        r_sec = pick(rules, "sector", "Sector").astype(str)
+        r_thr = pd.to_numeric(pick(rules, "dpd_threshold"), errors="coerce")
+        r_rat = pick(rules, "rating", "Rating").astype(str)
+        for s in r_sec.unique():
+            short = re.sub(r"\s*Sector\s*$", "", s, flags=re.I)
+            names = {short.lower(),
+                     re.sub("Lifestock", "Livestock", short, flags=re.I).lower()}
+            rows = (needs & sec.isin(names)).to_numpy()
+            if not rows.any():
+                continue
+            sel = (r_sec == s).to_numpy()
+            order = np.argsort(r_thr[sel].to_numpy(), kind="stable")
+            thr = r_thr[sel].to_numpy()[order]
+            grades = r_rat[sel].to_numpy()[order]
+            idx = np.searchsorted(thr, dpd[rows], side="right")
+            idx[idx == 0] = 1
+            out.iloc[np.flatnonzero(rows)] = grades[idx - 1]
+
+    fb = {}
+    if fallback is not None and len(fallback):
+        fb = dict(zip(pick(fallback, "segment", "Segment").astype(str),
+                      pick(fallback, "fallback_rating", "FallbackRating").astype(str)))
+    still = needs & out.isna()
+    dhameen = account_type.astype(str).str.strip().str.lower() == "al dhameen"
+    out[still & dhameen] = fb.get("Al Dhameen Customers", np.nan)
+    out[still & ~dhameen] = fb.get("Unrated Customer (Internal Rating)", np.nan)
+    return out
+
+
+def _worst_rating(view: pd.DataFrame, scale: pd.DataFrame) -> pd.Series:
+    """The customer's worst grade, as the INTERNAL label at that hierarchy.
+
+    Mirrors Transformation!AB/AC: rank every facility's grade on the master
+    scale, take the customer's maximum hierarchy, and write the internal grade
+    sitting at that position. An externally rated customer therefore comes out
+    on the internal ladder (Aa2, hierarchy 3, becomes QDB 1-).
+
+    This used to rank on a hard-coded ladder that omitted QDB 1+, 6+ and 6-
+    and listed QDB 10 to 12, which do not exist.
+    """
+    hier_of = dict(zip(scale["rating"], scale["hierarchy"]))
+    h = view["rating"].astype(str).str.strip().map(hier_of)
+    worst = h.groupby(view["customer_id"]).transform("max")
+    internal = scale[scale["rating_type"] == "Internal"].sort_values(
+        "hierarchy", kind="stable")["rating"].tolist()
+    def label(v):
+        if pd.isna(v):
+            return ""
+        i = int(v)
+        return internal[i - 1] if 1 <= i <= len(internal) else ""
+    return worst.map(label)
+
+
+def _extend_maturity(maturity, reporting_date, thresholds) -> pd.Series:
+    """A maturity already passed is pushed out, as V4 Transformation!AM does.
+
+    ``IF(raw < reporting, reporting + maturity_extension_days, raw)``. Strictly
+    less than: a facility maturing ON the reporting date is not extended. The
+    description in staging_thresholds.csv says ``<=``; the R port and the V4
+    formula both use ``<``, and this follows them.
+    """
+    raw = pd.to_datetime(maturity, errors="coerce", format="mixed")
+    if reporting_date is None:
+        return raw
+    ref = pd.Timestamp(reporting_date).normalize()
+    days = 365
+    if thresholds is not None and len(thresholds):
+        k = pick(thresholds, "key", "Key")
+        v = pick(thresholds, "value", "Value")
+        if k is not None and v is not None:
+            m = dict(zip(k.astype(str), v))
+            try:
+                days = int(float(m.get("maturity_extension_days", days)))
+            except (TypeError, ValueError):
+                pass
+    needs = raw.notna() & (raw < ref)
+    return raw.where(~needs, ref + pd.Timedelta(days=days))
 
 
 def _portfolio(account_type: pd.Series,
@@ -323,9 +475,11 @@ def build_account_master(view: pd.DataFrame, extract_date: str,
         # other account is staged by LIC, so the column is left blank.
         "Stage": np.where(col("account_type").astype(str).str.strip() == "Tasdeer",
                           "2", ""),
-        # Zero-padded on the account rows, unlike ExtractDate. Both formats
-        # appear in the same file; matching each is the requirement.
-        "OpenDate": _fmt_date(col("open_date"), pad=True),
+        # M/D/YYYY with no leading zeros, as R's format_date_col writes it and
+        # as both delivered runs carry it. An earlier version zero-padded the
+        # account-row dates on the belief that the reference did; the R output
+        # LIC actually received does not.
+        "OpenDate": _fmt_date(col("open_date")),
         "Rating": col("rating_worst").astype(str),
         "PastDueDays": col("past_dues_worst"),
         "PD12M": blank,
@@ -333,11 +487,15 @@ def build_account_master(view: pd.DataFrame, extract_date: str,
         "IsPOCI": blank,
         "LGDRate": blank,
         "LoanToValue": blank,
-        "OffBalance": col("off_balance"),
-        "OnBalance": col("on_balance"),
+        # Lending balances as R's fmt_numeric writes them (see
+        # r_format_numeric); investments are written at four fixed decimals.
+        "OffBalance": (col("off_balance") if investments
+                       else r_format_numeric(col("off_balance"))),
+        "OnBalance": (col("on_balance") if investments
+                      else r_format_numeric(col("on_balance"))),
         "EAD": blank,
         "CCF": col("ccf"),
-        "MaturityDate": _fmt_date(col("maturity_date"), pad=True),
+        "MaturityDate": _fmt_date(col("maturity_date")),
         "ExpectedMaturityDate": blank,
         "EIR": col("eir"),
     })
@@ -355,13 +513,21 @@ def build_account_master(view: pd.DataFrame, extract_date: str,
 
 
 # ---------------------------------------------------------- investments ----
-def transform_investments(accounts: pd.DataFrame) -> pd.DataFrame:
+def transform_investments(accounts: pd.DataFrame, static: dict | None = None,
+                          reporting_date=None) -> pd.DataFrame:
     """The investment book, which differs from lending in several ways.
 
-      * BOTH ids are surrogate sequential numbers, 1..n per account row. The
-        extract identifies the counterparty by NAME and carries a contract id
-        that LIC does not use, so the file is keyed on position. That is why it
-        has 73 rows against 62 distinct counterparties.
+      * The contract id is the extract's own account id, and the customer id
+        is the counterparty NAME, as ``R/transform_investments.R`` writes them
+        and as both delivered runs carry them (``1028, DUKHAN BANK``). An
+        earlier version replaced both with 1..n on the belief that LIC keys the
+        file on position; the output LIC actually received does not. One row
+        per account, so a counterparty with several holdings repeats.
+      * The rating is the extract's grade when it is on the EXTERNAL scale,
+        otherwise the investment-segment fallback (Baa3) --
+        ``derive_rating_investment``. A grade the scale does not know has no PD
+        bucket and would price the holding at zero.
+      * Maturity takes the same extension rule as lending.
       * The portfolio is "Banks and Fis" when the account type says so, and
         "Investments" otherwise.
       * Days past due are ZERO throughout. A traded instrument does not carry
@@ -385,19 +551,34 @@ def transform_investments(accounts: pd.DataFrame) -> pd.DataFrame:
             v = v / 100.0
         return v
 
+    if static is None:
+        from .static_ref import load_static_reference
+        static = load_static_reference()
+    scale = _master_scale(static)
+    external = set(scale.loc[scale["rating_type"] == "External", "rating"])
+    fb = static.get("segment_fallback_ratings")
+    fallback = ""
+    if fb is not None and len(fb):
+        m = dict(zip(pick(fb, "segment", "Segment").astype(str),
+                     pick(fb, "fallback_rating", "FallbackRating").astype(str)))
+        fallback = m.get("Investment Portfolio", "")
+    raw_rating = pick(accounts, "RATING", "RatingCurrent", default="").astype(str).str.strip()
+    rating = raw_rating.where(raw_rating.isin(external), fallback)
+
     acct_type = pick(accounts, "ACCOUNTTYPE", "AccountType", default="").astype(str)
     return pd.DataFrame({
-        "contract_id": pd.Series(range(1, n + 1)).astype(str),
-        "customer_id": pd.Series(range(1, n + 1)).astype(str),
+        "contract_id": as_id(pick(accounts, "CONTRACTID", "ContractId", "ACCOUNTID")),
+        "customer_id": pick(accounts, "CUSTOMERID", "CustomerId",
+                            default="").astype(str).str.strip(),
         "lim_id": pick(accounts, "LIMID", "LimId", default=""),
         "account_type": acct_type,
         "portfolio_code": np.where(acct_type.str.strip() == "Banks and Fis",
                                    "Banks and Fis", "Investments"),
         "open_date": pick(accounts, "OPENDATE", "OpenDate"),
-        "maturity_date": pick(accounts, "MATURITYDATE", "MATURITYDAT",
-                              "MaturityDate"),
-        "rating_worst": pick(accounts, "RATING", "RatingCurrent",
-                             default="").astype(str),
+        "maturity_date": _extend_maturity(
+            pick(accounts, "MATURITYDATE", "MATURITYDAT", "MaturityDate"),
+            reporting_date, static.get("staging_thresholds")),
+        "rating_worst": rating,
         "past_dues_worst": _num(pick(accounts, "PASTDUEDAYS", "PastDueDays",
                                      default=0)).fillna(0),
         "on_balance": _num(pick(accounts, "ONBALANCE", "OnBalance")),
@@ -410,7 +591,8 @@ def transform_investments(accounts: pd.DataFrame) -> pd.DataFrame:
         "deferral_period": 0.0,
         "currency": pick(accounts, "CURRENCYCODE", "CurrencyCode",
                          default="QAR"),
-        "ccf": _num(pick(accounts, "CCF", default=0)),
+        # Blank when the extract leaves it blank, as R writes it.
+        "ccf": _num(pick(accounts, "CCF", default=np.nan)),
         "payment_type": _num(pick(accounts, "PAYMENTTYPEID", "PaymentTypeId",
                                   default=np.nan)),
     })

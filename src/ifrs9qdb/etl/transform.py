@@ -130,6 +130,36 @@ def _date(s):
     return pd.to_datetime(s, errors="coerce", format="mixed", dayfirst=False)
 
 
+
+def r_format_numeric(values, digits: int = 7) -> pd.Series:
+    """Numbers as R's ``format(x, scientific = FALSE, trim = TRUE)`` writes them.
+
+    R's ``fmt_numeric`` with no ``decimals`` formats the whole COLUMN to a
+    common number of decimal places: enough for each value to show ``digits``
+    significant figures, maximised over the column. So a balance column holding
+    7852.9968 is written with three decimals throughout -- 7852.997 and
+    160012.500 -- and the fourth decimal is lost. That is an R artefact rather
+    than a rule anybody chose, and it moves a balance by less than 0.0005; it is
+    matched here so the two ports' outputs can be compared byte for byte.
+    """
+    x = pd.to_numeric(pd.Series(values), errors="coerce")
+    ok = x.notna() & np.isfinite(x)
+    decimals = 0
+    for v in x[ok]:
+        a = abs(float(v))
+        if a == 0:
+            continue
+        int_digits = int(np.floor(np.log10(a))) + 1
+        need = digits
+        for s in range(1, digits + 1):
+            if float(f"{v:.{s}g}") == float(f"{v:.{digits}g}"):
+                need = s
+                break
+        decimals = max(decimals, need - int_digits)
+    out = pd.Series([""] * len(x), index=x.index, dtype=object)
+    out[ok] = [f"{float(v):.{decimals}f}" for v in x[ok]]
+    return out
+
 def _fmt_date(s, pad: bool = False):
     """Dates as the reference writes them.
 
@@ -191,6 +221,11 @@ def transform_allocation(raw: pd.DataFrame) -> pd.DataFrame:
     does not drop those rows -- the validators report them, so a silent
     correction here cannot hide a source-data problem.
     """
+    # The export repeats its headings every page. R strips them before this
+    # point; left in, one arrives as an allocation of collateral "COLLATERALID"
+    # to contract "CONTRACTID".
+    from .lending import drop_repeated_headers
+    raw = drop_repeated_headers(raw)
     return pd.DataFrame({
         "ExtractDate": _fmt_date(at(raw, 0, "EXTRACTDA")),
         "CollateralId": at(raw, 1, "COLLATERALID"),
@@ -344,6 +379,35 @@ def transform_origination_investments(raw: pd.DataFrame,
     return out
 
 
+ORIGINATION_FLAGS = ("PastDueDays", "IsWatchlist", "IsInsolvency",
+                     "IsDefaultInGCC", "IsLocal1", "IsLocal2", "IsLocal3",
+                     "IsLocal4", "IsLocal5", "IsLocal6")
+
+
+def build_origination_rows(extract_date: str, contract_ids) -> pd.DataFrame:
+    """One origination row per account, as ``.build_origination_rows`` in R.
+
+    The ids are the ACCOUNT MASTER's ids -- after the off-balance substitution
+    -- in account order, so the two files line up row for row. Every
+    origination value is written BLANK. That is what R does and what both
+    delivered runs carry: the origination PD and rating are never passed to
+    LIC, even when the extract supplies them. The relative SICR test is
+    therefore unavailable by construction, not only because the source is
+    empty -- see INPUT_DATA_ISSUES.md, I3.
+    """
+    ids = pd.Series(contract_ids).astype(str).reset_index(drop=True)
+    n = len(ids)
+    out = pd.DataFrame({
+        "EXTRACTDATE": [extract_date] * n,
+        "ContractId": ids,
+        "OriginationPD12M": [""] * n,
+        "OriginationRating": [""] * n,
+    })
+    for flag in ORIGINATION_FLAGS:
+        out[f"IsOrigination{flag}Stage2"] = [""] * n
+    return out
+
+
 def transform_origination(raw: pd.DataFrame, contracts=None) -> pd.DataFrame:
     """Origination view.
 
@@ -455,6 +519,14 @@ def write_outputs(out_dir, tables: dict[str, pd.DataFrame],
         if df is None:
             continue
         path = out_dir / name
+        if name.startswith("StPD") and "PDLifetime" in df.columns:
+            # Fixed sixteen decimals, as R writes it (output_writers.R:917).
+            # pandas otherwise writes small PDs in scientific notation --
+            # 6.27e-05 -- and a CSV reader that does not take exponents would
+            # misread the whole term structure.
+            df = df.copy()
+            v = pd.to_numeric(df["PDLifetime"], errors="coerce")
+            df["PDLifetime"] = [("" if pd.isna(x) else f"{x:.16f}") for x in v]
         df.to_csv(path, index=False, na_rep="")
         written[name] = path
         if verbose:

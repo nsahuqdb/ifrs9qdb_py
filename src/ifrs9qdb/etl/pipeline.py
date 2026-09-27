@@ -32,7 +32,8 @@ from .static_ref import load_static_reference
 from .transform import (pick, transform_allocation, transform_collateral,
                         transform_customer_master, transform_origination,
                         transform_origination_investments,
-                        transform_staging_flags, write_outputs)
+                        transform_staging_flags, write_outputs,
+                        build_origination_rows)
 
 __all__ = ["RunResult", "run_etl", "next_run_id", "PRODUCED", "PENDING"]
 
@@ -159,13 +160,15 @@ def run_etl(input_dir, runs_dir, reporting_date=None, run_id=None,
         # the six real portfolios.
         static = load_static_reference(static_dir)
         view = transform_lending(am, static.get("product_portfolio_mapping"),
-                                 customers=src["CustomerMaster"])
+                                 customers=src["CustomerMaster"],
+                                 industry=src["IndustryCode"], static=static,
+                                 reporting_date=ref)
         tables["AccountMaster_1.csv"] = build_account_master(view, extract_date)
         result.steps.append({"step": "Lending accounts", "ok": True,
                              "detail": f"{len(view):,} contracts"})
 
         say("investments", "Transforming the investment book…")
-        inv = transform_investments(am2)
+        inv = transform_investments(am2, static=static, reporting_date=ref)
         tables["AccountMaster_2.csv"] = build_account_master(inv, extract_date,
                                                              investments=True)
         result.steps.append({"step": "Investment accounts", "ok": True,
@@ -204,10 +207,12 @@ def run_etl(input_dir, runs_dir, reporting_date=None, run_id=None,
                        f"{len(inv_ids):,} investment")})
 
         say("origination", "Origination…")
-        tables["Origination_1.csv"] = transform_origination(
-            src["Origination"], view["contract_id_raw"])
-        tables["Origination_2.csv"] = transform_origination_investments(
-            src["OriginationInvestments"], am2, extract_date)
+        # Built from the account masters, not the origination extract: R
+        # writes one blank row per account under its account-master id.
+        tables["Origination_1.csv"] = build_origination_rows(
+            extract_date, view["contract_id"])
+        tables["Origination_2.csv"] = build_origination_rows(
+            extract_date, inv["contract_id"] if len(inv) else [])
         result.steps.append({"step": "Origination", "ok": True,
                              "detail": f"{len(tables['Origination_1.csv']):,} contracts"})
 
