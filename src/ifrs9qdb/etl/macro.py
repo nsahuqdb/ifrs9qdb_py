@@ -417,20 +417,23 @@ def external_combined_sf(stressed_gcc, gcc_history) -> np.ndarray:
     distinction matters: a percentile rank makes no assumption about the shape
     of the distribution, and the two give visibly different answers.
 
-    A WARNING, because this is faithful to the reference and looks wrong:
+    SIGN CONVENTION, which is the opposite of the internal scale's and is
+    meant to be. This is a SHIFT factor: a systematic-factor reading of the
+    state of the world, so
 
-        higher growth -> higher percentile -> higher SF -> HIGHER PD
+        higher growth -> higher percentile -> higher shift factor
 
-    so on this scale a downturn LOWERS the provision. On the QDB history
-    (sd 8.65) a 1.28-sigma downturn gives a 2% rating a PD of 0.00006 while the
-    matching uptrend gives 0.29 -- a factor of several thousand, in the
-    direction opposite to the internal scale, where a downturn raises PD as
-    expected.
+    and ``basel_asrf_pit`` subtracts it, giving a LOWER PD. The internal chain
+    produces a STRESS factor instead -- a probit gap between the fitted PD and
+    the anchor, where positive means worse -- and adds it. Each formula
+    consumes its own factor with the matching sign, so both scales raise the
+    provision in a downturn. On the reference run a significant downturn takes
+    a 2% external rating from 0.0093 to 0.0412 and a 14.6% internal rating
+    from 0.1504 to 0.2303.
 
-    The port reproduces the reference rather than correcting it: changing the
-    sign here would make the Python disagree with the R and with every signed
-    figure to date. It is flagged in ETL_STATUS.md as a question for Risk. The
-    two portfolios affected are Investments and Banks and FIs.
+    Do not "fix" the sign here by comparing the two factors at the same
+    numeric value. They are different quantities, and that comparison is what
+    made this look like a defect twice. See M2 in METHODOLOGY_ISSUES.md.
     """
     h = np.asarray(gcc_history, dtype=float)
     h = h[np.isfinite(h)]

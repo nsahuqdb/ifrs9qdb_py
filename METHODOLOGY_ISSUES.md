@@ -8,18 +8,23 @@ Nothing in this document has been changed in the code. Each item states what
 the engine does now, the evidence, the size of it, and what a correct treatment
 would look like — so Risk can decide, rather than find a number has moved.
 
+One entry, M2, was raised as a defect and is not one. It is kept rather than
+deleted because the wrong reading had already reached two other files, and an
+item that says "this looks wrong and is not" is worth more than a gap.
+
 Every figure below is reproducible from `tests/test_methodology_issues.py`,
 which pins the CURRENT behaviour. Those tests are written to fail when an item
 is fixed, so a fix cannot land silently.
 
 **Severity** — **A**: the number is wrong now, and wrong in a direction that
 matters. **B**: the number is wrong but small, or right by accident. **C**: not
-wrong arithmetically, but below what IFRS 9 or a model validator would expect.
+wrong arithmetically, but below what IFRS 9 or a model validator would expect,
+or a naming and documentation problem that keeps producing wrong readings.
 
 | | Issue | Severity |
 | --- | --- | --- |
 | M1 | Scenario weights move the wrong way with the forecast | **A** |
-| M2 | The two rating scales respond to growth in opposite directions | **A** |
+| M2 | The two scales' macro factors are opposite by design and share a name | **C** |
 | M3 | Monthly PD accumulates by summing, so curves reach certain default | **A** |
 | M4 | The amortisation step count floors, ending the curve before maturity | **A** |
 | M5 | The EAD fallback does not reproduce the schedules it stands in for | **A** |
@@ -90,35 +95,55 @@ construction on GCC growth and needs checking the same way.
 
 ---
 
-## M2 — The two rating scales respond to growth in opposite directions · **A**
+## M2 — The two scales' macro factors are opposite by design · **C**
 
-Internal scale: `PD = Φ(Φ⁻¹(TTC) + SF)`
-External scale: `PD = Φ((Φ⁻¹(TTC) − √R·SF) / √(1−R))`
+*Raised as a severity-A defect. It is not one — both scales are correct. What
+is wrong is that two different quantities are both called "SF".*
 
-Same shift factor, same sign convention, opposite response:
+| | Internal, TTC 14.6% | | External, TTC 2.0% | |
+| --- | --- | --- | --- | --- |
+| | factor | PD | factor | PD |
+| Significant Downturn | **+0.316** | **0.2303** | **−1.150** | **0.0412** |
+| Base Case | +0.019 | 0.1504 | +0.246 | 0.0093 |
+| Significant Uptrend | −0.258 | 0.0948 | +1.774 | 0.0012 |
 
-| Shift factor | Internal PD | External PD |
+Both raise the provision in a downturn. There is nothing to fix in either
+formula, and no reason to make them share one — the Vasicek form on the
+external side is the standard treatment and the internal side is a direct
+probit translation of a fitted PD. Forcing them into one functional form would
+be effort spent on symmetry rather than on accuracy.
+
+**The two factors are different quantities, and should be named differently.**
+
+| | Internal | External |
 | --- | --- | --- |
-| −2.0 | 0.00003 | 0.08690 |
-| 0.0 | 0.02000 | 0.01234 |
-| +2.0 | 0.47857 | 0.00087 |
+| Call it | **stress factor** | **shift factor** |
+| It is | `Φ⁻¹(PD_fitted) − Φ⁻¹(TTC_anchor)` — a probit gap between a regression's fitted PD and the anchor | `Φ⁻¹(percentile rank of growth in its own history)` — a systematic-factor reading of the state of the world |
+| Positive means | **worse**: PD increases | **better**: PD decreases |
+| The formula | **adds** it: `Φ(Φ⁻¹(TTC) + stress)` | **subtracts** it: `Φ((Φ⁻¹(TTC) − √R·shift) / √(1−R))` |
+| Scale | whatever the regression gives — roughly ±0.3 here | standard normal by construction |
 
-A positive shift factor is better growth in this model's own convention. On
-the internal scale better growth raises PD; on the external scale it lowers
-it. Both cannot be right.
+Each formula consumes its own factor with the matching sign. Comparing the two
+**at the same numeric value** is what makes them look contradictory, and it is
+a comparison that means nothing: a stress factor of +1 and a shift factor of
++1 describe opposite states of the world.
 
-The practical consequence: a downturn **reduces** the provision on Investments
-and Banks & FIs. It is a small book today (73 contracts, 5.8bn exposure,
-1.5m provision) so the effect is currently immaterial in money — but the sign
-is wrong and the exposure is large, so it will not stay immaterial.
+**Why this is in the register at all.** That comparison was made twice, and the
+wrong conclusion reached three files — the `external_combined_sf` docstring
+carried a warning that a downturn *lowers* the provision, `PORT_STATUS.md`
+repeated it as an open question for Risk, and this register opened it as a
+severity-A defect. All three are now corrected. A single name covering two
+opposite conventions will keep producing that error, in review as much as in
+code, until the names are separated.
 
-The Basel ASRF form on the external side is also worth a second look
-independently: `R = 0.24 − 0.12(1−e^(−50·PD))/(1−e^(−50))` is the **corporate
-supervisory formula for regulatory capital**, which is a stressed,
-through-the-cycle construct. Using it to produce a point-in-time IFRS 9 PD
-mixes two different purposes.
-
----
+**What would actually have to change** if the Vasicek form were ever wanted on
+both sides: not the sign, but the *kind* of factor. Vasicek assumes a standard
+normal systematic factor. The internal stress factor spans about 0.6 in total,
+so feeding it to the Vasicek form as-is collapses the scenario spread from
+0.136 to 0.046 — the macro overlay all but disappears. It would have to be
+rebuilt as a percentile-probit like the external one, which discards the
+regression entirely, or standardised first. Recorded here so the option is not
+re-explored from scratch; it is not recommended.
 
 ## M3 — Monthly PD accumulates by summing, so curves reach certain default · **A**
 

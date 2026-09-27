@@ -511,13 +511,24 @@ is why the engine caps ECL at exposure. It is pinned as a test so nobody later
   is the model, not a fault. Pinned as a test so a property-price stress that
   returns zero is not mistaken for a broken tool.
 
-### One question for Risk, not a defect
+### The two scales use opposite factor conventions, and both are right
 
-On the external scale, higher growth gives a higher percentile, a higher SF
-and therefore a HIGHER PD — so a downturn LOWERS the provision on Investments
-and Banks and FIs. The port reproduces the reference rather than correcting
-it, because changing the sign would make the Python disagree with the R and
-with every signed figure to date. It needs a decision, not a patch.
+An earlier version of this file claimed a downturn LOWERS the provision on the
+external scale. That was wrong, and it was wrong because the two scales carry
+factors of different kinds:
+
+* the internal chain produces a **stress factor** — the probit gap between the
+  fitted PD and the anchor — where **positive means worse**, and the formula
+  adds it;
+* the external chain produces a **shift factor** — the probit of where growth
+  sits in its own history — where **positive means better**, and the Vasicek
+  form subtracts it.
+
+Each formula consumes its own factor with the matching sign, so both raise the
+provision in a downturn. Measured on the reference run, a significant downturn
+takes a 2% external rating from 0.0093 to 0.0412 and a 14.6% internal rating
+from 0.1504 to 0.2303. Nothing needs deciding; the naming needed fixing, and
+it is recorded as M2 in `METHODOLOGY_ISSUES.md`.
 
 ## Where the ECL numbers stand
 
@@ -683,7 +694,8 @@ reworking: fourteen items, five of them wrong in a direction that matters,
 each with its evidence and each pinned by a characterisation test in
 `tests/test_methodology_issues.py` so a fix cannot land unnoticed.
 
-The two sign questions recorded below are M1 and M2 there.
+The sign question recorded below is M1 there. What was previously a
+second one turned out to be a naming collision, now M2.
 
 ## Next
 

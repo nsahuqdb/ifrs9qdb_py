@@ -107,16 +107,94 @@ class TestM1ScenarioWeightsPointTheWrongWay:
 
 
 # ----------------------------------------------------------------- M2 ------
-class TestM2TheScalesDisagreeOnTheSignOfGrowth:
-    def test_the_same_shift_moves_the_two_scales_apart(self):
+class TestM2TheTwoFactorConventions:
+    """M2: a STRESS factor and a SHIFT factor, opposite by design.
+
+    Not a defect. These pin the two conventions so that a future reader who
+    notices they disagree finds the answer here instead of re-deriving it —
+    which has now happened twice.
+    """
+
+    def test_a_stress_factor_raises_pd_when_it_is_positive(self):
+        """Internal: probit gap between the fitted PD and the anchor."""
+        ttc = 0.146
+        worse = float(norm.cdf(norm.ppf(ttc) + 0.32))
+        better = float(norm.cdf(norm.ppf(ttc) - 0.26))
+        assert worse > ttc > better
+
+    def test_a_shift_factor_lowers_pd_when_it_is_positive(self):
+        """External: probit of where growth sits in its own history."""
         ttc = 0.02
-        for sf in (1.0, 2.0):
-            internal = float(norm.cdf(norm.ppf(ttc) + sf))
-            external = float(basel_asrf_pit(ttc, sf))
-            assert internal > ttc > external, (
-                f"M2: at shift {sf} the internal PD should rise and the "
-                "external fall. One of them has changed sign — confirm which "
-                "is now correct.")
+        better = basel_asrf_pit(ttc, +1.77)
+        worse = basel_asrf_pit(ttc, -1.15)
+        assert worse > ttc > better
+
+    def test_the_internal_chain_produces_a_stress_factor(self, static):
+        """A downturn must come out POSITIVE on the internal scale."""
+        import yaml
+        from pathlib import Path
+
+        import ifrs9qdb
+        from ifrs9qdb.etl.macro import (combine_sf, compute_logit_pds,
+                                        compute_pds_from_logits,
+                                        compute_per_mev_sf, stress_mevs)
+
+        cfg = Path(ifrs9qdb.__file__).parent / "config"
+        mc = yaml.safe_load((cfg / "model.yml").read_text(encoding="utf-8"))
+        mi = yaml.safe_load((cfg / "model_inputs.yml").read_text(encoding="utf-8"))
+        comp = mc["models"]["internal_v4_production"]["mev_components"]
+        variables = mc.get("variables", {})
+        specs = [{"standard_deviation": c["standard_deviation"],
+                  "stress_unit_multiplier": variables.get(
+                      c["variable"], {}).get("stress_unit_multiplier", 1),
+                  "intercept": c["intercept"],
+                  "coefficient": c["coefficient"]} for c in comp]
+        weights = np.array([c["weight"] for c in comp], dtype=float)
+        anchor = float(mc["ttc_anchor_pd"])
+        block = mi["mev_forecasts"]["forecasts"]
+        forecasts = np.array([np.asarray(block[y], dtype=float)
+                              for y in sorted(block, key=int)])
+
+        def factor(z):
+            stressed = stress_mevs(forecasts, z, specs)
+            fitted = compute_pds_from_logits(compute_logit_pds(stressed, specs))
+            return combine_sf(compute_per_mev_sf(fitted, anchor), weights)[0]
+
+        down, up = factor(-1.281552), factor(1.281552)
+        assert down > 0 > up, (
+            f"M2: the internal factor is meant to be a STRESS factor — "
+            f"positive in a downturn. Got {down:+.4f} down, {up:+.4f} up.")
+        assert norm.cdf(norm.ppf(anchor) + down) > anchor
+
+    def test_the_external_chain_produces_a_shift_factor(self, static):
+        """A downturn must come out NEGATIVE on the external scale, and the
+        Vasicek form must still raise the PD."""
+        from ifrs9qdb.etl.macro import (external_combined_sf,
+                                        gcc_weighted_history)
+
+        history = gcc_weighted_history(static.get("gcc_real_gdp_growth"),
+                                       static.get("gcc_gdp_current_prices"))
+        sd = float(np.std(np.asarray(history, dtype=float), ddof=1))
+        base = float(np.mean(np.asarray(history, dtype=float)))
+        down = float(external_combined_sf([base - 1.281552 * sd], history)[0])
+        up = float(external_combined_sf([base + 1.281552 * sd], history)[0])
+        assert down < 0 < up, (
+            f"M2: the external factor is meant to be a SHIFT factor — "
+            f"negative in a downturn. Got {down:+.4f} down, {up:+.4f} up.")
+        assert basel_asrf_pit(0.02, down) > 0.02 > basel_asrf_pit(0.02, up)
+
+    def test_both_scales_raise_the_provision_in_a_downturn(self, static):
+        """The property that matters, and the one the old wording denied."""
+        from ifrs9qdb.etl.macro import (external_combined_sf,
+                                        gcc_weighted_history)
+
+        history = gcc_weighted_history(static.get("gcc_real_gdp_growth"),
+                                       static.get("gcc_gdp_current_prices"))
+        arr = np.asarray(history, dtype=float)
+        down_shift = float(external_combined_sf(
+            [arr.mean() - 1.281552 * arr.std(ddof=1)], history)[0])
+        assert basel_asrf_pit(0.02, down_shift) > 0.02
+        assert float(norm.cdf(norm.ppf(0.146) + 0.3159)) > 0.146
 
 
 # ----------------------------------------------------------------- M3 ------
