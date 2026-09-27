@@ -209,67 +209,105 @@ the book and every contract the maturity lever touches.
 
 ## M5 — The EAD fallback does not reproduce the schedules it stands in for · **A**
 
-*This is the test you asked for. It does not pass.*
+*Back-tested against the R engine's own formula, swept across every parameter
+it exposes. R itself is not installed here, so `build_ead_fallback_curve` was
+transcribed line for line from `R/ecl_ead_curve.R` and run against the real
+schedules.*
 
-24% of the book has no supplied schedule and is priced on a parametric curve.
-The other 76% has a real schedule. So the fallback can be back-tested directly:
-build it for the contracts that have a real curve, and compare.
+### First: what the "supplied schedule" actually is
 
-**4,225 contracts on run_00001, comparing the area under the curve** (the
-quantity the PD is multiplied by):
+The engine does **not** transform a schedule it is given.
+`build_ead_schedule_curves` splits `EADLifetime` by contract and
+`resolve_ead_curve` returns it untouched, truncated to twelve months for
+Stage 1. The Python port does the same. That part is a clean pass-through.
 
-| Agreement with the real schedule | Share |
+But `LifeTimeParameterOther.csv` is **not the raw repayment schedule** — it is
+derived from it by `build_lifetime_parameter_other`:
+
+| month | EAD taken as |
 | --- | --- |
-| within ±1% | **23.8%** |
-| within ±10% | **43.8%** |
-| within ±25% | 62.6% |
+| 0 | `AccountMaster.OnBalance` — the current exposure |
+| below the first scheduled month | `AccountMaster.OnBalance` |
+| otherwise | `BALANCE + REPAYMENT` at the **first** scheduled payment with month > m |
 
-Worst overstatement **+245%**, worst understatement **−100%** (the fallback
-says zero exposure where the real schedule has some).
+Verified against the data: **month 0 equals OnBalance on all 4,225 supplied
+curves, with zero exceptions.** The forward step lookup is what produces the
+staircase shape — 995 of the curves step every three months, 894 every month.
 
-The aggregate has never looked wrong because the errors are large and cancel:
+This also corrects an earlier reading in this register. The rise between
+months 0 and 1 on 271 contracts is the `+ REPAYMENT` add-back, not a drawdown.
+A further 1,171 curves rise again later, which the add-back does not explain.
+
+The raw Oracle `RepaymentSchedule` extract is not held with the runs, so the
+one link that could not be checked is whether that derivation faithfully
+represents the source data. **That is the remaining test to run, and it needs
+the source extracts.**
+
+### The horizon is wrong before the shape is considered
+
+The fallback's length comes from `months_to_maturity`, not from the schedule:
 
 | | run_00001 | run_00002 |
 | --- | --- | --- |
-| contracts compared | 4,225 | 4,733 |
-| median error | −1.4% | **−7.2%** |
-| interquartile spread | 0.253 | 0.308 |
-| within ±10% | 43.8% | **37.3%** |
+| matches the schedule's own length | 67.4% | 70.5% |
+| fallback horizon **longer** | 1,286 contracts, median **+18 months** | 1,325, median **+21** |
+| fallback horizon shorter | none | none |
 
-The median is far smaller than the spread, so a portfolio total carries almost
-none of the contract-level error. It is also **not stable between quarters** —
-−1.4% one quarter and −7.2% the next — so the cancelling cannot be relied on
-either. A movement analysis between two runs picks up that drift as though it
-were credit.
+A third of the book would be priced over a year and a half more exposure than
+its own schedule runs to.
 
-**Three specific reasons it cannot fit:**
+### Every parameter R's formula exposes, swept
 
-1. **46.7% of real type-4 schedules rise before they fall.** They carry
-   expected drawdowns on undrawn commitments. The fallback is monotonically
-   decreasing and can never produce that shape.
+Shape, payment frequency, deferral and rate, built to the schedule's own
+horizon so this isolates shape. 3,939 contracts on run_00001:
 
-   ```
-   linear (what we build)   1.00  0.92  0.83  0.75  0.67  0.58  0.50 …
-   contract 504055          1.00  1.00  1.00  0.34  0.34  0.34  0.29 …
-   contract 512627          1.00  1.00  0.86  0.86  0.86  0.72  0.72 …
-   ```
+| shape | frequency | area within ±1% | area within ±10% | whole curve within ±1% |
+| --- | --- | --- | --- | --- |
+| bullet | any | 14.7% | 24.8% | 10.2% |
+| linear | as-is | 15.2% | 34.8% | 12.9% |
+| linear | quarterly | 14.6% | **40.6%** | 7.3% |
+| annuity | as-is | 16.4% | 35.7% | **13.7%** |
+| annuity | quarterly | 14.5% | **41.8%** | 7.2% |
 
-2. **An annuity shape fits better than linear on 1,535 contracts against 373**
-   (1,178 ties). The engine already contains an annuity form; the shape rule
-   table never selects it. This looks like a calibration that was never done
-   rather than a decision that was taken.
+**No parameterisation exceeds 42% within ±10%, and none reproduces more than
+14% of the curves outright.** This is not a calibration gap that better
+parameters would close — the supplied curve is a forward step lookup into a
+repayment table, and a smooth parametric decline cannot express that shape at
+any setting.
 
-3. **Only two shapes exist** — bullet and linear — resolved from
-   (portfolio, payment type). Type 4 in Business Finance covers 4,174 of the
-   4,225 and gets one straight line for all of them.
+### In aggregate it is nearly unbiased, which is why nobody noticed
 
-**This is the load-bearing item for stress testing.** The maturity lever in
-stress, what-if and roll-forward re-profiles whichever curve comes back. For
-76% of contracts it stretches a real schedule, which is defensible. For the
-other 24% it stretches a curve that matches reality less than half the time,
-and no output distinguishes the two.
+Pricing the 3,680 Stage 1 and 2 contracts that have a schedule, each way:
 
----
+| EAD curve used | ECL | vs the real schedule |
+| --- | --- | --- |
+| real schedule | 665,623,988 | — |
+| linear — what the rule table gives Business Finance pt 4 | 658,129,738 | **−1.1%** |
+| annuity | 670,258,954 | +0.7% |
+| bullet | 832,332,794 | **+25.0%** |
+
+So the headline provision would barely move, while individual contracts are
+wrong by a median 13% and a worst case of 245%. **The reported total is
+defensible; nothing computed per contract is** — which is every stress lever,
+every what-if, and every movement attribution.
+
+### 1,181 contracts are priced on a shape nobody has ever observed
+
+| portfolio | payment type | shape given | with a real schedule |
+| --- | --- | --- | --- |
+| Business Finance | 4 | linear | 4,174 — testable |
+| Business Finance | 3 | bullet | 51 — testable |
+| **Al Dhameen** | **4** | **bullet** | **0 — never observed** |
+| Off BS | 3 | bullet | 0 — never observed |
+| Tasdeer | 3 | bullet | 0 — never observed |
+| Investments | 3 | bullet | 0 — never observed |
+| Banks and Fis | 3 | bullet | 0 — never observed |
+
+A bullet for payment type 3 is reasonable on its face. **Al Dhameen payment
+type 4 is the one to question**: it is the same payment type as Business
+Finance pt 4, which the same rule table sends to `linear`, and the ECL table
+above puts the gap between those two choices at 25%. All 150 Al Dhameen
+contracts take it, and not one of them can be checked.
 
 ## M6 — Month 1's loss is not discounted · **B**
 
@@ -459,12 +497,19 @@ M1, and a single-variable model is thin for a model-validation review.
 
 Two things this register does not yet answer:
 
-1. **Whether the annual PD term structure itself is right.** M3 is about the
+1. **Whether `LifeTimeParameterOther` faithfully represents the raw
+   repayment schedule.** M5 confirms the engine passes the file through
+   untouched, and confirms the derivation rule that builds it, but the raw
+   Oracle `RepaymentSchedule` extract is not held with the runs. Comparing the
+   two needs the source files, and it is the one link in the EAD chain still
+   unchecked.
+
+2. **Whether the annual PD term structure itself is right.** M3 is about the
    monthly conversion; the annual curve that feeds it has not been back-tested
    against realised default experience. There is no default history in the run
    outputs to do it with.
 
-2. **Whether the stress levers move the provision by the right amount**, as
+3. **Whether the stress levers move the provision by the right amount**, as
    opposed to the right direction. M5 shows the EAD lever rests on an
    unvalidated curve. The PD, rating and collateral levers have no equivalent
    back-test because there is no realised outcome to compare against — a

@@ -303,6 +303,72 @@ class TestM5TheFallbackDoesNotReproduceRealSchedules:
         assert np.abs(e).max() > 1.0, "M5: the worst case used to exceed 100%"
 
     @needs_run
+    def test_month_zero_is_the_current_exposure(self, inputs):
+        """The derivation rule, confirmed on every supplied curve.
+
+        build_lifetime_parameter_other sets month 0 to AccountMaster.OnBalance
+        and every later month to BALANCE + REPAYMENT at the first scheduled
+        payment beyond it. That forward step lookup is what produces the
+        staircase, and it is why a smooth parametric curve cannot match it.
+        """
+        con = inputs.contracts.set_index("contract")
+        checked = mismatched = 0
+        for cid, real in inputs.ead_curves.items():
+            if cid not in con.index:
+                continue
+            r = con.loc[cid]
+            if isinstance(r, pd.DataFrame):
+                r = r.iloc[0]
+            balance = r.get("on_balance")
+            if not np.isfinite(balance or np.nan) or balance <= 0:
+                continue
+            checked += 1
+            if abs(np.asarray(real, dtype=float)[0] - balance) > 0.01 * balance:
+                mismatched += 1
+        assert checked > 1000
+        assert mismatched == 0, (
+            f"M5: {mismatched} supplied curves no longer open at OnBalance. "
+            "The derivation rule may have changed.")
+
+    @needs_run
+    def test_the_fallback_horizon_runs_past_the_schedule(self, inputs):
+        """Duration is wrong before shape is even considered."""
+        con = inputs.contracts.set_index("contract")
+        longer = same = 0
+        for cid, real in inputs.ead_curves.items():
+            if cid not in con.index:
+                continue
+            r = con.loc[cid]
+            if isinstance(r, pd.DataFrame):
+                r = r.iloc[0]
+            gap = int(r["months_to_mat"] or 3) - len(real)
+            if gap > 0:
+                longer += 1
+            elif gap == 0:
+                same += 1
+        assert longer > 500, (
+            "M5 may be IMPROVED: the fallback horizon no longer overruns the "
+            f"schedule on many contracts ({longer}).")
+
+    @needs_run
+    def test_some_shapes_are_used_but_never_observed(self, inputs):
+        """A shape nobody can check is an assumption, not a calibration."""
+        from ifrs9qdb.engine import resolve_ead_shape
+
+        con = inputs.contracts.copy()
+        con["supplied"] = con["contract"].isin(inputs.ead_curves)
+        groups = con.groupby([con["portfolio"].astype(str),
+                              con["payment_type"].astype(str)])
+        unchecked = 0
+        for (portfolio, ptype), g in groups:
+            if g["supplied"].sum() == 0:
+                unchecked += int((~g["supplied"]).sum())
+                resolve_ead_shape(ptype, portfolio)  # must still resolve
+        assert unchecked > 500, (
+            "M5 may be ADDRESSED: most shape choices now have at least one "
+            "observed schedule behind them.")
+
+    @needs_run
     def test_real_schedules_rise_before_they_fall(self, inputs):
         """A shape the monotone fallback can never produce."""
         con = inputs.contracts.set_index("contract")
