@@ -5,6 +5,9 @@ The suites are grouped by what they can see, which is also when they can run:
     INPUT      the raw extracts, plus cross-file agreement and config coverage
     TRANSFORM  the book after it has been shaped, before pricing
     DERIVED    the curves and weights the engine prices against
+    READY      the written files LIC reads, before pricing: will every
+               contract get an ECL, and from complete inputs (readiness.py)
+    REPORT     after pricing: every contract has a row, every blank explained
 
 Everything runs, including the checks that pass. A report showing only
 failures cannot be read as evidence that anything was checked, which is what a
@@ -70,7 +73,26 @@ def validate_stages(*, inputs=None, static=None, trans_lending=None,
     runs -- a check that vanishes when its data is missing looks the same as a
     check that was never written.
     """
+    # Every check reads the canonical columns R's checks read, with SQL*Plus
+    # junk rows already stripped -- see schema.py for why this matters.
+    if inputs is not None:
+        from .schema import canonicalise
+        inputs = canonicalise(inputs)
+        if header_strip_log is None:
+            header_strip_log = inputs.strip_log
+    # The TRANSFORM checks read R's intermediates -- trans_l, cm_view,
+    # trans_i, inv_view -- so those are built in R's shape from the frames
+    # the ETL produced (r_frames.py).
+    trans_l = cm_view = trans_i = inv_view = None
+    if inputs is not None and trans_lending is not None:
+        from .r_frames import lending_frames
+        trans_l, cm_view = lending_frames(trans_lending, inputs, static)
+    if inputs is not None and trans_investments is not None:
+        from .r_frames import investment_frames
+        trans_i, inv_view = investment_frames(trans_investments, inputs, static)
     args = {
+        "trans_l": trans_l, "cm_view": cm_view,
+        "trans_i": trans_i, "inv_view": inv_view,
         "inputs": inputs, "static": static,
         "trans_lending": trans_lending, "lending_view": lending_view,
         "trans_investments": trans_investments,
@@ -94,7 +116,8 @@ def validation_frame(result: ValidationResult) -> pd.DataFrame:
         stage = issue.id.split("_", 1)[0]
         stage = {"INPUT": "INPUT", "XFILE": "INPUT", "CONFIG": "INPUT",
                  "TRANS": "TRANSFORM", "DERIVED": "DERIVED",
-                 "STATIC": "INPUT"}.get(stage, stage)
+                 "STATIC": "INPUT", "READY": "READY",
+                 "REPORT": "REPORT"}.get(stage, stage)
         rows.append({
             "stage": stage,
             "id": issue.id,
@@ -127,7 +150,7 @@ def _markdown(result: ValidationResult, frame: pd.DataFrame) -> str:
         f"ERROR: {counts[Severity.ERROR]}  |  WARN: {counts[Severity.WARN]}  |  "
         f"INFO: {counts[Severity.INFO]}  |  Suppressed: {n_supp}",
     ]
-    for stage in ("INPUT", "TRANSFORM", "DERIVED"):
+    for stage in ("INPUT", "TRANSFORM", "DERIVED", "READY", "REPORT"):
         sub = frame[frame["stage"] == stage]
         if sub.empty:
             continue

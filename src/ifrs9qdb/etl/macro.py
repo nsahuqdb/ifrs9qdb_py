@@ -475,25 +475,29 @@ def build_term_structure(ttc_table: pd.DataFrame, scenarios: pd.DataFrame,
 
 def build_stpd_from_static(static, model_cfg, model_inputs, extract_date: str,
                            max_month: int = 600,
-                           scenario_weights=None) -> pd.DataFrame:
+                           scenario_weights=None,
+                           model_id: str | None = None) -> pd.DataFrame:
     """Build StPD.csv end to end from a run's reference data and config.
 
     The internal and external scales are built SEPARATELY and each is repeated
     across the portfolios that use it. A PD curve is a property of the rating
     scale, not of the portfolio, and combining the two scales would silently
     mix grades that share a hierarchy number but mean different things.
+
+    ``model_id`` is config.yml's ``run.internal_model``; None is the shipped
+    model. The MEVs combine with the weights model_inputs.yml's
+    ``mev_model_weights.mode`` selects, as in R.
     """
+    from .model_registry import mev_model_weights, resolve_model
     mc = model_cfg
-    comp = mc["models"]["internal_v4_production"]["mev_components"]
-    variables = mc.get("variables", {})
+    resolved = resolve_model(mc, model_id)
     specs = [{
         "standard_deviation": c["standard_deviation"],
-        "stress_unit_multiplier":
-            variables.get(c["variable"], {}).get("stress_unit_multiplier", 1),
+        "stress_unit_multiplier": c["stress_unit_multiplier"],
         "intercept": c["intercept"],
         "coefficient": c["coefficient"],
-    } for c in comp]
-    weights = [c["weight"] for c in comp]
+    } for c in resolved["model"]["mevs"]]
+    weights = mev_model_weights(resolved, model_inputs)
 
     fc_block = model_inputs["mev_forecasts"]["forecasts"]
     forecasts = np.array([np.asarray(fc_block[y], dtype=float)

@@ -1,635 +1,509 @@
-"""Derived-stage checks: the curves and weights the engine prices against.
+"""DERIVED stage: the curves and weights the engine prices against.
 
-These are the last chance to catch a number that is well formed and wrong. A
-scenario weighting that silently falls back to an equal split produces a curve
-set that is monotonic, bounded, correctly shaped and out by a mean of 0.0058 --
-so the checks here assert the things a wrong weighting does NOT preserve: that
-the weights sum to one, that the two scales differ from each other, and that
-the curves order correctly by rating.
+A literal port of R/validators_derived.R -- the same 29 checks, in R's order,
+with R's tolerances and messages. The curve tables arrive in the Output shape
+(ContractId, MonthLifetime, ...); ``_r_shape`` renames them to the snake_case
+columns R's checks read, so a missing column fails the schema check exactly
+as it does in R.
 
-Ids match the R package exactly.
+Three tolerances used to differ from R and now match it: the internal
+scenario weights sum to 1 within 1e-4 (not 1e-3), the MEV weights within 1e-3
+(not 1e-6), and the external non-negativity check covers the 'average' row as
+well as the per-year rows.
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from ..ids import as_id
-from ._helpers import col, fail, ok
+from ._helpers import col, text
+from .checks_transform import r_format
+from ._texts import STAGE_TEXTS
 from .framework import Severity, Validator
 
 __all__ = ["DERIVED_STAGE_VALIDATORS"]
 
-LTPO_SCHEMA = ["ExtractDate", "ContractId", "MonthLifetime", "EADLifetime",
-               "LGDLifetime", "PaymentScheduleLifetime", "TotalLimitLifetime"]
-STPD_SCHEMA = ["ExtractDate", "PortfolioCode", "PDBucketDim1", "PDBucketDim2",
-               "MonthLifetime", "PDLifetime"]
 INTERNAL_PORTFOLIOS = ["Business Finance", "Off BS", "Al Dhameen", "Tasdeer"]
 EXTERNAL_PORTFOLIOS = ["Banks and Fis", "Investments"]
-N_BUCKETS, N_MONTHS = 21, 600
-STPD_ROWS = 6 * N_BUCKETS * N_MONTHS          # 75,600
+LTPO_R = ["extract_date", "contract_id", "month_lifetime", "ead_lifetime",
+          "lgd_lifetime", "payment_schedule_lifetime", "total_limit_lifetime"]
+STPD_R = ["extract_date", "portfolio_code", "pd_bucket_dim1", "pd_bucket_dim2",
+          "month_lifetime", "pd_lifetime"]
 
 
-def _empty(df) -> bool:
-    return df is None or len(df) == 0
+def _squash(s) -> str:
+    return "".join(ch for ch in str(s).lower() if ch.isalnum())
 
 
-def _schema(df, expected, name):
-    if _empty(df):
-        return ok()
-    got = list(df.columns)
-    if got == expected:
-        return ok()
-    missing = [c for c in expected if c not in got]
-    extra = [c for c in got if c not in expected]
-    bits = []
-    if missing:
-        bits.append(f"missing {missing}")
-    if extra:
-        bits.append(f"unexpected {extra}")
-    if not bits:
-        bits.append(f"column ORDER differs: {got}")
-    return fail(len(missing) + len(extra), f"{name} schema: " + "; ".join(bits))
+def _r_shape(df, names):
+    """The frame with its columns renamed to R's snake_case names."""
+    if df is None:
+        return None
+    want = {_squash(n): n for n in names}
+    ren = {c: want[_squash(c)] for c in df.columns if _squash(c) in want}
+    return df.rename(columns=ren)
 
 
-def _one_extract_date(df, name):
-    if _empty(df):
-        return ok()
-    c = col(df, "ExtractDate", "extract_date")
-    if c is None:
-        return fail(0, f"{name} has no ExtractDate column")
-    vals = sorted({str(v).strip() for v in pd.Series(c).dropna().unique()})
-    if len(vals) <= 1:
-        return ok()
-    return fail(len(vals), f"{name} carries {len(vals)} different extract dates",
-                examples=vals[:10])
+def _ok():
+    return {"passed": True}
+
+
+def _bad(message, count=0):
+    return {"passed": False, "count": int(count), "detail": message}
+
+
+def _num(s):
+    return pd.to_numeric(pd.Series(s), errors="coerce")
+
+
+def _dates(s) -> pd.Series:
+    from ._helpers import parse_any_date
+    return parse_any_date(pd.Series(s))
 
 
 # ------------------------------------------------------------------ LTPO ---
-def _v_ltpo_schema(ltpo=None):
-    return _schema(ltpo, LTPO_SCHEMA, "LifeTimeParameterOther")
+def _ltpo_schema(ltpo=None):
+    if ltpo is None:
+        return _bad("ltpo is NULL")
+    missing = [c for c in LTPO_R if c not in _r_shape(ltpo, LTPO_R).columns]
+    return _ok() if not missing else _bad("Missing columns: " + ", ".join(missing))
 
 
-def _v_ltpo_extract_date_unique(ltpo=None):
-    return _one_extract_date(ltpo, "LifeTimeParameterOther")
+def _ltpo_extract_date(ltpo=None):
+    t = _r_shape(ltpo, LTPO_R)
+    if t is None or "extract_date" not in t.columns:
+        return _ok()
+    d = _dates(t["extract_date"])
+    uniq = list(pd.unique(d.dt.strftime("%Y-%m-%d").fillna("NA")))
+    return _ok() if len(uniq) == 1 else _bad(
+        f"{len(uniq)} distinct extract_dates: " + ", ".join(uniq[:5]), len(uniq))
 
 
-def _v_ltpo_ead_nonneg(ltpo=None):
-    if _empty(ltpo):
-        return ok()
-    x = pd.to_numeric(col(ltpo, "EADLifetime"), errors="coerce")
-    bad = x.isna() | (x < 0)
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} curve point(s) have a missing or negative EAD")
+def _ltpo_ead_nonneg(ltpo=None):
+    t = _r_shape(ltpo, LTPO_R)
+    if t is None or "ead_lifetime" not in t.columns:
+        return _ok()
+    e = _num(t["ead_lifetime"])
+    n_na, n_neg = int(e.isna().sum()), int((e < 0).sum())
+    return _ok() if n_na == 0 and n_neg == 0 else _bad(
+        f"{n_na} NA, {n_neg} negative", n_na + n_neg)
 
 
-def _v_ltpo_month_starts_at_zero(ltpo=None):
-    if _empty(ltpo):
-        return ok()
-    cid = as_id(col(ltpo, "ContractId"))
-    m = pd.to_numeric(col(ltpo, "MonthLifetime"), errors="coerce")
-    first = pd.DataFrame({"c": cid, "m": m}).groupby("c")["m"].min()
-    bad = first[first != 0]
-    if bad.empty:
-        return ok()
-    return fail(len(bad), f"{len(bad)} contract(s) do not start at month 0",
-                examples=[f"{k} starts at {v}" for k, v in bad.head(10).items()])
+def _ltpo_month_zero(ltpo=None):
+    t = _r_shape(ltpo, LTPO_R)
+    if t is None or len(t) == 0:
+        return _ok()
+    m = _num(t["month_lifetime"])
+    have0 = set(t.loc[(m == 0).to_numpy(), "contract_id"].astype(str))
+    ids = pd.unique(t["contract_id"].astype(str))
+    missing = [c for c in ids if c not in have0]
+    return _ok() if not missing else _bad(
+        f"{len(missing)} contracts have no month-0 row (e.g. "
+        + ", ".join(missing[:5]) + ")", len(missing))
 
 
-def _v_ltpo_months_contiguous(ltpo=None):
-    if _empty(ltpo):
-        return ok()
-    d = pd.DataFrame({"c": as_id(col(ltpo, "ContractId")),
-                      "m": pd.to_numeric(col(ltpo, "MonthLifetime"),
-                                         errors="coerce")})
-    g = d.groupby("c")["m"].agg(["min", "max", "count", "nunique"])
-    bad = g[(g["min"] != 0) | (g["nunique"] != g["count"])
-            | (g["max"] != g["count"] - 1)]
-    if bad.empty:
-        return ok()
-    return fail(len(bad),
-                f"{len(bad)} contract(s) have a gap, a duplicate or a bad start "
-                "in their month sequence",
-                examples=list(bad.index[:10]))
+def _ltpo_contiguous(ltpo=None):
+    t = _r_shape(ltpo, LTPO_R)
+    if t is None or len(t) == 0:
+        return _ok()
+    d = pd.DataFrame({"c": t["contract_id"].astype(str), "m": _num(t["month_lifetime"])})
+
+    def ok_(m):
+        s = np.sort(m.to_numpy())
+        return len(s) > 0 and s[0] == 0 and np.array_equal(s, np.arange(len(s)))
+    n_bad = int((~d.groupby("c")["m"].apply(ok_)).sum())
+    return _ok() if n_bad == 0 else _bad(
+        f"{n_bad} contracts have non-contiguous months", n_bad)
 
 
-def _v_ltpo_ead_nonincreasing(ltpo=None):
-    if _empty(ltpo):
-        return ok()
-    d = pd.DataFrame({"c": as_id(col(ltpo, "ContractId")),
-                      "m": pd.to_numeric(col(ltpo, "MonthLifetime"),
-                                         errors="coerce"),
-                      "v": pd.to_numeric(col(ltpo, "EADLifetime"),
-                                         errors="coerce")}).sort_values(["c", "m"])
-    rises = d.groupby("c")["v"].apply(lambda s: bool((s.diff() > 1e-6).any()))
-    up = rises[rises]
-    if up.empty:
-        return ok()
-    return fail(len(up),
-                f"{len(up)} curve(s) rise above their opening balance. For a "
-                "term loan that is wrong; for a revolving or off-balance "
-                "facility it is the schedule carrying committed but undrawn "
-                "amounts, and it is why the engine caps ECL at exposure",
-                examples=list(up.index[:10]))
+def _ltpo_nonincreasing(ltpo=None):
+    t = _r_shape(ltpo, LTPO_R)
+    if t is None or len(t) == 0:
+        return _ok()
+    d = pd.DataFrame({"c": t["contract_id"].astype(str),
+                      "m": _num(t["month_lifetime"]), "e": _num(t["ead_lifetime"])})
+    d = d.sort_values(["c", "m"], kind="mergesort")
+    up = d.groupby("c")["e"].apply(lambda e: bool((e.diff().dropna() > 1e-6).any()))
+    n_bad = int(up.sum())
+    return _ok() if n_bad == 0 else _bad(
+        f"{n_bad} contracts have an EAD rise between months — expected for "
+        "revolving/off-balance products and contracts with interest/fee "
+        "accrual baked into the schedule", n_bad)
 
 
-def _v_ltpo_contracts_subset(ltpo=None, trans_lending=None):
-    if _empty(ltpo) or _empty(trans_lending):
-        return ok()
-    have = set(as_id(col(trans_lending, "contract_id", "CONTRACTID")))
-    used = as_id(col(ltpo, "ContractId"))
-    orphan = sorted(set(used[used != ""]) - have)
-    if not orphan:
-        return ok()
-    return fail(len(orphan),
-                f"{len(orphan)} curve(s) are for contracts not on the book",
-                examples=orphan[:10])
+def _ltpo_subset(ltpo=None, trans_l=None):
+    t = _r_shape(ltpo, LTPO_R)
+    if t is None or trans_l is None:
+        return _ok()
+    have = set(trans_l["contract_id"].astype(str))
+    orphans = [c for c in pd.unique(t["contract_id"].astype(str)) if c not in have]
+    return _ok() if not orphans else _bad(
+        f"{len(orphans)} ltpo contracts not in trans_l (e.g. "
+        + ", ".join(orphans[:5]) + ")", len(orphans))
 
 
-def _v_ltpo_month0_reconciles(ltpo=None, trans_lending=None):
-    if _empty(ltpo) or _empty(trans_lending):
-        return ok()
-    m = pd.to_numeric(col(ltpo, "MonthLifetime"), errors="coerce")
-    v = pd.to_numeric(col(ltpo, "EADLifetime"), errors="coerce")
-    cid = as_id(col(ltpo, "ContractId"))
-    zero = pd.DataFrame({"c": cid, "v": v})[m == 0]
-    bal_col = col(trans_lending, "on_balance", "exposure_amount", "ONBALANCE")
-    if bal_col is None:
-        return ok()
-    book = pd.DataFrame({"c": as_id(col(trans_lending, "contract_id",
-                                        "CONTRACTID")),
-                         "b": pd.to_numeric(bal_col, errors="coerce")})
-    j = zero.merge(book, on="c", how="inner")
-    if len(j) == 0:
-        return ok()
-    a, b = float(j["v"].fillna(0).sum()), float(j["b"].fillna(0).sum())
-    if abs(a - b) <= max(1.0, 1e-6 * max(abs(a), abs(b))):
-        return ok()
-    return fail(1, f"month-0 EAD totals {a:,.2f} against an on-balance total of "
-                   f"{b:,.2f} for the same contracts (difference {a - b:,.2f}). "
-                   "Month 0 is today's outstanding from the account master, not "
-                   "the schedule's first figure")
+def _ltpo_month0_reconciles(ltpo=None, trans_l=None):
+    t = _r_shape(ltpo, LTPO_R)
+    if t is None or trans_l is None:
+        return _ok()
+    m0 = t[(_num(t["month_lifetime"]) == 0).to_numpy()]
+    ids = m0["contract_id"].astype(str)
+    common = set(ids) & set(trans_l["contract_id"].astype(str))
+    if not common:
+        return _ok()
+    a = float(_num(m0["ead_lifetime"])[ids.isin(common).to_numpy()].sum())
+    tc = trans_l["contract_id"].astype(str)
+    b = float(_num(trans_l["exposure_amount"])[tc.isin(common).to_numpy()].sum())
+    tol = max(1.0, abs(b) * 1e-6)
+    return _ok() if abs(a - b) <= tol else _bad(
+        f"ltpo month-0 sum={r_format(a)}, trans exposure sum={r_format(b)}, "
+        f"diff={r_format(a - b)}, contracts compared={len(common)}")
 
 
 # ------------------------------------------------------------------ StPD ---
-def _v_stpd_schema(stpd=None):
-    return _schema(stpd, STPD_SCHEMA, "StPD")
+def _stpd(stpd):
+    return _r_shape(stpd, STPD_R)
 
 
-def _v_stpd_row_count(stpd=None):
-    if _empty(stpd):
-        return ok()
-    if len(stpd) == STPD_ROWS:
-        return ok()
-    return fail(abs(len(stpd) - STPD_ROWS),
-                f"StPD has {len(stpd):,} rows against the expected "
-                f"{STPD_ROWS:,} (6 portfolios x {N_BUCKETS} buckets x "
-                f"{N_MONTHS} months)")
+def _stpd_schema(stpd=None):
+    if stpd is None:
+        return _bad("stpd is NULL")
+    missing = [c for c in STPD_R if c not in _stpd(stpd).columns]
+    return _ok() if not missing else _bad("Missing columns: " + ", ".join(missing))
 
 
-def _v_stpd_extract_date_unique(stpd=None):
-    return _one_extract_date(stpd, "StPD")
+def _stpd_rows(stpd=None):
+    if stpd is None:
+        return _ok()
+    return _ok() if len(stpd) == 75600 else _bad(
+        f"nrow(stpd)={len(stpd)}, expected 75,600")
 
 
-def _v_stpd_portfolio_set(stpd=None):
-    if _empty(stpd):
-        return ok()
-    seen = set(pd.Series(col(stpd, "PortfolioCode")).astype(str).str.strip())
-    want = set(INTERNAL_PORTFOLIOS + EXTERNAL_PORTFOLIOS)
-    missing, extra = sorted(want - seen), sorted(seen - want)
-    if not missing and not extra:
-        return ok()
-    bits = []
-    if missing:
-        bits.append(f"missing {missing}")
-    if extra:
-        bits.append(f"unexpected {extra}")
-    return fail(len(missing) + len(extra), "StPD portfolios: " + "; ".join(bits))
+def _stpd_extract_date(stpd=None):
+    s = _stpd(stpd)
+    if s is None or "extract_date" not in s.columns:
+        return _ok()
+    n = int(pd.Series(s["extract_date"]).nunique(dropna=False))
+    return _ok() if n == 1 else _bad(f"{n} distinct extract_dates", n)
 
 
-def _v_stpd_bucket_set(stpd=None):
-    if _empty(stpd):
-        return ok()
-    d = pd.DataFrame({"p": pd.Series(col(stpd, "PortfolioCode")).astype(str),
-                      "b": pd.to_numeric(col(stpd, "PDBucketDim1"),
-                                         errors="coerce")})
-    want = set(range(1, N_BUCKETS + 1))
-    bad = {p: sorted(want - set(g["b"].dropna().astype(int)))
-           for p, g in d.groupby("p")}
-    bad = {p: m for p, m in bad.items() if m}
-    if not bad:
-        return ok()
-    return fail(sum(len(m) for m in bad.values()),
-                f"{len(bad)} portfolio(s) are missing buckets. A TTC PD of ZERO "
-                "must still get a bucket - filtering on > 0 instead of >= 0 "
-                "loses the three highest external grades",
-                examples=[f"{p}: {m}" for p, m in list(bad.items())[:10]])
+def _stpd_portfolios(stpd=None):
+    s = _stpd(stpd)
+    if s is None:
+        return _ok()
+    expected = sorted(INTERNAL_PORTFOLIOS + EXTERNAL_PORTFOLIOS)
+    observed = sorted(set(text(s["portfolio_code"])))
+    if expected == observed:
+        return _ok()
+    return _bad(f"Expected {len(expected)} portfolios, got {len(observed)}. "
+                f"Missing: {', '.join(p for p in expected if p not in observed)}. "
+                f"Extra: {', '.join(p for p in observed if p not in expected)}")
 
 
-def _v_stpd_month_set(stpd=None):
-    if _empty(stpd):
-        return ok()
-    d = pd.DataFrame({"p": pd.Series(col(stpd, "PortfolioCode")).astype(str),
-                      "b": pd.to_numeric(col(stpd, "PDBucketDim1"), errors="coerce"),
-                      "m": pd.to_numeric(col(stpd, "MonthLifetime"), errors="coerce")})
-    g = d.groupby(["p", "b"])["m"].nunique()
-    bad = g[g != N_MONTHS]
-    if bad.empty:
-        return ok()
-    return fail(len(bad), f"{len(bad)} (portfolio, bucket) pair(s) do not carry "
-                          f"all {N_MONTHS} months",
-                examples=[f"{k}={v}" for k, v in bad.head(10).items()])
+def _stpd_buckets(stpd=None):
+    s = _stpd(stpd)
+    if s is None:
+        return _ok()
+    b = _num(s["pd_bucket_dim1"])
+    per = b.groupby(text(s["portfolio_code"])).apply(
+        lambda x: sorted(set(x.dropna().astype(int))) == list(range(1, 22)))
+    n_bad = int((~per).sum())
+    return _ok() if n_bad == 0 else _bad(f"{n_bad} portfolios missing buckets", n_bad)
 
 
-def _v_stpd_dim2_all_na(stpd=None):
-    if _empty(stpd):
-        return ok()
-    c = col(stpd, "PDBucketDim2")
-    if c is None:
-        return ok()
-    s = pd.Series(c)
-    populated = s.notna() & (s.astype(str).str.strip() != "")
-    n = int(populated.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} row(s) populate PDBucketDim2, which the output schema "
-                   "leaves empty")
+def _stpd_months(stpd=None):
+    s = _stpd(stpd)
+    if s is None or len(s) == 0:
+        return _ok()
+    m = _num(s["month_lifetime"])
+    n = s.groupby([text(s["portfolio_code"]), _num(s["pd_bucket_dim1"])]).size()
+    bad = int((n != 600).sum())
+    lo, hi = int(m.min()), int(m.max())
+    if bad == 0 and lo == 1 and hi == 600:
+        return _ok()
+    return _bad(f"month range = [{lo}, {hi}]; {bad} (portfolio, bucket) groups "
+                "don't have 600 rows", bad)
 
 
-def _v_stpd_pd_finite(stpd=None):
-    if _empty(stpd):
-        return ok()
-    x = pd.to_numeric(col(stpd, "PDLifetime"), errors="coerce")
-    bad = x.isna() | ~np.isfinite(x.fillna(np.inf)) | (x < 0)
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} PD value(s) are missing, infinite or negative")
+def _stpd_dim2(stpd=None):
+    s = _stpd(stpd)
+    if s is None:
+        return _ok()
+    if "pd_bucket_dim2" not in s.columns:
+        return _bad("pd_bucket_dim2 missing")
+    n = int((text(s["pd_bucket_dim2"]) != "").sum())
+    return _ok() if n == 0 else _bad(f"{n} non-NA values in pd_bucket_dim2", n)
 
 
-def _v_stpd_pd_bounded(stpd=None):
-    if _empty(stpd):
-        return ok()
-    x = pd.to_numeric(col(stpd, "PDLifetime"), errors="coerce")
-    bad = x > 1.001
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} PD value(s) exceed 1.001. The monthly conversion is a "
-                   "running SUM rather than the survival formula, so it can "
-                   "pass 1 and is capped; values above the cap mean the cap "
-                   "did not apply",
-                examples=[f"{v:.6f}" for v in x[bad].head(10)])
+def _stpd_finite(stpd=None):
+    s = _stpd(stpd)
+    if s is None:
+        return _ok()
+    p = _num(s["pd_lifetime"])
+    n_na = int(p.isna().sum())
+    n_neg = int((p < 0).sum())
+    n_inf = int(np.isinf(p.fillna(0)).sum())
+    return _ok() if n_na + n_neg + n_inf == 0 else _bad(
+        f"{n_na} NA, {n_neg} negative, {n_inf} infinite", n_na + n_neg + n_inf)
 
 
-def _v_stpd_monotone(stpd=None):
-    if _empty(stpd):
-        return ok()
-    d = pd.DataFrame({"p": pd.Series(col(stpd, "PortfolioCode")).astype(str),
-                      "b": pd.to_numeric(col(stpd, "PDBucketDim1"), errors="coerce"),
-                      "m": pd.to_numeric(col(stpd, "MonthLifetime"), errors="coerce"),
-                      "v": pd.to_numeric(col(stpd, "PDLifetime"), errors="coerce")}
-                     ).sort_values(["p", "b", "m"])
-    drops = d.groupby(["p", "b"])["v"].apply(
-        lambda s: bool((s.diff() < -1e-12).any()))
-    bad = drops[drops]
-    if bad.empty:
-        return ok()
-    return fail(len(bad), f"{len(bad)} curve(s) fall as maturity grows; a "
-                          "cumulative default probability cannot decrease",
-                examples=[str(k) for k in bad.index[:10]])
+def _stpd_bound(stpd=None):
+    s = _stpd(stpd)
+    if s is None:
+        return _ok()
+    p = _num(s["pd_lifetime"])
+    mx = float(p.max()) if p.notna().any() else float("nan")
+    if np.isfinite(mx) and mx <= 1.001:
+        return _ok()
+    return _bad(f"max pd_lifetime = {mx:.6f}, {int((p > 1).sum())} rows above 1, "
+                f"{int((p > 1.001).sum())} rows above 1.001. Likely cause: scenario "
+                "weights summing to >1 (typo in workbook explicit_weights — switch "
+                "to mode='auto_non_oil_gdp_cdf' in model_inputs.yml).",
+                int((p > 1.001).sum()))
 
 
-def _v_stpd_pd_increases_with_hierarchy(stpd=None):
-    if _empty(stpd):
-        return ok()
-    d = pd.DataFrame({"p": pd.Series(col(stpd, "PortfolioCode")).astype(str),
-                      "b": pd.to_numeric(col(stpd, "PDBucketDim1"), errors="coerce"),
-                      "m": pd.to_numeric(col(stpd, "MonthLifetime"), errors="coerce"),
-                      "v": pd.to_numeric(col(stpd, "PDLifetime"), errors="coerce")})
-    probe = d[d["m"] == 12]
-    if probe.empty:
-        probe = d[d["m"] == d["m"].max()]
+def _stpd_monotone(stpd=None):
+    s = _stpd(stpd)
+    if s is None or len(s) == 0:
+        return _ok()
+    d = pd.DataFrame({"p": text(s["portfolio_code"]), "b": _num(s["pd_bucket_dim1"]),
+                      "m": _num(s["month_lifetime"]), "v": _num(s["pd_lifetime"])})
+    d = d.sort_values(["p", "b", "m"], kind="mergesort")
+    dec = d.groupby(["p", "b"])["v"].apply(lambda v: bool((v.diff().dropna() < -1e-12).any()))
+    n_bad = int(dec.sum())
+    return _ok() if n_bad == 0 else _bad(
+        f"{n_bad} (portfolio, bucket) groups have a decreasing pd_lifetime", n_bad)
+
+
+def _stpd_hierarchy(stpd=None):
+    s = _stpd(stpd)
+    if s is None or len(s) == 0:
+        return _ok()
+    d = pd.DataFrame({"p": text(s["portfolio_code"]), "b": _num(s["pd_bucket_dim1"]),
+                      "m": _num(s["month_lifetime"]), "v": _num(s["pd_lifetime"])})
+    months = [m for m in (12, 60, 120) if m in set(d["m"])]
     bad = []
-    for p, g in probe.groupby("p"):
-        s = g.sort_values("b")["v"].to_numpy()
-        if len(s) > 1 and (np.diff(s) < -1e-9).any():
-            bad.append(p)
-    if not bad:
-        return ok()
-    return fail(len(bad), f"{len(bad)} portfolio(s) do not order by rating: a "
-                          "worse grade should carry a higher PD",
-                examples=bad[:10])
+    for m in months:
+        for p in pd.unique(d["p"]):
+            sub = d[(d["p"] == p) & (d["m"] == m)].sort_values("b", kind="mergesort")
+            if bool((sub["v"].diff().dropna() < -1e-9).any()):
+                bad.append(f"{p} @ m={m}")
+    return _ok() if not bad else _bad("PD not monotone in hierarchy at: "
+                                      + "; ".join(bad[:10]), len(bad))
 
 
-def _identical_curves(stpd, portfolios, label):
-    if _empty(stpd):
-        return ok()
-    d = pd.DataFrame({"p": pd.Series(col(stpd, "PortfolioCode")).astype(str).str.strip(),
-                      "b": pd.to_numeric(col(stpd, "PDBucketDim1"), errors="coerce"),
-                      "m": pd.to_numeric(col(stpd, "MonthLifetime"), errors="coerce"),
-                      "v": pd.to_numeric(col(stpd, "PDLifetime"), errors="coerce")})
-    have = [p for p in portfolios if p in set(d["p"])]
-    if len(have) < 2:
-        return ok()
-    piv = d[d["p"].isin(have)].pivot_table(index=["b", "m"], columns="p",
-                                           values="v")
-    spread = piv.max(axis=1) - piv.min(axis=1)
-    n = int((spread > 1e-12).sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"the {label} portfolios do not share one curve set "
-                   f"({n:,} points differ). A curve belongs to the rating "
-                   "SCALE, not to the portfolio",
-                examples=[f"max spread {spread.max():.3e}"])
+def _stpd_identical(ports, label):
+    def check(stpd=None):
+        s = _stpd(stpd)
+        if s is None:
+            return _ok()
+        sub = s[text(s["portfolio_code"]).isin(ports).to_numpy()]
+        n = sub.groupby([_num(sub["pd_bucket_dim1"]), _num(sub["month_lifetime"])])[
+            "pd_lifetime"].nunique()
+        n_bad = int((n != 1).sum())
+        return _ok() if n_bad == 0 else _bad(
+            f"{n_bad} (bucket, month) cells differ across {label} portfolios", n_bad)
+    return check
 
 
-def _v_stpd_internal_identical(stpd=None):
-    return _identical_curves(stpd, INTERNAL_PORTFOLIOS, "internal")
+def _stpd_zero_ttc(stpd=None, static=None):
+    s = _stpd(stpd)
+    t = static.get("ttc_pd_table") if static is not None else None
+    if s is None or t is None or len(t) == 0:
+        return _ok()
+    rt = text(col(t, "rating_type"))
+    ext = t[(rt == "External") | (rt == "2")]
+    if len(ext) == 0:
+        return _ok()
+    zero = [i + 1 for i, v in enumerate(pd.to_numeric(col(ext, "ttc_pd"),
+                                                      errors="coerce")) if v == 0]
+    if not zero:
+        return _ok()
+    sub = s[text(s["portfolio_code"]).isin(EXTERNAL_PORTFOLIOS).to_numpy()
+            & _num(s["pd_bucket_dim1"]).isin(zero).to_numpy()]
+    n = int((_num(sub["pd_lifetime"]) > 1e-12).sum())
+    return _ok() if n == 0 else _bad(
+        f"{n} non-zero pd_lifetime values for zero-TTC buckets "
+        + ", ".join(map(str, zero)), n)
 
 
-def _v_stpd_external_identical(stpd=None):
-    return _identical_curves(stpd, EXTERNAL_PORTFOLIOS, "external")
+# --------------------------------------------------------------- weights ---
+def _as_series(w) -> pd.Series | None:
+    if w is None:
+        return None
+    if isinstance(w, pd.Series):
+        return pd.to_numeric(w, errors="coerce")
+    if isinstance(w, dict):
+        return pd.to_numeric(pd.Series(w), errors="coerce")
+    try:
+        return pd.to_numeric(pd.Series(list(w)), errors="coerce")
+    except TypeError:
+        return None
 
 
-def _v_stpd_zero_ttc_zero_curve(stpd=None, static=None):
-    if _empty(stpd) or static is None:
-        return ok()
-    ttc = static.get("ttc_pd_table")
-    scale = static.get("master_rating_scale")
-    if ttc is None or scale is None:
-        return ok()
-    rt = pd.to_numeric(col(ttc, "rating_type"), errors="coerce")
-    zero_names = set(pd.Series(col(ttc, "rating"))[
-        (pd.to_numeric(col(ttc, "ttc_pd"), errors="coerce") == 0)
-        & (rt == 2)].astype(str).str.strip())
-    if not zero_names:
-        return ok()
-    hier = dict(zip(pd.Series(col(scale, "rating")).astype(str).str.strip(),
-                    pd.to_numeric(col(scale, "hierarchy"), errors="coerce")))
-    buckets = {int(hier[n]) for n in zero_names if n in hier and pd.notna(hier[n])}
-    if not buckets:
-        return ok()
-    d = pd.DataFrame({"p": pd.Series(col(stpd, "PortfolioCode")).astype(str).str.strip(),
-                      "b": pd.to_numeric(col(stpd, "PDBucketDim1"), errors="coerce"),
-                      "v": pd.to_numeric(col(stpd, "PDLifetime"), errors="coerce")})
-    sub = d[d["p"].isin(EXTERNAL_PORTFOLIOS) & d["b"].isin(buckets)]
-    bad = sub[sub["v"].abs() > 1e-12]
-    if bad.empty:
-        return ok()
-    return fail(len(bad), f"{len(bad):,} point(s) in a zero-TTC external bucket "
-                          "carry a non-zero PD",
-                examples=sorted({int(b) for b in bad["b"].unique()})[:10])
+def _scen_internal_sum(internal_weights=None):
+    w = _as_series(internal_weights)
+    if w is None or len(w) == 0:
+        return _ok()
+    s = float(w.sum())
+    return _ok() if abs(s - 1) < 1e-4 else _bad(
+        f"Sum = {s:.6f} (expected ~1.0; if explicit V4 weights, sum=1.0003 due to "
+        "AE8 typo — switch model_inputs.yml mode to 'auto_non_oil_gdp_cdf')")
 
 
-# ---------------------------------------------------------------- weights ---
-def _weights_sum(weights, label, tol=1e-4):
-    if weights is None:
-        return ok()
-    s = pd.Series(weights, dtype=float) if not isinstance(weights, pd.Series) \
-        else weights.astype(float)
-    if len(s) == 0:
-        return ok()
-    total = float(s.sum())
-    if abs(total - 1.0) <= tol:
-        return ok()
-    return fail(1, f"{label} sum to {total:.6f}, not 1.0. An equal split is the "
-                   "classic silent failure here: it is well formed and always "
-                   "wrong")
+def _scen_internal_nonneg(internal_weights=None):
+    w = _as_series(internal_weights)
+    if w is None or len(w) == 0:
+        return _ok()
+    bad = [str(k) for k, v in w.items() if v < 0]
+    return _ok() if not bad else _bad("Negative weights: " + ", ".join(bad), len(bad))
 
 
-def _weights_nonneg(weights, label):
-    if weights is None:
-        return ok()
-    s = pd.Series(weights, dtype=float)
-    bad = s[s < 0]
-    if bad.empty:
-        return ok()
-    return fail(len(bad), f"{len(bad)} {label} are negative",
-                examples=[f"{k}={v}" for k, v in bad.head(10).items()])
+def _per_year(ew):
+    if not isinstance(ew, dict) or ew.get("per_year") is None:
+        return None
+    return pd.DataFrame(ew["per_year"]).apply(pd.to_numeric, errors="coerce")
 
 
-def _v_scen_internal_sum(internal_weights=None):
-    return _weights_sum(internal_weights, "internal scenario weights",
-                        tol=1e-3)
-
-
-def _v_scen_internal_nonneg(internal_weights=None):
-    return _weights_nonneg(internal_weights, "internal scenario weights")
-
-
-def _v_scen_external_per_year_sum(external_weights=None):
-    if not external_weights:
-        return ok()
-    py = external_weights.get("per_year") if isinstance(external_weights, dict) \
-        else None
+def _scen_external_per_year(external_weights=None):
+    py = _per_year(external_weights)
     if py is None or len(py) == 0:
-        return ok()
-    sums = pd.DataFrame(py).astype(float).sum(axis=1)
-    bad = sums[(sums - 1.0).abs() > 1e-3]
-    if bad.empty:
-        return ok()
-    return fail(len(bad), f"{len(bad)} external weight row(s) do not sum to 1.0",
-                examples=[f"{k}={v:.6f}" for k, v in bad.head(10).items()])
+        return _ok()
+    sums = py.sum(axis=1).to_numpy()
+    bad = [str(i + 1) for i, v in enumerate(sums) if abs(v - 1) >= 1e-3]
+    return _ok() if not bad else _bad("Years with row-sum != 1: " + ", ".join(bad),
+                                      len(bad))
 
 
-def _v_scen_external_average_sum(external_weights=None):
-    if not external_weights:
-        return ok()
+def _scen_external_average(external_weights=None):
+    if external_weights is None:
+        return _ok()
     avg = external_weights.get("average") if isinstance(external_weights, dict) \
-        else None
-    return _weights_sum(avg, "the external 'average' weight row", tol=1e-3)
+        else external_weights
+    w = _as_series(avg)
+    if w is None or len(w) == 0:
+        return _ok()
+    s = float(w.sum())
+    return _ok() if abs(s - 1) < 1e-3 else _bad(f"Sum = {s:.6f} (expected ~1.0)")
 
 
-def _v_scen_external_nonneg(external_weights=None):
-    if not external_weights:
-        return ok()
-    if not isinstance(external_weights, dict):
-        return ok()
-    py = external_weights.get("per_year")
-    if py is None or len(py) == 0:
-        return ok()
-    flat = pd.DataFrame(py).astype(float).to_numpy().ravel()
-    n = int((flat < 0).sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} external scenario weight(s) are negative")
+def _scen_external_nonneg(external_weights=None):
+    if external_weights is None:
+        return _ok()
+    vals = []
+    py = _per_year(external_weights)
+    if py is not None:
+        vals += list(py.to_numpy().ravel())
+    avg = external_weights.get("average") if isinstance(external_weights, dict) \
+        else external_weights
+    w = _as_series(avg)
+    if w is not None:
+        vals += list(w)
+    n = int(sum(1 for v in vals if pd.notna(v) and v < -1e-12))
+    return _ok() if n == 0 else _bad(f"{n} negative weight values", n)
 
 
-def _v_mev_sum(mev_weights=None):
-    return _weights_sum(mev_weights, "MEV model weights", tol=1e-6)
+def _mev_sum(mev_weights=None):
+    w = _as_series(mev_weights)
+    if w is None or len(w) == 0:
+        return _ok()
+    s = float(w.sum())
+    return _ok() if abs(s - 1) < 1e-3 else _bad(f"Sum = {s:.6f}")
 
 
-def _v_mev_nonneg(mev_weights=None):
-    return _weights_nonneg(mev_weights, "MEV model weights")
+def _mev_nonneg(mev_weights=None):
+    w = _as_series(mev_weights)
+    if w is None or len(w) == 0:
+        return _ok()
+    bad = [str(k) for k, v in w.items() if v < -1e-12]
+    return _ok() if not bad else _bad("Negative MEV weights: " + ", ".join(bad),
+                                      len(bad))
 
 
-def _v(id, severity, description, fn, context, rationale, remediation):
+def _v(id, severity, description, fn, context):
+    why, fix = STAGE_TEXTS.get(id, ("", ""))
     return Validator(id=id, severity=severity, description=description, fn=fn,
-                     context=context, rationale=rationale,
-                     remediation=remediation, tags=("derived",))
+                     context=context, rationale=why, remediation=fix,
+                     tags=("derived",))
 
 
 DERIVED_STAGE_VALIDATORS: list[Validator] = [
     _v("DERIVED_LTPO_schema", Severity.ERROR,
-       "LifeTimeParameterOther has the expected 7-column schema",
-       _v_ltpo_schema, "LifeTimeParameterOther",
-       "LIC reads this file by column position as well as by name.",
-       "Check LPO_COLUMNS in etl/lifetime.py."),
+       "ltpo has the expected 7-column schema", _ltpo_schema,
+       "LifeTimeParameterOther"),
     _v("DERIVED_LTPO_extract_date_unique", Severity.ERROR,
-       "LifeTimeParameterOther carries a single extract date",
-       _v_ltpo_extract_date_unique, "LifeTimeParameterOther",
-       "Two dates in one file means curves from two runs were mixed.",
-       "Re-run the ETL from a single input set."),
+       "ltpo has a single extract_date value", _ltpo_extract_date,
+       "LifeTimeParameterOther"),
     _v("DERIVED_LTPO_ead_nonneg", Severity.ERROR,
-       "EADLifetime is present and >= 0", _v_ltpo_ead_nonneg,
-       "LifeTimeParameterOther",
-       "A negative exposure at default produces a negative provision.",
-       "Check the repayment schedule for negative balances."),
+       "ead_lifetime is non-NA and >= 0", _ltpo_ead_nonneg, "LifeTimeParameterOther"),
     _v("DERIVED_LTPO_month_starts_at_zero", Severity.ERROR,
-       "Every contract has a month_lifetime = 0 row",
-       _v_ltpo_month_starts_at_zero, "LifeTimeParameterOther",
-       "Month 0 is today's outstanding. Without it LIC has no starting "
-       "exposure and prices the contract from the first scheduled payment.",
-       "Check the month-0 row is written from the account master."),
+       "Every contract has a month_lifetime=0 row", _ltpo_month_zero,
+       "LifeTimeParameterOther"),
     _v("DERIVED_LTPO_months_contiguous", Severity.ERROR,
-       "Each contract's months form a contiguous 0..N-1 sequence",
-       _v_ltpo_months_contiguous, "LifeTimeParameterOther",
-       "A gap makes LIC interpolate across it; a duplicate double-counts that "
-       "month's loss.",
-       "Check the month bound is EXCLUSIVE: months 0 .. end_month - 1."),
+       "Each contract's months form a contiguous 0..N-1 sequence", _ltpo_contiguous,
+       "LifeTimeParameterOther"),
     _v("DERIVED_LTPO_ead_nonincreasing", Severity.INFO,
-       "EADLifetime does not rise within a contract", _v_ltpo_ead_nonincreasing,
-       "LifeTimeParameterOther",
-       "For a term loan a rising curve is wrong. For a revolving or "
-       "off-balance facility it is the schedule carrying committed but undrawn "
-       "amounts, which is why the engine caps ECL at exposure. Informational, "
-       "so that nobody later 'fixes' a rising curve.",
-       "No action for revolving products."),
+       "ead_lifetime is non-increasing within each contract (term-loan principle; "
+       "revolving/off-bal/accrual products allowed to grow)", _ltpo_nonincreasing,
+       "LifeTimeParameterOther"),
     _v("DERIVED_LTPO_contracts_subset_of_trans", Severity.ERROR,
-       "Every curve belongs to a contract on the book",
-       _v_ltpo_contracts_subset, "LifeTimeParameterOther",
-       "A curve for a contract that is not on the book is priced by LIC "
-       "against nothing.",
-       "Check the schedule filter against the account list."),
+       "Every ltpo contract_id exists in trans_l", _ltpo_subset,
+       "LifeTimeParameterOther"),
     _v("DERIVED_LTPO_total_month0_ead_reconciles", Severity.WARN,
-       "Month-0 EAD reconciles to the on-balance total for covered contracts",
-       _v_ltpo_month0_reconciles, "LifeTimeParameterOther",
-       "Month 0 is today's outstanding from the account master, not the "
-       "schedule's first figure. The two differ whenever a payment falls in "
-       "the current month, and taking the schedule value understates it.",
-       "Compare a contract with a payment this month."),
-
+       "Sum of month-0 EAD == sum of trans_l ONBALANCE for covered contracts",
+       _ltpo_month0_reconciles, "LifeTimeParameterOther"),
     _v("DERIVED_STPD_schema", Severity.ERROR,
-       "StPD has the expected 6-column schema", _v_stpd_schema, "StPD",
-       "LIC reads the file by position as well as by name.",
-       "Check the StPD writer."),
+       "stpd has the expected 6-column schema", _stpd_schema, "StPD"),
     _v("DERIVED_STPD_row_count", Severity.ERROR,
-       f"StPD has exactly {STPD_ROWS:,} rows", _v_stpd_row_count, "StPD",
-       "6 portfolios x 21 buckets x 600 months. A short file means a bucket "
-       "or a portfolio was dropped.",
-       "Check the TTC filter uses >= 0 rather than > 0."),
+       "stpd has exactly 6 portfolios × 21 buckets × 600 months = 75,600 rows",
+       _stpd_rows, "StPD"),
     _v("DERIVED_STPD_extract_date_unique", Severity.ERROR,
-       "StPD carries a single extract date", _v_stpd_extract_date_unique, "StPD",
-       "Two dates means curves from two runs were mixed.",
-       "Re-run the ETL from a single input set."),
+       "stpd has a single extract_date value", _stpd_extract_date, "StPD"),
     _v("DERIVED_STPD_portfolio_set_complete", Severity.ERROR,
-       "All 6 portfolios are present (4 internal + 2 external)",
-       _v_stpd_portfolio_set, "StPD",
-       "A missing portfolio means every contract in it prices to zero.",
-       "Check portfolios.csv and the rating_type column."),
+       "All 6 portfolios present (4 internal + 2 external)", _stpd_portfolios, "StPD"),
     _v("DERIVED_STPD_bucket_set_complete", Severity.ERROR,
-       "Each portfolio has all 21 buckets", _v_stpd_bucket_set, "StPD",
-       "A TTC PD of ZERO must still get a bucket. Filtering on > 0 instead of "
-       ">= 0 loses the three highest external grades and 3,600 rows.",
-       "Check the TTC filter."),
+       "Each portfolio has all 21 buckets (hierarchy 1..21)", _stpd_buckets, "StPD"),
     _v("DERIVED_STPD_month_set_complete", Severity.ERROR,
-       "Each (portfolio, bucket) has all 600 months", _v_stpd_month_set, "StPD",
-       "A short curve makes LIC extrapolate beyond its end.",
-       "Check max_month in the monthly conversion."),
+       "Each (portfolio, bucket) has all 600 months (1..600)", _stpd_months, "StPD"),
     _v("DERIVED_STPD_dim2_all_na", Severity.ERROR,
-       "PDBucketDim2 is empty throughout", _v_stpd_dim2_all_na, "StPD",
-       "The output schema leaves this column empty; populating it changes how "
-       "LIC keys the curve.",
-       "Check the StPD writer."),
+       "pd_bucket_dim2 is all NA (matches Excel output schema)", _stpd_dim2, "StPD"),
     _v("DERIVED_STPD_pd_nonneg_finite", Severity.ERROR,
-       "PDLifetime is present, finite and non-negative", _v_stpd_pd_finite,
-       "StPD",
-       "A NaN PD silently prices a whole bucket to zero.",
-       "Check the probit chain for a TTC PD of 0 or 1."),
+       "pd_lifetime is non-NA, non-negative, and finite", _stpd_finite, "StPD"),
     _v("DERIVED_STPD_pd_within_workbook_bound", Severity.ERROR,
-       "PDLifetime <= 1.001", _v_stpd_pd_bounded, "StPD",
-       "The monthly conversion is a running SUM rather than the survival "
-       "formula, so it can pass 1 and is capped. A value above the cap means "
-       "the cap did not apply.",
-       "Check the cap in convert_to_monthly_stpd()."),
+       "pd_lifetime <= 1.001 (allows FP slack but rejects real overflow)",
+       _stpd_bound, "StPD"),
     _v("DERIVED_STPD_pd_monotone_non_decreasing", Severity.ERROR,
-       "PDLifetime does not fall as maturity grows", _v_stpd_monotone, "StPD",
-       "A cumulative default probability cannot decrease.",
-       "Check the cumulative step."),
+       "pd_lifetime non-decreasing within (portfolio, bucket) as month grows",
+       _stpd_monotone, "StPD"),
     _v("DERIVED_STPD_pd_increases_with_hierarchy", Severity.WARN,
-       "A worse rating carries a higher PD", _v_stpd_pd_increases_with_hierarchy,
-       "StPD",
-       "If the ordering inverts, the scale has been applied upside down - "
-       "which is exactly what happens if the internal probit shift is used on "
-       "the external book, where the factor is SUBTRACTED.",
-       "Check which formula each rating type uses."),
+       "Worse rating (higher hierarchy) => higher pd_lifetime, fixing (portfolio, month)",
+       _stpd_hierarchy, "StPD"),
     _v("DERIVED_STPD_internal_portfolios_identical", Severity.WARN,
-       "The 4 internal portfolios share one curve set",
-       _v_stpd_internal_identical, "StPD",
-       "A curve belongs to the rating SCALE, not the portfolio. A difference "
-       "means the two scales were mixed.",
-       "Check the term structure is built once per scale."),
+       "4 internal portfolios (Business Finance, Off BS, Al Dhameen, Tasdeer) share "
+       "identical curves", _stpd_identical(INTERNAL_PORTFOLIOS, "internal"), "StPD"),
     _v("DERIVED_STPD_external_portfolios_identical", Severity.WARN,
-       "The 2 external portfolios share one curve set",
-       _v_stpd_external_identical, "StPD",
-       "As above, for the external scale.",
-       "Check the term structure is built once per scale."),
+       "2 external portfolios (Banks and Fis, Investments) share identical curves",
+       _stpd_identical(EXTERNAL_PORTFOLIOS, "external"), "StPD"),
     _v("DERIVED_STPD_zero_ttc_zero_curve", Severity.WARN,
-       "External buckets with TTC = 0 have an all-zero curve",
-       _v_stpd_zero_ttc_zero_curve, "StPD",
-       "The engine short-circuits a zero TTC to a zero curve, but the rating "
-       "still needs a bucket in the output.",
-       "Check the zero short-circuit in the term structure."),
-
+       "External buckets with TTC=0 (Aaa/Aa1/Aa2) have entire pd_lifetime curve = 0",
+       _stpd_zero_ttc, "StPD"),
     _v("DERIVED_SCEN_internal_weights_sum_to_one", Severity.ERROR,
-       "Internal scenario weights sum to 1.0", _v_scen_internal_sum,
-       "scenario_weights",
-       "An equal split sums to one too, so this alone will not catch it - but "
-       "a weighting that does NOT sum to one is always wrong.",
-       "Check resolve_internal_scenario_weights()."),
+       "Internal scenario weights sum to 1.0 within 1e-4", _scen_internal_sum,
+       "scenario_weights"),
     _v("DERIVED_SCEN_internal_weights_nonneg", Severity.ERROR,
-       "Internal scenario weights are all >= 0", _v_scen_internal_nonneg,
-       "scenario_weights",
-       "A negative probability is not a probability.",
-       "Check the band construction; the central scenario takes the residual."),
+       "Internal scenario weights are all >= 0", _scen_internal_nonneg,
+       "scenario_weights"),
     _v("DERIVED_SCEN_external_per_year_sum_to_one", Severity.ERROR,
-       "Each external per-year weight row sums to 1.0",
-       _v_scen_external_per_year_sum, "scenario_weights",
-       "The external scale uses a DIFFERENT weight vector for each year, "
-       "because the regional forecast moves. Each row must still be a "
-       "probability distribution.",
-       "Check compute_external_scenario_weights_per_year()."),
+       "External scenario weights: each year's row sums to ~1.0",
+       _scen_external_per_year, "scenario_weights"),
     _v("DERIVED_SCEN_external_average_sum_to_one", Severity.ERROR,
-       "The external 'average' row sums to 1.0", _v_scen_external_average_sum,
-       "scenario_weights",
-       "The average row applies to 45 of the 50 years in every external curve.",
-       "Check it is the column-wise mean of the per-year rows."),
+       "External scenario weights: 'average' (year 6+) row sums to ~1.0",
+       _scen_external_average, "scenario_weights"),
     _v("DERIVED_SCEN_external_weights_nonneg", Severity.ERROR,
-       "External scenario weights are all >= 0", _v_scen_external_nonneg,
-       "scenario_weights",
-       "A negative probability is not a probability.",
-       "Check the band construction."),
+       "External scenario weights are all >= 0", _scen_external_nonneg,
+       "scenario_weights"),
     _v("DERIVED_MEV_weights_sum_to_one", Severity.ERROR,
-       "MEV model weights sum to 1.0", _v_mev_sum, "MEV",
-       "Only Non-Oil GDP carries weight in the production model; real estate "
-       "and domestic credit are weighted 0.0. That is the model, not a fault, "
-       "but the three must still sum to one.",
-       "Check the mev_components block in model.yml."),
+       "MEV model weights sum to ~1.0", _mev_sum, "MEV"),
     _v("DERIVED_MEV_weights_nonneg", Severity.ERROR,
-       "MEV model weights are all >= 0", _v_mev_nonneg, "MEV",
-       "A negative weight inverts that variable's contribution.",
-       "Check model.yml."),
+       "MEV model weights are all >= 0", _mev_nonneg, "MEV"),
 ]

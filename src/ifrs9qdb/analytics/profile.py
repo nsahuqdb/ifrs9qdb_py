@@ -59,6 +59,9 @@ _COLUMNS = {
     "exposureoffbal": "exposure_off",
     "ead": "ead",
     "claamountonbal": "ecl",
+    # an overlaid report's post-model adjustment, per contract (zero or absent
+    # on a model report); the attribution separates it from the model move
+    "overlayamount": "overlay",
     "pdlifetimevalue": "pd",
     "pd12m": "pd12",
     "lgdrate": "lgd",
@@ -71,6 +74,7 @@ _COLUMNS = {
     "defaultflag": "default_flag",
     "watchlistflag": "watchlist",
     "insolvencyflag": "insolvency",
+    "defaultingccflag": "default_gcc",
     "localflag1": "restructured",
     "localflag2": "local2",
     "localflag3": "local3",
@@ -105,10 +109,10 @@ def normalise(df: pd.DataFrame) -> pd.DataFrame:
         src = lookup.get(squashed)
         out[target] = df[src] if src is not None else np.nan
 
-    for c in ("stage", "exposure", "exposure_off", "ead", "ecl", "pd", "pd12",
+    for c in ("stage", "exposure", "exposure_off", "ead", "ecl", "overlay", "pd", "pd12",
               "lgd", "resid_lgd", "collcov", "collateral", "eir", "dpd", "mob",
               "default_flag", "watchlist", "insolvency", "restructured",
-              "local2", "local3", "local4", "local5", "local6"):
+              "default_gcc", "local2", "local3", "local4", "local5", "local6"):
         out[c] = pd.to_numeric(out[c], errors="coerce")
     for c in ("portfolio", "account_type", "rating", "rating_type"):
         out[c] = out[c].astype("string")
@@ -121,6 +125,7 @@ def normalise(df: pd.DataFrame) -> pd.DataFrame:
     out = out[out["contract"].notna() & (out["contract"].str.len() > 0)].copy()
     out["exposure"] = out["exposure"].fillna(0.0)
     out["ecl"] = out["ecl"].fillna(0.0)
+    out["overlay"] = out["overlay"].fillna(0.0)
     out["coverage"] = np.where(out["exposure"] > 0,
                                out["ecl"] / out["exposure"].replace(0, np.nan), 0.0)
     out["coverage"] = out["coverage"].fillna(0.0)

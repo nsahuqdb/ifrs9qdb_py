@@ -190,4 +190,8 @@ def add_suppression(path, validator_id: str, reason: str,
                         valid_until=valid_until or "")
         except Exception:
             pass
+    from ..audit_log import audit_event
+    audit_event({"event": "suppression_add", "validator_id": validator_id,
+                 "reason": reason, "approved_by": approved_by,
+                 "valid_until": valid_until or None})
     return p

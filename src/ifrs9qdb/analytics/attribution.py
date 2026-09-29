@@ -50,6 +50,9 @@ def ecl_factor_attribution(prev: pd.DataFrame,
         return pd.DataFrame()
 
     cols = ["contract", "exposure", "pd", "lgd", "ecl"]
+    has_ov = "overlay" in prev.columns and "overlay" in curr.columns
+    if has_ov:
+        cols = cols + ["overlay"]
     a = _dedup(prev)[cols]
     b = _dedup(curr)[cols]
     m = a.merge(b, on="contract", suffixes=("_a", "_b"))
@@ -74,12 +77,25 @@ def ecl_factor_attribution(prev: pd.DataFrame,
     raw = {"Exposure": e_eff, "PD": p_eff, "LGD": l_eff}
     actual = float((pd.to_numeric(m["ecl_b"], errors="coerce").fillna(0)
                     - pd.to_numeric(m["ecl_a"], errors="coerce").fillna(0)).sum())
+    # A post-model overlay moves the provision without moving any factor, so
+    # it is its own line: the factors explain the MODEL move, the overlay line
+    # the management adjustment, and the two together the change. Without it
+    # a run that differs from the last only by an overlay showed every factor
+    # at zero against the whole movement.
+    ov = 0.0
+    if has_ov:
+        ov = float((pd.to_numeric(m["overlay_b"], errors="coerce").fillna(0)
+                    - pd.to_numeric(m["overlay_a"], errors="coerce").fillna(0)).sum())
     total = sum(raw.values())
-    scale = actual / total if abs(total) > 1e-9 else 1.0
+    scale = (actual - ov) / total if abs(total) > 1e-9 else 1.0
+    effects = {k: v * scale for k, v in raw.items()}
+    if abs(ov) > 1e-9:
+        raw["Overlay"] = ov
+        effects["Overlay"] = ov
 
     return pd.DataFrame({
         "factor": list(raw),
-        "effect": [v * scale for v in raw.values()],
+        "effect": list(effects.values()),
         "raw_effect": list(raw.values()),
         "contracts": len(m),
         "actual_change": actual,

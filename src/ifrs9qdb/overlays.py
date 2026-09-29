@@ -55,11 +55,27 @@ class Overlay:
     customer: list = field(default_factory=list)
     contract_id: list = field(default_factory=list)
     whole_book: bool = False
+    # R accepts a sector selector but the report carries no sector column, so
+    # it is INERT: it matches nothing (R warns), and the bundle's other rules
+    # still apply. Kept so a sector rule behaves the same in both engines.
+    sector: list = field(default_factory=list)
 
     def selectors(self) -> dict:
         return {k: getattr(self, k) for k in
                 ("stage", "portfolio", "rating", "flag", "customer",
-                 "contract_id") if getattr(self, k)}
+                 "contract_id", "sector") if getattr(self, k)}
+
+
+# A flag selector names a report column -- R's .OVL_FLAG_COL, flag for flag.
+# (The normalised report calls Local Flag 1 "restructured": it is QDB's
+# restructuring flag.)
+FLAG_COLUMNS = {
+    "watchlist": "watchlist", "default": "default_flag",
+    "default_gcc": "default_gcc", "insolvency": "insolvency",
+    "local1": "restructured", "restructured": "restructured",
+    "local2": "local2", "local3": "local3", "local4": "local4",
+    "local5": "local5", "local6": "local6",
+}
 
 
 def _as_list(v):
@@ -125,12 +141,14 @@ def _match(report: pd.DataFrame, ov: Overlay) -> pd.Series:
         if ov.flag:
             flags = pd.Series(False, index=report.index)
             for f in ov.flag:
-                col = {"watchlist": "watchlist", "restructured": "restructured",
-                       "default": "default_flag",
-                       "insolvency": "insolvency"}.get(str(f).lower())
+                col = FLAG_COLUMNS.get(str(f).strip().lower())
                 if col and col in report.columns:
-                    flags |= (report[col] == 1).fillna(False)
+                    flags |= (pd.to_numeric(report[col], errors="coerce") == 1
+                              ).fillna(False)
             keep &= flags
+        if ov.sector:
+            # no sector column in the report: inert, as in R
+            keep &= False
 
     # An overlay set at customer level applies to ALL that customer's
     # facilities, not only the ones that matched.
@@ -290,7 +308,7 @@ AUDIT_COLUMNS = ["overlay_id", "name", "type", "level", "value", "contracts",
                  "comment", "owner", "approval_ref", "effective_date",
                  "expiry"]
 
-__all__ += ["OVERLAY_STATUSES", "OVERLAY_LEVELS", "LIC_COLUMNS",
+__all__ += ["OVERLAY_STATUSES", "OVERLAY_LEVELS", "LIC_COLUMNS", "FLAG_COLUMNS",
             "rule_selector", "bundle_to_overlays", "validate_overlay_bundle",
             "read_overlay_bundles", "write_overlay_bundles", "get_overlay",
             "upsert_overlay", "remove_overlay", "set_overlay_status",
@@ -358,6 +376,7 @@ def bundle_to_overlays(bundle: dict) -> list[Overlay]:
             flag=_as_list(sel.get("flag")),
             customer=_as_list(sel.get("customer")),
             contract_id=_as_list(sel.get("contract_id")),
+            sector=_as_list(sel.get("sector")),
             whole_book=bool(sel.get("whole_book", False))))
     return out
 
@@ -387,6 +406,12 @@ def validate_overlay_bundle(bundle: dict) -> list[str]:
                           f"{', '.join(OVERLAY_LEVELS)}")
         if level != "whole_book" and _blank(r.get("target")):
             errors.append(f"{tag}: a target is required for level {level!r}")
+        if level == "flag" and not _blank(r.get("target")):
+            bad = [f for f in rule_selector("flag", r.get("target"))["flag"]
+                   if f.strip().lower() not in FLAG_COLUMNS]
+            if bad:
+                errors.append(f"{tag}: unknown flag(s): {', '.join(bad)}. Known: "
+                              f"{', '.join(k for k in FLAG_COLUMNS if k != 'restructured')}")
         v = _num(r.get("value"))
         if v != v:                       # NaN
             errors.append(f"{tag}: value must be a number")

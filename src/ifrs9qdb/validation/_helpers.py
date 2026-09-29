@@ -13,8 +13,10 @@ import pandas as pd
 from ..ids import as_id
 
 __all__ = ["ok", "fail", "col", "has", "squash", "parse_any_date",
+           "r_parse_date", "r_parse_dates", "resolve_input_extract_date",
+           "latest_extract_date",
            "dup_detail", "blank_detail", "numeric_detail", "fk_detail",
-           "examples_of"]
+           "examples_of", "text", "pad4"]
 
 _DATE_FORMATS = ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y",
                  "%m/%d/%y", "%Y/%m/%d")
@@ -27,6 +29,33 @@ def ok(**kw) -> dict:
 def fail(count: int, detail: str, examples=None) -> dict:
     return {"passed": False, "count": int(count), "detail": detail,
             "examples": [str(e) for e in list(examples or [])[:10]]}
+
+
+def text(values) -> pd.Series:
+    """Values as stripped strings, with every kind of missing value as "".
+
+    pandas 2 turned a missing value into the STRING "nan" under
+    ``astype(str)``; pandas 3 keeps it as a float NaN. Checks written against
+    the first behaviour (``v.lower() != "nan"``) crash on the second, and a
+    validator that crashes reports a failure for the wrong reason. Going
+    through this one helper makes the checks indifferent to the version.
+    """
+    s = pd.Series(values)
+    out = s.astype(object).where(s.notna(), "").astype(str).str.strip()
+    return out.mask(out.isin(["nan", "NaN", "None", "<NA>", "NaT"]), "")
+
+
+def pad4(values) -> pd.Series:
+    """The 4-digit ISIC code a value leads with, zero-padded, else "".
+
+    Mirrors R's industry-code resolution: the leading run of digits of the
+    DESCRIPTION ("0113 Growing of vegetables") keeps the leading zero that the
+    numeric INDUST column drops (113), and 113 and 0113 must compare equal.
+    """
+    s = text(values)
+    lead = s.str.extract(r"^\D*(\d+)", expand=False).fillna("")
+    ok_ = lead.str.fullmatch(r"\d{1,4}")
+    return lead.where(ok_, "").map(lambda v: v.zfill(4) if v else "")
 
 
 def squash(name) -> str:
@@ -91,6 +120,120 @@ def parse_any_date(values) -> pd.Series:
     return best
 
 
+# R's .parse_any_date() tries these in this order, value by value.
+_R_ANY_DATE_FORMATS = ("%Y-%m-%d", "%d-%b-%y", "%d-%B-%Y", "%m/%d/%Y",
+                       "%d/%m/%Y", "%Y%m%d")
+# R's normalise_extract_date() -- the transforms' parser -- uses this order.
+_R_EXTRACT_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y",
+                      "%d-%b-%y", "%d-%b-%Y", "%d-%m-%Y", "%Y/%m/%d")
+
+
+def _by_formats(text: pd.Series, formats, out: pd.Series | None = None) -> pd.Series:
+    """Parse ``text`` as R's as.Date(format=) loops do: each format in turn,
+    applied to whatever is still unparsed. R ignores anything after the date
+    (a time of day), hence ``exact=False``."""
+    if out is None:
+        out = pd.Series(pd.NaT, index=text.index, dtype="datetime64[ns]")
+    blank = text.isna() | text.str.lower().isin(["", "nan", "nat", "none"])
+    for fmt in formats:
+        todo = out.isna() & ~blank
+        if not todo.any():
+            break
+        p = pd.to_datetime(text[todo], format=fmt, errors="coerce", exact=False)
+        good = p.notna()
+        if good.any():
+            out.loc[p.index[good]] = p[good].dt.normalize()
+    return out
+
+
+def r_parse_dates(values) -> pd.Series:
+    """R's .parse_any_date(), vectorised as R runs it.
+
+    A number is an Excel serial (1 to 99,999) or Unix epoch seconds (1e8 to
+    1e11), by magnitude; anything else takes the first of R's formats that
+    parses it (%Y-%m-%d, %d-%b-%y, %d-%B-%Y, %m/%d/%Y, %d/%m/%Y, %Y%m%d).
+
+    Faithful to R, faults included: "31-DEC-2025" matches %d-%b-%y first and
+    reads as 2020-12-31, because R (like exact=False here) ignores what
+    follows the match. The schema layer types dates before the checks and the
+    pipeline see them, so on real inputs this chain only meets values that
+    are already dates.
+    """
+    s = pd.Series(values)
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return pd.to_datetime(s).dt.normalize()
+    text = s.astype(str).str.strip().where(s.notna())
+    out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
+    num = pd.to_numeric(text, errors="coerce")
+    excel = num.notna() & (num >= 1) & (num < 100000)
+    unix = num.notna() & (num >= 1e8) & (num < 1e11)
+    if excel.any():
+        out.loc[excel] = (pd.Timestamp("1899-12-30")
+                          + pd.to_timedelta(np.floor(num[excel]), unit="D"))
+    if unix.any():
+        out.loc[unix] = pd.to_datetime(num[unix].astype("int64"),
+                                       unit="s").dt.normalize()
+    return _by_formats(text, _R_ANY_DATE_FORMATS, out)
+
+
+def r_parse_date(value) -> pd.Timestamp | None:
+    """R's .parse_any_date() for one value; None when nothing parses it."""
+    if value is None:
+        return None
+    t = r_parse_dates([value]).iloc[0]
+    return None if pd.isna(t) else pd.Timestamp(t)
+
+
+def resolve_input_extract_date(inputs) -> pd.Timestamp | None:
+    """The reporting date a run adopts, exactly as R's
+    resolve_input_extract_date() takes it from AccountMaster's EXTRACTDA.
+
+    R counts each distinct SPELLING once, not each row: the date written the
+    most different ways wins, and a tie goes to the earliest date (table()
+    sorts its names and the decreasing sort is stable). On a clean extract
+    that is its one date. On a file that mixes dates it is usually the
+    EARLIEST date, even when a single stray row carries it -- an R quirk this
+    mirrors, so that both engines date a run alike, and which
+    INPUT_extract_date_matches_run_cfg, INPUT_consistent_extract_date and
+    INPUT_extract_date_plausible report. Pass the schema-typed inputs, as R
+    does: EXTRACTDA is then already a date and only a raw string reaches the
+    format chain.
+    """
+    if not has(inputs, "AccountMaster"):
+        return None
+    c = col(inputs["AccountMaster"], "extract_date", "EXTRACTDA")
+    if c is None:
+        return None
+    raw = pd.Series(c).dropna()
+    if raw.empty:
+        return None
+    uniq = pd.Series(pd.unique(raw.astype(str)))
+    parsed = r_parse_dates(uniq).dropna()
+    if parsed.empty:
+        return None
+    counts = parsed.dt.strftime("%Y-%m-%d").value_counts().to_dict()
+    top = max(counts.values())
+    return pd.Timestamp(min(k for k, v in counts.items() if v == top))
+
+
+def latest_extract_date(frame) -> pd.Timestamp | None:
+    """The latest EXTRACTDA of one file -- R's transforms anchor a lapsed
+    maturity on it (max(normalise_extract_date(extract_date))). None when
+    the file carries no parseable date, and then R extends nothing."""
+    if frame is None or len(frame) == 0:
+        return None
+    c = col(frame, "extract_date", "EXTRACTDA", "EXTRACTDATE", "ExtractDate")
+    if c is None:
+        return None
+    s = pd.Series(c)
+    if pd.api.types.is_datetime64_any_dtype(s):
+        d = s.dropna()
+        return pd.Timestamp(d.max()).normalize() if len(d) else None
+    uniq = pd.Series(pd.unique(s.dropna().astype(str).str.strip()))
+    d = _by_formats(uniq, _R_EXTRACT_FORMATS).dropna()
+    return pd.Timestamp(d.max()) if len(d) else None
+
+
 def examples_of(series, mask, limit: int = 10) -> list:
     try:
         return [str(v) for v in pd.Series(series)[mask].head(limit)]
@@ -99,18 +242,30 @@ def examples_of(series, mask, limit: int = 10) -> list:
 
 
 def dup_detail(values, label: str) -> dict:
-    """Uniqueness, reported with the ids that repeat rather than a bare count."""
-    s = as_id(values)
-    s = s[s != ""]
-    if s.empty:
+    """Uniqueness, in R's .collect_duplicate_details() words.
+
+    "N distinct LABEL with duplicates (M total duplicate rows): LABEL=value
+    (rows i, j); ..." -- the five most repeated values, rows numbered from 1
+    as R numbers them, so the two engines' messages can be compared as text.
+    """
+    s = as_id(values).reset_index(drop=True)
+    live = s[s != ""]
+    if live.empty:
         return ok()
-    counts = s.value_counts()
-    dups = counts[counts > 1]
-    if dups.empty:
+    dup = live[live.duplicated(keep=False)]
+    if dup.empty:
         return ok()
-    return fail(int(dups.sum() - len(dups)),
-                f"{len(dups)} {label} value(s) appear more than once",
-                examples=[f"{k} x{v}" for k, v in dups.head(10).items()])
+    rows = {v: [int(i) + 1 for i in idx] for v, idx in
+            dup.groupby(dup, sort=True).groups.items()}
+    order = sorted(rows, key=lambda v: (-len(rows[v]), v))
+    total = sum(len(rows[v]) for v in order)
+    shown = [f"{label}={v} (rows {', '.join(str(r) for r in rows[v])})"
+             for v in order[:5]]
+    more = f" ... and {len(order) - 5} more" if len(order) > 5 else ""
+    return fail(total - len(order),
+                f"{len(order)} distinct {label} with duplicates ({total} total "
+                f"duplicate rows): {'; '.join(shown)}{more}",
+                examples=order[:10])
 
 
 def blank_detail(values, label: str) -> dict:

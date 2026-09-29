@@ -250,6 +250,11 @@ def customer_stage_migration(prev: pd.DataFrame,
     return out.sort_values(["from", "to"]).reset_index(drop=True)
 
 
+_MOVER_COLUMNS = ["customer", "stage_prev", "exposure_prev", "ecl_prev",
+                  "stage_curr", "exposure_curr", "ecl_curr", "direction",
+                  "ecl_change"]
+
+
 def stage_movers(prev: pd.DataFrame, curr: pd.DataFrame) -> pd.DataFrame:
     """The customers behind the migration matrix, one row each.
 
@@ -257,11 +262,14 @@ def stage_movers(prev: pd.DataFrame, curr: pd.DataFrame) -> pd.DataFrame:
     size of the provision move, so the names that explain the headline come
     first.
     """
+    # An empty answer keeps its columns, so a caller sorting or filtering on
+    # them works whether or not anybody moved.
+    empty = pd.DataFrame(columns=_MOVER_COLUMNS)
     if prev is None or curr is None or len(prev) == 0 or len(curr) == 0:
-        return pd.DataFrame()
+        return empty
     pv, cv = customer_view(prev), customer_view(curr)
     if pv is None or cv is None or len(pv) == 0 or len(cv) == 0:
-        return pd.DataFrame()
+        return empty
     m = pv[["customer", "stage", "exposure", "ecl"]].merge(
         cv[["customer", "stage", "exposure", "ecl"]], on="customer",
         suffixes=("_prev", "_curr"))
@@ -270,7 +278,7 @@ def stage_movers(prev: pd.DataFrame, curr: pd.DataFrame) -> pd.DataFrame:
     moved = m.dropna(subset=["stage_prev", "stage_curr"])
     moved = moved[moved["stage_prev"] != moved["stage_curr"]].copy()
     if len(moved) == 0:
-        return pd.DataFrame()
+        return empty
     moved["direction"] = np.where(moved["stage_curr"] > moved["stage_prev"],
                                   "deteriorated", "improved")
     moved["ecl_change"] = moved["ecl_curr"] - moved["ecl_prev"]

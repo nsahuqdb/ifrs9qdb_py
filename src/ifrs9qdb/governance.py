@@ -32,13 +32,25 @@ def _hash_file(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()[:16]
 
 
-def take_snapshot(run_dir, config_dir=None, static_dir=None) -> dict:
+def take_snapshot(run_dir, config_dir=None, static_dir=None,
+                  run_config_file=None, run_config: dict | None = None,
+                  snapshot_meta: dict | None = None) -> dict:
     """Freeze the configuration a run used, with a hash per file.
 
     Copying is not enough on its own: a copy can be edited afterwards and look
     original. The hashes are what make the snapshot evidence rather than a
     convenience.
+
+    As R's phase 1 freezes it: config/ (model, inputs, overlays,
+    suppressions) PLUS the run config, config.yml, beside them -- it names the
+    model and the gating policy the run ran under -- and static/. A config
+    version already carries its own config.yml in its config/ folder; a live
+    run's lives at the project root and comes in as ``run_config_file`` (or,
+    for a run given a config dict and no file, is written from
+    ``run_config``). ``config_used.yml`` records what was copied from where,
+    as R writes it.
     """
+    import yaml
     run_dir = Path(run_dir)
     dest = run_dir / "config_used"
     dest.mkdir(parents=True, exist_ok=True)
@@ -60,6 +72,34 @@ def take_snapshot(run_dir, config_dir=None, static_dir=None) -> dict:
             manifest["files"][f"{label}/{p.name}"] = {
                 "sha256_16": _hash_file(p), "bytes": p.stat().st_size}
 
+    rc_target = dest / "config" / "config.yml"
+    rc_source = None
+    if not rc_target.exists():
+        rc_target.parent.mkdir(parents=True, exist_ok=True)
+        if run_config_file and Path(run_config_file).is_file():
+            shutil.copy(Path(run_config_file), rc_target)
+            rc_source = str(run_config_file)
+        elif isinstance(run_config, dict):
+            rc_target.write_text(yaml.safe_dump(run_config, sort_keys=False,
+                                                allow_unicode=True),
+                                 encoding="utf-8")
+            rc_source = "(the run's config dict)"
+        if rc_target.exists():
+            manifest["files"]["config/config.yml"] = {
+                "sha256_16": _hash_file(rc_target),
+                "bytes": rc_target.stat().st_size}
+
+    marker = {
+        "schema_version": "1.0",
+        "kind": "snapshot" if snapshot_meta else "live",
+        "snapshot_label": (snapshot_meta or {}).get("label"),
+        "source_config": str(config_dir) if config_dir else None,
+        "source_run_cfg": rc_source or "(in source_config)",
+        "source_static": str(static_dir) if static_dir else None,
+        "frozen_at": datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    (dest / "config_used.yml").write_text(
+        yaml.safe_dump(marker, sort_keys=False), encoding="utf-8")
     (dest / "snapshot.json").write_text(json.dumps(manifest, indent=2))
     return manifest
 

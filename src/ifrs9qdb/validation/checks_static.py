@@ -29,9 +29,15 @@ REQUIRED_STATIC = [
     "ttc_pd_table", "portfolios",
 ]
 
-REQUIRED_PATHS = ("input_dir", "output_dir", "static_dir", "model_config",
-                  "model_inputs")
-OPTIONAL_PATHS = ("reference_outputs", "runs_dir", "snapshot_dir")
+# R's build_config_validators(): only these must exist before a run. The
+# runtime locations (input_dir, output_dir, runs_dir) may legitimately not
+# exist yet -- inputs arrive by upload or a data-drop folder, runs/ is created
+# on the first run -- so their absence is not an error.
+REQUIRED_PATHS = ("static_dir", "variable_dictionary", "models", "model_inputs")
+OPTIONAL_PATHS = ("input_dir", "reference_outputs", "data_drop_root")
+# config.yml's run: block must name the model and carry the reporting date
+# (the inputs' EXTRACTDA fills it before the check, as in R).
+REQUIRED_RUN_KEYS = ("internal_model", "extract_date")
 
 
 def _presence_validators() -> list[Validator]:
@@ -119,62 +125,66 @@ def _v_scenario_probs_sum(static=None):
     return fail(1, f"scenario probabilities sum to {total:.4f}, not 1.000")
 
 
+def _resolve_path(raw, base_dir) -> Path:
+    p = Path(str(raw)).expanduser()
+    if not p.is_absolute():
+        p = (Path(base_dir) if base_dir else Path.cwd()) / p
+    return p
+
+
 def _v_required_paths_exist(run_config=None, base_dir=None):
+    """R: static_dir and the model / dictionary / inputs YAMLs must exist.
+    Relative paths resolve against config.yml's own folder, as R's
+    load_run_config() resolves them."""
     if not run_config:
         return ok()
-    paths = (run_config.get("paths") or {}) if isinstance(run_config, dict) else {}
-    base = Path(base_dir) if base_dir else Path.cwd()
+    paths = run_config.get("paths") if isinstance(run_config, dict) else None
+    if not isinstance(paths, dict):
+        return fail(1, "config.yml has no `paths:` block")
     missing = []
     for key in REQUIRED_PATHS:
         raw = paths.get(key)
-        if not raw:
-            missing.append(f"{key} (not set)")
+        if raw is None or not isinstance(raw, str) or not raw:
+            missing.append(f"paths${key} = (unset)")
             continue
-        p = Path(raw)
-        if not p.is_absolute():
-            p = base / p
-        if not p.exists():
-            missing.append(f"{key} -> {raw}")
+        if not _resolve_path(raw, base_dir).exists():
+            missing.append(f"paths${key} = '{raw}'")
     if not missing:
         return ok()
-    return fail(len(missing),
-                f"{len(missing)} required path(s) in config.yml do not resolve",
-                examples=missing[:10])
+    return fail(len(missing), "Missing/unresolvable required paths: "
+                + "; ".join(missing), examples=missing)
 
 
 def _v_optional_paths_resolve(run_config=None, base_dir=None):
     if not run_config:
         return ok()
-    paths = (run_config.get("paths") or {}) if isinstance(run_config, dict) else {}
-    base = Path(base_dir) if base_dir else Path.cwd()
+    paths = run_config.get("paths") if isinstance(run_config, dict) else None
+    if not isinstance(paths, dict):
+        return ok()
     missing = []
     for key in OPTIONAL_PATHS:
         raw = paths.get(key)
-        if not raw:
+        if raw is None or not isinstance(raw, str) or not raw:
             continue
-        p = Path(raw)
-        if not p.is_absolute():
-            p = base / p
-        if not p.exists():
-            missing.append(f"{key} -> {raw}")
+        if not _resolve_path(raw, base_dir).exists():
+            missing.append(f"paths${key} = '{raw}'")
     if not missing:
         return ok()
-    return fail(len(missing),
-                f"{len(missing)} optional path(s) are set but do not resolve; "
-                "a path that is set and wrong is worse than one left unset",
-                examples=missing[:10])
+    return fail(len(missing), "Optional paths set but not found: "
+                + "; ".join(missing), examples=missing)
 
 
 def _v_run_block_complete(run_config=None):
     if not run_config:
         return ok()
-    run = (run_config.get("run") or {}) if isinstance(run_config, dict) else {}
-    required = ("extract_date",)
-    missing = [k for k in required if not run.get(k)]
+    run = run_config.get("run") if isinstance(run_config, dict) else None
+    if not isinstance(run, dict):
+        return fail(1, "config.yml has no `run:` block")
+    missing = [k for k in REQUIRED_RUN_KEYS
+               if run.get(k) is None or str(run.get(k)) == ""]
     if not missing:
         return ok()
-    return fail(len(missing),
-                "the run: block in config.yml is missing " + ", ".join(missing),
+    return fail(len(missing), "Missing run.* keys: " + ", ".join(missing),
                 examples=missing)
 
 
@@ -206,25 +216,43 @@ STATIC_VALIDATORS: list[Validator] = _presence_validators() + [
 
 CONFIG_PATH_VALIDATORS: list[Validator] = [
     Validator("CONFIG_required_paths_exist", Severity.ERROR,
-              "Required paths in config.yml resolve to existing locations",
+              "Required paths in config.yml's `paths:` block resolve to "
+              "existing files / directories",
               _v_required_paths_exist, context="config", tags=("preflight",),
-              rationale="A run that starts with a bad path fails partway "
-                        "through, after writing some of its outputs.",
-              remediation="Correct the paths block in config.yml.",
+              rationale="Some path entries describe runtime locations "
+                        "(input_dir, output_dir, runs_dir) that may "
+                        "legitimately not exist yet - e.g. when inputs are "
+                        "uploaded via the app, or the runs/ folder is created "
+                        "on first run. But static_dir + the model/dictionary "
+                        "YAMLs MUST exist; their absence indicates a broken "
+                        "project.",
+              remediation="Ensure static_dir and the model/dictionary YAML "
+                          "paths in config.yml exist on disk.",
               suppressible=False),
     Validator("CONFIG_optional_paths_resolve", Severity.WARN,
-              "Optional paths resolve to existing locations, if set",
+              "Optional paths (input_dir, reference_outputs) resolve to "
+              "existing locations, if set",
               _v_optional_paths_resolve, context="config", tags=("preflight",),
-              rationale="A path that is set and wrong is worse than one left "
-                        "unset: the feature it enables silently does nothing.",
-              remediation="Correct or remove the path."),
+              rationale="input_dir is used for the configured-source flow; if "
+                        "it doesn't exist, you must use the upload or "
+                        "data-drop flow. reference_outputs enables "
+                        "reconciliation against the Excel tool output; if set "
+                        "but missing, no reconciliation will run.",
+              remediation="Either point at the right location, or leave unset "
+                          "if you don't need it."),
     Validator("CONFIG_run_block_complete", Severity.ERROR,
-              "The run: block in config.yml is complete",
+              "config.yml's `run:` block has the keys phase1 expects "
+              "(internal_model, extract_date)",
               _v_run_block_complete, context="config", tags=("preflight",),
-              rationale="Without an extract date the run dates itself from "
-                        "today, which silently re-ages every contract if a run "
-                        "is repeated a week later.",
-              remediation="Set run.extract_date in config.yml.",
+              rationale="The pipeline picks the model from run$internal_model "
+                        "and uses run$extract_date to time-align the input "
+                        "snapshot. Missing either produces a confusing failure "
+                        "during model resolution. The inputs' EXTRACTDA fills "
+                        "extract_date before this check, so it fails on the "
+                        "date only when neither the inputs nor config.yml "
+                        "carry one.",
+              remediation="Add internal_model and extract_date under config.yml "
+                          "run:",
               suppressible=False),
 ]
 

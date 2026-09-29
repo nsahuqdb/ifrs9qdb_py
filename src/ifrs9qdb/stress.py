@@ -827,7 +827,9 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
         if "extract_date" in report.columns and report["extract_date"].notna().any() \
         else ""
     try:
-        stpd_new = build_stpd_from_static(static, model, raw, extract)
+        from .etl.model_registry import run_model_id
+        stpd_new = build_stpd_from_static(static, model, raw, extract,
+                                          model_id=run_model_id(run_path))
     except Exception as exc:
         return {"ok": False, "reason": f"Rebuilding the PD chain failed: {exc}"}
     curves = stpd_to_curves(stpd_new)
@@ -1125,12 +1127,14 @@ def scenario_ecl_single_run(inputs: EngineInputs, report: pd.DataFrame,
         if "extract_date" in report.columns and report["extract_date"].notna().any() \
         else ""
     base_cfg = cfg or EclConfig()
+    from .etl.model_registry import run_model_id
     out = {}
     for name in wanted:
         one_hot = {s: (1.0 if s == name else 0.0) for s in names}
         try:
             stpd = build_stpd_from_static(static, model, model_inputs, extract,
-                                          scenario_weights=one_hot)
+                                          scenario_weights=one_hot,
+                                          model_id=run_model_id(run_path))
         except Exception as exc:
             return {"ok": False,
                     "reason": f"Rebuilding the PD chain for {name} failed: {exc}"}

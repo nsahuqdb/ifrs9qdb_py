@@ -20,6 +20,34 @@ from ifrs9qdb.etl import reconciliation_report
 print(reconciliation_report("out/", "runs/run_00001/Output"))
 ```
 
+## From raw extracts to every file, R against Python — and the run itself
+
+The ETL now reproduces the R engine from the raw extracts: every one of the 29
+files a run writes, all 147 run checks, the pricing-readiness report and its
+row funnel, identical R against Python on the June 2026 book as delivered, with
+its dates repaired, with defects injected into every file, with a stray
+EXTRACTDA row, and under two model configurations (a switched internal model
+with a null weight; `mev_model_weights: auto_p_value`). The pre-run check — 83
+config, static and input checks — gives identical results and messages on all
+of them. Details, and what was found and fixed on the way, in
+`PRICING_READINESS.md`.
+
+What the Python engine now does as R does, that it did not:
+
+* **The run itself** — `run_etl_phase1()` pauses with the customer view for
+  rating, stage and restructuring overrides; `run_etl_phase2()` applies them
+  and finishes. The project audit log (`audit_log.py`), run discovery and the
+  run record (`runs.py`), and the pre-run check and readiness dry run
+  (`prerun.py`) match R's events, columns and schema.
+* **The model** — `run.internal_model` selects the PD model and
+  `mev_model_weights.mode` the MEV weights (`etl/model_registry.py`, R's
+  `resolve_model()`); the run freezes `config.yml` beside `config/` and
+  records the resolved model in its manifest.
+* **The reporting date** — R's `resolve_input_extract_date()` dates the run;
+  each transform extends a lapsed maturity from its own file's latest date.
+* **The config checks** — R's path and `run:` block rules, with the inputs'
+  EXTRACTDA applied first.
+
 ## StPD — now exact, and the earlier diagnosis was wrong
 
 `build_stpd_from_static()` reproduces the reference StPD to floating point:

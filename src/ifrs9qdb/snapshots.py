@@ -37,6 +37,8 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
+from .audit_log import audit_event
+
 __all__ = ["SNAPSHOT_STATUSES", "ALLOWED_TRANSITIONS", "EDITABLE_FILES",
            "snapshot_dir", "snapshot_paths", "read_snapshot_metadata",
            "list_snapshots", "create_snapshot", "clone_snapshot",
@@ -214,7 +216,13 @@ def list_snapshots(snapshots_root=None) -> pd.DataFrame:
             "tested_by": meta.get("tested_by") or "",
             "n_transitions": len(meta.get("transitions") or []),
             "path": str(d),
+            "code_sha_at_creation": meta.get("code_sha_at_creation") or "",
+            "approval_reason": meta.get("approval_reason") or "",
         })
+    cols = cols + ["code_sha_at_creation", "approval_reason"]
+    for r in rows:
+        r.setdefault("code_sha_at_creation", "")
+        r.setdefault("approval_reason", "")
     out = pd.DataFrame(rows, columns=cols)
     return out.sort_values("created_at", ascending=False).reset_index(drop=True)
 
@@ -265,7 +273,7 @@ def _write_meta(meta: dict, path: Path) -> None:
 def create_snapshot(label: str, description: str = "", created_by=None,
                     parent: str | None = None, config_dir="config",
                     static_dir="data-raw/static", run_config_path=None,
-                    snapshots_root=None, code_sha=None, audit=None) -> Path:
+                    snapshots_root=None, code_sha=None, audit=None, _cloning=False) -> Path:
     """Freeze the current config and static reference under a label.
 
     With a ``parent`` the new snapshot is cloned from THAT snapshot's frozen
@@ -341,6 +349,10 @@ def create_snapshot(label: str, description: str = "", created_by=None,
                          parent=parent, user=meta["created_by"])
         except Exception:
             pass
+    if not _cloning:
+        audit_event({"event": "snapshot_create", "snapshot": label,
+                     "parent": parent, "user": meta["created_by"],
+                     "description": description})
     return out
 
 
@@ -354,9 +366,14 @@ def clone_snapshot(source_label: str, new_label: str, description: str = "",
     root = _root(snapshots_root)
     if read_snapshot_metadata(source_label, root) is None:
         raise FileNotFoundError(f"source snapshot {source_label!r} not found")
-    return create_snapshot(new_label, description, created_by,
-                           parent=source_label, snapshots_root=root,
-                           audit=audit)
+    out = create_snapshot(new_label, description, created_by,
+                          parent=source_label, snapshots_root=root,
+                          audit=audit, _cloning=True)
+    meta = read_snapshot_metadata(new_label, root) or {}
+    audit_event({"event": "snapshot_clone", "snapshot": new_label,
+                 "cloned_from": source_label,
+                 "user": meta.get("created_by") or created_by})
+    return out
 
 
 def _approval_config(config_path=None) -> dict:
@@ -425,6 +442,9 @@ def promote_snapshot(label: str, status: str, approved_by=None, reason: str = ""
                          from_status=current, to_status=status, user=by)
         except Exception:
             pass
+    audit_event({"event": "snapshot_promote", "snapshot": label,
+                 "from_status": current, "to_status": status, "user": by,
+                 "reason": record["reason"]})
     return meta
 
 
@@ -546,6 +566,8 @@ def save_snapshot_yaml(label: str, relpath: str, text: str,
                          user=edited_by or _who())
         except Exception:
             pass
+    audit_event({"event": "snapshot_edit", "snapshot": label,
+                 "relpath": relpath, "user": edited_by or _who()})
     return {"ok": True, "message": f"saved {relpath}", "path": str(full)}
 
 
@@ -603,5 +625,8 @@ def save_snapshot_csv(label: str, relpath: str, df: pd.DataFrame,
                          user=edited_by or _who(), rows=len(df))
         except Exception:
             pass
+    audit_event({"event": "snapshot_edit", "snapshot": label,
+                 "relpath": relpath, "user": edited_by or _who(),
+                 "n_rows": len(df)})
     return {"ok": True, "message": f"saved {relpath} ({len(df):,} rows)",
             "path": str(full)}

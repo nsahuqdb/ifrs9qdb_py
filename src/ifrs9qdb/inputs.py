@@ -96,6 +96,10 @@ class EngineInputs:
     collateral: pd.DataFrame | None = None
     alloc: pd.DataFrame | None = None
     coll_type: pd.DataFrame | None = None
+    # The EAD fallback rules the run was priced with: its frozen model.yml's
+    # ecl.ead_fallback (R's rules when absent), so a repricing uses the same
+    # shapes as the run's own report.
+    ead_rules: tuple | None = None
 
     # -- lookups -------------------------------------------------------
     def scale_for(self, rating_type) -> RatingScale | None:
@@ -139,6 +143,9 @@ class EngineInputs:
             row.get("on_balance"), int(row.get("months_to_mat") or 3),
             row.get("payment_type"), row.get("payment_frequency"),
             row.get("deferral"), portfolio=row.get("portfolio"),
+            nir=row.get("nir"),
+            rules=self.ead_rules[0] if self.ead_rules else None,
+            default=self.ead_rules[1] if self.ead_rules else None,
         )
         return curve[: min(12, len(curve))] if stage == 1 else curve
 
@@ -296,6 +303,9 @@ def load_engine_inputs(out_dir) -> EngineInputs:
                                                errors="coerce").fillna(1),
             "deferral": pd.to_numeric(_col(df, "DeferralPeriod"),
                                       errors="coerce").fillna(0),
+            # R's report reads NominalInterestRate as given; only an annuity
+            # rule uses it
+            "nir": pd.to_numeric(_col(df, "NominalInterestRate"), errors="coerce"),
         })
         out["maturity_date"] = mat
         out["extract_date"] = ext
@@ -321,4 +331,19 @@ def load_engine_inputs(out_dir) -> EngineInputs:
         ead_curves=ead_curves, collateral_net=collateral_net, scales=scales,
         rating_type_of_portfolio=rt_of_pf,
         collateral=coll, alloc=alloc, coll_type=ctype,
+        ead_rules=_run_ead_rules(out_dir),
     )
+
+
+def _run_ead_rules(out_dir: Path):
+    """(rules, default) from the model.yml the run froze, or None."""
+    from .engine import ead_fallback_rules
+    for cand in (out_dir.parent / "config_used" / "config" / "model.yml",
+                 out_dir.parent / "config_used" / "model.yml"):
+        if cand.is_file():
+            try:
+                import yaml
+                return ead_fallback_rules(yaml.safe_load(cand.read_text()) or {})
+            except Exception:
+                return None
+    return None

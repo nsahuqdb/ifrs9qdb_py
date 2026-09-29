@@ -42,7 +42,13 @@ def _cmd_stpd(args) -> int:
         cfg = pkg
     model = yaml.safe_load((cfg / "model.yml").read_text(encoding="utf-8"))
     inputs = yaml.safe_load((cfg / "model_inputs.yml").read_text(encoding="utf-8"))
-    out = build_stpd_from_static(static, model, inputs, args.date)
+    # config.yml, when the config folder carries one, names the model
+    from .etl.model_registry import model_id_from_run_config
+    rc_path = cfg / "config.yml"
+    rc = yaml.safe_load(rc_path.read_text(encoding="utf-8")) \
+        if rc_path.is_file() else None
+    out = build_stpd_from_static(static, model, inputs, args.date,
+                                 model_id=model_id_from_run_config(rc))
     out.to_csv(args.out, index=False)
     print(f"  wrote {args.out}  ({len(out):,} rows)")
     return 0

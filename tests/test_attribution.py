@@ -199,3 +199,40 @@ class TestExactAttribution:
         assert factor_attribution_exact(None, d, None, d) == {}
         msg = factor_attribution_diagnosis(None, d, None, d)
         assert msg and "prior" in msg
+
+
+class TestAnOverlayIsItsOwnLine:
+    """A post-model overlay moves the provision without moving a factor. The
+    split used to scale the factors to the whole move -- or, with nothing else
+    changed, leave every factor at zero against it."""
+
+    def _book(self, **kw):
+        base = pd.DataFrame({"contract": ["1", "2"], "exposure": [100.0, 200.0],
+                             "pd": [0.1, 0.2], "lgd": [0.5, 0.5],
+                             "ecl": [5.0, 20.0], "overlay": [0.0, 0.0]})
+        return base.assign(**kw)
+
+    def test_an_overlay_alone_is_the_whole_move(self):
+        from ifrs9qdb.analytics.attribution import ecl_factor_attribution
+        out = ecl_factor_attribution(self._book(),
+                                     self._book(ecl=[5.5, 22.0], overlay=[0.5, 2.0]))
+        eff = out.set_index("factor")["effect"]
+        assert list(out["factor"]) == ["Exposure", "PD", "LGD", "Overlay"]
+        assert eff["Overlay"] == pytest.approx(2.5)
+        assert eff.sum() == pytest.approx(out["actual_change"].iloc[0])
+
+    def test_the_factors_explain_the_model_move_beside_it(self):
+        from ifrs9qdb.analytics.attribution import ecl_factor_attribution
+        curr = self._book(exposure=[110.0, 200.0], ecl=[6.5, 21.0],
+                          overlay=[1.0, 1.0])
+        out = ecl_factor_attribution(self._book(), curr)
+        eff = out.set_index("factor")["effect"]
+        assert eff["Overlay"] == pytest.approx(2.0)
+        assert eff[["Exposure", "PD", "LGD"]].sum() == pytest.approx(0.5)
+        assert eff.sum() == pytest.approx(2.5)
+
+    def test_no_overlay_no_line(self):
+        from ifrs9qdb.analytics.attribution import ecl_factor_attribution
+        out = ecl_factor_attribution(self._book(), self._book(exposure=[110.0, 200.0],
+                                                              ecl=[5.5, 20.0]))
+        assert list(out["factor"]) == ["Exposure", "PD", "LGD"]

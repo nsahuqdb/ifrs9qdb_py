@@ -169,11 +169,21 @@ def read_scenario_stpd(run, scenario: str) -> dict[str, list]:
 
 
 # --------------------------------------------------------------- MEV ------
-def _mev_components(model_cfg) -> list | None:
+def _mev_components(model_cfg, run=None) -> list | None:
+    """The components of the model the run priced on -- the one its frozen
+    config.yml names -- with R's resolved weights (a null weight derived from
+    the p-values). The shipped model when the run does not say."""
+    from ..etl.model_registry import resolve_model, run_model_id
+    mid = (run_model_id(run) if run is not None else None) or _MODEL
     try:
-        return model_cfg["models"][_MODEL]["mev_components"]
+        comps = model_cfg["models"][mid]["mev_components"]
     except (KeyError, TypeError):
         return None
+    try:
+        mevs = resolve_model(model_cfg, mid)["model"]["mevs"]
+    except Exception:
+        return comps
+    return [{**c, "weight": m["weight"]} for c, m in zip(comps, mevs)]
 
 
 def mev_forecast_table(run) -> pd.DataFrame:
@@ -192,7 +202,7 @@ def mev_forecast_table(run) -> pd.DataFrame:
     if not fc:
         return pd.DataFrame()
 
-    comp = _mev_components(mc) or []
+    comp = _mev_components(mc, run) or []
     names = [c.get("variable") for c in comp]
     variables = (mc or {}).get("variables", {}) or {}
 
@@ -221,7 +231,7 @@ def mev_weights_table(run) -> pd.DataFrame:
     cu = config_used(run)
     if cu is None:
         return pd.DataFrame()
-    comp = _mev_components(_read_yaml(cu["config"] / "model.yml"))
+    comp = _mev_components(_read_yaml(cu["config"] / "model.yml"), run)
     if not comp:
         return pd.DataFrame()
     return pd.DataFrame([{

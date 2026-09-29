@@ -34,7 +34,7 @@ def inputs():
     return load_engine_inputs(OUT)
 
 # The R package's defaults and config/model.yml carry only the rules that name a
-# portfolio. Python adds one that does not. See X4.
+# portfolio; so, since X3 was fixed, does Python's table.
 R_CONFIG_RULES = tuple(r for r in EAD_FALLBACK_RULES if r[0] is not None)
 
 
@@ -222,36 +222,39 @@ class TestI6ColumnsThatArriveEmpty:
             "be split by component. Update the register.")
 
 
-class TestX2AndX3TheShapeSwitchDiverges:
-    """X2/X3: R has three shapes and defaults an unknown name to bullet;
-    Python has two and defaults to linear."""
+class TestX2TheConfigBlockIsHonoured:
+    """X2, FIXED: Python reads ecl.ead_fallback from model.yml, as R does, so
+    editing the config moves both engines' numbers together."""
 
-    def test_python_has_no_annuity_branch(self):
-        annuity = fallback_ead_curve(1000, 60, "4", portfolio="Business Finance")
-        linear = fallback_ead_curve(1000, 60, "4", portfolio="Business Finance")
-        assert np.array_equal(annuity, linear)
-        # A true annuity is convex: the early instalments retire less principal.
-        # A straight line is not, which is what Python produces.
-        mid = annuity[len(annuity) // 2]
-        assert mid == pytest.approx(annuity[0] * 0.5, rel=0.05), (
-            "X2 may be FIXED: the curve is no longer a straight line, so an "
-            "annuity shape may have been implemented. Update the register.")
+    def test_the_shipped_config_block_is_what_the_engine_prices_with(self):
+        import yaml
 
-    def test_the_config_block_never_reaches_the_curve(self):
-        """X3: R reads ecl.ead_fallback from model.yml; Python does not. The
-        shipped YAML carries the block and nothing in the package reads it."""
         import ifrs9qdb
+        from ifrs9qdb.engine import ead_fallback_rules
         pkg = Path(ifrs9qdb.__file__).parent
-        shipped = (pkg / "config" / "model.yml").read_text()
-        assert "ead_fallback" in shipped, "the block should be in the shipped config"
-        readers = [f for f in pkg.rglob("*.py") if "ead_fallback" in f.read_text()]
-        assert readers == [], (
-            f"X3 may be FIXED: {[f.name for f in readers]} now reads the config "
-            "block. If Python honours ecl.ead_fallback, update the register.")
+        cfg = yaml.safe_load((pkg / "config" / "model.yml").read_text())
+        assert cfg["ecl"]["ead_fallback"], "the block should be in the shipped config"
+        rules, default = ead_fallback_rules(cfg)
+        assert set(rules) == set(EAD_FALLBACK_RULES)
+        assert default == "bullet"
+
+    def test_an_edited_config_moves_the_curve(self):
+        from ifrs9qdb.engine import ead_fallback_rules, use_ead_fallback_rules
+        cfg = {"ecl": {"ead_fallback": {"default": "bullet", "rules": [
+            {"portfolio": "Off BS", "payment_type": 4, "shape": "linear"}]}}}
+        rules, default = ead_fallback_rules(cfg)
+        assert resolve_ead_shape("4", "Off BS", rules, default) == "linear"
+        use_ead_fallback_rules(cfg)
+        try:
+            c = fallback_ead_curve(1000, 60, "4", portfolio="Off BS")
+            assert c[-1] < c[0], "the configured linear rule should amortise"
+        finally:
+            use_ead_fallback_rules(None)
+        assert np.allclose(fallback_ead_curve(1000, 60, "4", portfolio="Off BS"),
+                           1000.0), "back on R's rules Off BS type 4 is a bullet"
 
     def test_an_unmatched_shape_falls_to_bullet_in_both(self):
-        """The one thing that does agree: R's switch default and Python's
-        EAD_FALLBACK_DEFAULT are both bullet."""
+        """R's switch default and Python's EAD_FALLBACK_DEFAULT are both bullet."""
         from ifrs9qdb.engine import EAD_FALLBACK_DEFAULT
         assert EAD_FALLBACK_DEFAULT == "bullet"
         assert resolve_ead_shape("99", "Nowhere") == "bullet"
@@ -259,36 +262,88 @@ class TestX2AndX3TheShapeSwitchDiverges:
         assert np.allclose(c, 1000.0), "an unmatched contract should be a bullet"
 
 
-class TestX4TheExtraRuleIsDormantNotAbsent:
-    """X4: Python carries (None,'4','linear'); the R config does not."""
+class TestX3TheRuleSetsAgree:
+    """X3, FIXED: Python carried a portfolio-free (None, '4', 'linear') rule R
+    does not have, which would have amortised the June book's Off BS and
+    Tasdeer type-4 facilities that R prices as bullets. The rule now applies
+    only where no portfolio is known at all (EY's worked examples)."""
 
-    def test_the_rule_sets_differ_by_exactly_one_entry(self):
-        extra = set(EAD_FALLBACK_RULES) - set(R_CONFIG_RULES)
-        assert extra == {(None, "4", "linear")}, (
-            f"X4 has changed: the difference is now {extra}. Reconcile the two "
-            "rule sets and update INPUT_DATA_ISSUES.md.")
+    def test_python_carries_exactly_rs_five_rules(self):
+        assert set(EAD_FALLBACK_RULES) == {
+            ("Business Finance", "4", "linear"),
+            ("Business Finance", "3", "bullet"),
+            ("Al Dhameen", "4", "bullet"),
+            ("Tasdeer", "3", "bullet"),
+            ("Off BS", "3", "bullet"),
+        }
+        assert set(EAD_FALLBACK_RULES) == set(R_CONFIG_RULES)
 
-    def test_the_two_rule_sets_disagree_on_an_off_bs_type_4(self):
-        """The combination that is absent from both delivered runs and present
-        in the June 2026 book."""
-        assert resolve_ead_shape("4", "Off BS", R_CONFIG_RULES) == "bullet"
-        assert resolve_ead_shape("4", "Off BS", EAD_FALLBACK_RULES) == "linear"
+    def test_off_bs_and_tasdeer_type_4_are_bullets_as_in_r(self):
+        """The June book's 875 contracts / 508m that the extra rule would have
+        amortised."""
+        for pf in ("Off BS", "Tasdeer", "Investments"):
+            assert resolve_ead_shape("4", pf) == "bullet", pf
+
+    def test_the_ey_rule_applies_only_without_a_portfolio(self):
+        from ifrs9qdb.engine import NO_PORTFOLIO_RULES
+        assert NO_PORTFOLIO_RULES == ((None, "4", "linear"),)
+        assert resolve_ead_shape("4", None) == "linear"
+        assert resolve_ead_shape("4", "") == "linear"
 
     def test_they_agree_on_every_combination_the_runs_contain(self):
-        """Why the port still reproduces the R report to the cent."""
         for pf, pt in (("Al Dhameen", "4"), ("Banks and Fis", "3"),
                        ("Business Finance", "3"), ("Business Finance", "4"),
-                       ("Investments", "3"), ("Off BS", "3"), ("Tasdeer", "3")):
+                       ("Investments", "3"), ("Off BS", "3"), ("Off BS", "4"),
+                       ("Tasdeer", "3"), ("Tasdeer", "4")):
             assert resolve_ead_shape(pt, pf, R_CONFIG_RULES) == \
-                resolve_ead_shape(pt, pf, EAD_FALLBACK_RULES), \
-                f"X4 is now live on ({pf}, {pt}), which the runs DO contain"
+                resolve_ead_shape(pt, pf, EAD_FALLBACK_RULES), (pf, pt)
 
     def test_linear_is_about_half_of_bullet(self):
-        """The size of the divergence when it does bite."""
+        """The size of the divergence the extra rule would have caused."""
         for n in (12, 36, 60):
             b = fallback_ead_curve(1000, n, "4", portfolio="Al Dhameen")
             l = fallback_ead_curve(1000, n, "4", portfolio="Business Finance")
             assert 0.45 < l.sum() / b.sum() < 0.60
+
+
+class TestX4TheAnnuityShape:
+    """X4, FIXED: R implements bullet, linear and annuity; the engine's
+    fallback now does too, and prices a shape it does not know as a bullet
+    (R's switch default) instead of a linear ramp."""
+
+    CFG = {"ecl": {"ead_fallback": {"default": "bullet", "rules": [
+        {"portfolio": "Business Finance", "payment_type": 4, "shape": "annuity"},
+        {"portfolio": "Tasdeer", "payment_type": 4, "shape": "balloon"}]}}}
+
+    def _with(self, fn):
+        from ifrs9qdb.engine import use_ead_fallback_rules
+        use_ead_fallback_rules(self.CFG)
+        try:
+            return fn()
+        finally:
+            use_ead_fallback_rules(None)
+
+    def test_an_annuity_is_convex_at_a_positive_rate(self):
+        a = self._with(lambda: fallback_ead_curve(
+            1000, 60, "4", portfolio="Business Finance", nir=0.08))
+        lin = fallback_ead_curve(1000, 60, "4", portfolio="Business Finance")
+        assert a[0] == pytest.approx(1000.0)
+        # early instalments retire less principal than a straight line
+        assert a[30] > lin[30]
+        # R's closed form after 30 of 60 monthly payments at 8%
+        r = 0.08 / 12
+        want = 1000 * ((1 + r) ** 60 - (1 + r) ** 30) / ((1 + r) ** 60 - 1)
+        assert a[30] == pytest.approx(want, rel=1e-12)
+
+    def test_an_annuity_degenerates_to_linear_at_zero_rate(self):
+        a = self._with(lambda: fallback_ead_curve(
+            1000, 60, "4", portfolio="Business Finance", nir=0.0))
+        lin = fallback_ead_curve(1000, 60, "4", portfolio="Business Finance")
+        assert np.allclose(a, lin)
+
+    def test_an_unknown_shape_is_a_bullet(self):
+        c = self._with(lambda: fallback_ead_curve(1000, 60, "4", portfolio="Tasdeer"))
+        assert np.allclose(c, 1000.0)
 
 
 class TestI2CollateralHasNoValue:

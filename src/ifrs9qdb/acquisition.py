@@ -178,8 +178,7 @@ def validate_input_directory(input_dir) -> pd.DataFrame:
     if am is not None:
         try:
             from .etl.read_inputs import read_input
-            df = read_input(am, next(s for s in INPUT_SPECS
-                                     if s.name == "AccountMaster"))
+            df = read_input(am)
             cols = {"".join(ch for ch in str(c).lower() if ch.isalnum())
                     for c in df.columns}
             # The canary: if this column is missing the bundle is not the

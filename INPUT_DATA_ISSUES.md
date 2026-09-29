@@ -5,7 +5,10 @@ covers the **extract** — what arrives from Oracle before any calculation — a
 for each item, what the three implementations do with it: the Excel tool, the R
 package, and the Python port.
 
-**Nothing here has been changed in the code.**
+**How each input item is priced has not been changed.** What changed is that
+each is now flagged before a run starts — the pre-run check and the
+pricing-readiness check name every contract it touches, and why; see
+`PRICING_READINESS.md`. The engine differences X2–X4 are fixed.
 
 The distinction matters because the owners differ. A methodology item is a
 decision for Risk. An input item is a fix in the source extract or in
@@ -29,9 +32,9 @@ runs for 2025-09-30 and 2025-12-31, and those runs' own
 | I8 | Two collateral types are unmapped; the ports disagreed, now aligned | **B** |
 | I9 | Zero and negative outstanding balances | **C** |
 | X1 | Excel and R/Python disagree on the months before the first payment | **B** |
-| X2 | The `ead_fallback` config block is live in R and inert in Python | **B** |
-| X3 | Python carries a fallback rule the R config does not — dormant, not fixed | **B** |
-| X4 | R has an annuity shape; Python does not | **C** |
+| X2 | The `ead_fallback` config block was live in R and inert in Python — **fixed** | **B** |
+| X3 | Python carried a fallback rule the R config does not — **fixed** | **B** |
+| X4 | R had an annuity shape; Python did not — **fixed** | **C** |
 
 ---
 
@@ -733,76 +736,64 @@ dates are repaired.**
 
 ---
 
-## X2 — The `ead_fallback` config block is live in R and inert in Python · **B**
+## X2 — The `ead_fallback` config block was live in R and inert in Python · **B** · FIXED
 
-**R reads it.** `ead_fallback_rules(cfg)` at `R/ecl_ead_curve.R:103` pulls
-`cfg$ecl$ead_fallback` and honours both `default` and `rules`.
+**Status: fixed.** `engine.ead_fallback_rules(model_cfg)` now reads
+`ecl.ead_fallback` exactly as R's `ead_fallback_rules(cfg)` does
+(`R/ecl_ead_curve.R:103`), honouring both `default` and `rules`. The report
+builder prices with the run's model config, and the analytics and stress layers
+reprice with the rules the run froze (`config_used/config/model.yml`), so
+repricing a run uses the shapes its own report used. If Risk edits the block,
+the R and Python numbers now move together. Pinned by `TestX2TheConfigBlockIsHonoured`.
 
-**Python never does.** The package ships `src/ifrs9qdb/config/model.yml` with the
-same block, and the only occurrence of the string `ead_fallback` anywhere under
-`src/` **is that YAML file**. The shapes come from the hardcoded
-`EAD_FALLBACK_RULES` tuple in `engine.py`; `fallback_ead_curve` takes no `rules`
-argument, and its single production caller (`engine.py:161`) passes none. The
-`rules` parameter on `resolve_ead_shape` exists only so tests can inject a set.
-
-So if Risk edits `ecl.ead_fallback`, **the R numbers move and the Python numbers
-do not** — no error, no warning, nothing in either output to say the two are now
-running different rules.
-
-One thing agrees: `EAD_FALLBACK_DEFAULT = "bullet"` matches R's
-`default: bullet`, and R's `switch` falls through to `rep(1, H)` — also bullet —
-for an unrecognised shape name. The defaults coincide; the mechanism does not.
+What it was: the only occurrence of `ead_fallback` under `src/` used to be the
+shipped YAML; the shapes came from a hard-coded tuple, so an edited config
+moved R and left Python where it was, with nothing in either output to say
+the two were running different rules.
 
 ---
 
-## X3 — Python carries a fallback rule the R config does not · **B**
+## X3 — Python carried a fallback rule the R config does not · **B** · FIXED
 
-`EAD_FALLBACK_RULES` has **six** entries. The R package's defaults and
-`config/model.yml` — including the copy frozen into both delivered runs — have
-**five**. The extra one:
+**Status: fixed.** `EAD_FALLBACK_RULES` is now R's five portfolio rules, rule
+for rule. The sixth, portfolio-free rule
 
 ```python
 (None, "4", "linear"),   # no portfolio named: payment type 4 amortises
 ```
 
-R has no portfolio-less rule, so an unmatched type 4 falls to `default: bullet`.
+moved to `NO_PORTFOLIO_RULES` and applies only where no portfolio is known at
+all — EY's worked examples, where it reproduces their workbook (a flat curve
+gives about 1.8x the LIC figure on their contract 11). A priced book always
+knows its portfolios, so it never fires there. Pinned by
+`TestX3TheRuleSetsAgree`.
 
-**Dormant on the tested quarters.** Resolving both rule sets against every
-fallback contract in both runs gives **zero** disagreements: every
-(portfolio, payment type) pair there is matched by one of the five portfolio
-rules, and `Off BS` and `Tasdeer` carry only payment type 3. That is why the port
-reproduces the R report to the cent.
+What it would have cost: on the June book the extra rule would have amortised
+the type-4 facilities R prices as bullets —
 
-**Armed on the June book**, where they do carry type-4 facilities without a
-schedule:
-
-| portfolio | type | R | Python | contracts | on-balance |
+| portfolio | type | R | Python before | contracts | on-balance |
 | --- | --- | --- | --- | --- | --- |
 | Off BS | 4 | bullet | linear | 781 | 494,700,900 |
 | Tasdeer | 4 | bullet | linear | 94 | 13,286,320 |
 | | | | | **875** | **507,987,231** |
 
-**34.6%** of the fallback population, and a linear curve sums to about half a
-bullet over the same horizon (0.54 at 12 months, 0.51 at 60). When that extract
-is run the two engines will differ by roughly a factor of two on half a billion.
-
-The rule was added to match EY's own workbook on their reconciliation contract
-11, where a flat curve gives about 1.8× the LIC figure. That may be right — in
-which case **the R config is the thing to change**, rather than letting the two
-diverge by accident on the next quarter's book. Note that because of **X2**,
-changing the Python side means editing source, not config.
+— and a linear curve sums to about half a bullet over the same horizon. The
+June as-is and repaired runs now reproduce R's FinalEclReport to the cent on
+every contract.
 
 ---
 
-## X4 — R has an annuity shape; Python does not · **C**
+## X4 — R had an annuity shape; Python did not · **C** · FIXED
 
-`R/ecl_ead_curve.R:200-216` implements bullet, linear and annuity. Python
-implements bullet and linear; everything that is not bullet takes the linear
-ramp. Invisible today twice over — no shipped rule selects `annuity`, and
-`NOMINALINTERESTRATE` is zero everywhere (**I6**) so R's annuity would degenerate
-to linear anyway. But the shapes are set in config, which Risk can edit: the
-moment someone writes `shape: annuity` and the extract carries a real rate, R
-produces a convex curve and Python a straight line.
+**Status: fixed.** The report builder (`etl/report.py`) ports R's
+`build_ead_fallback_curve` including the annuity branch, and the engine's
+`fallback_ead_curve` (used by the analytics and stress layers) now does too: an
+annuity retires level instalments at the nominal rate
+(`NominalInterestRate / 12` per month, times the payment frequency), degenerates
+to linear at a zero rate, and a shape R does not know is a bullet (R's `switch`
+default) rather than the linear ramp it used to take. Pinned by
+`TestX4TheAnnuityShape`. Still dormant: no shipped rule selects `annuity` and
+`NOMINALINTERESTRATE` is zero everywhere (**I6**).
 
 ---
 
@@ -819,7 +810,7 @@ produces a convex curve and Python a straight line.
 4. **Ask the source for `Origination` and the missing staging flags** (I3, I4),
    or record formally that the relative SICR test and three Stage 3 triggers are
    unavailable.
-5. **Reconcile the two rule sets and make Python read the config** (X2, X3).
+5. ~~Reconcile the two rule sets and make Python read the config~~ (X2, X3) — done.
 6. **Decide what a blank DPD means** for the 123 contracts whose customer has
    none (I5), rather than defaulting to current.
 7. **Make an unmapped collateral type an ERROR** (I8). The two ports are now

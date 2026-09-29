@@ -233,6 +233,9 @@ def transition_run(run_dir, target: str, by: str, reason: str,
                          run_id=meta.get("run_id"), user=by)
         except Exception:
             pass
+    from .audit_log import audit_event
+    audit_event({"event": f"run_{target}", "run_id": meta.get("run_id"),
+                 "user": by, "reason": str(reason).strip()})
     return meta
 
 

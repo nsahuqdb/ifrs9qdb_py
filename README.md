@@ -74,15 +74,24 @@ src/ifrs9qdb/
     lending       AccountMaster and the investment book
     lifetime      EAD curves from the repayment schedule
     macro         the PD chain: MEVs to scaling factors to StPD
+    model_registry  which PD model config.yml names, resolved as R does
     report        FinalEclReport
-    pipeline      run_etl end to end, with a manifest
+    pipeline      run_etl end to end, with a manifest; run_etl_phase1 /
+                  run_etl_phase2 pause for customer overrides between
     reconcile     compare a produced run against a reference, and
                   write out the rows that differ
   analytics/      walk, staging, concentration, data quality, profiles
   stress.py       what-if, packages, reverse stress, roll-forward
-  validation/     114 checks with the R engine's ids, plus 15 pre-flight
-                  checks on the config and static reference, and the
-                  suppressions file (reason, approver, expiry)
+  validation/     147 run checks with the R engine's ids -- input,
+                  transform, derived, pricing readiness (READY) and report
+                  -- plus 15 pre-flight checks on the config and static
+                  reference, and the suppressions file (reason, approver,
+                  expiry). See PRICING_READINESS.md
+  prerun.py       the pre-run check and the pricing-readiness dry run: which
+                  contracts would get no ECL, or a blank in LIC, before a run
+  runs.py         the runs folder: list, manifest, validation, readiness,
+                  overrides, outputs
+  audit_log.py    the project audit log, in the R engine's events
   governance.py   two-stage sign-off, audit log, config snapshots
   run_status.py   maker-checker, in the R engine's reports/run_status.yml
   snapshots.py    frozen, versioned config + static, with its own lifecycle
@@ -104,8 +113,8 @@ The fixtures under `tests/fixtures/` ship with the repository, so the suite
 means something on a fresh clone with nothing configured:
 
 ```bash
-pytest             # 310 passed, 74 skipped (about 3 minutes;
-                   #   the reconciliation tests read real runs)
+pytest             # 662 passed, 11 skipped with reference runs configured
+                   #   (below); without them the data tests skip
 ```
 
 The reconciliation tests need a real run, and a real run is real portfolio

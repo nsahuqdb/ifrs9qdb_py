@@ -481,7 +481,14 @@ def build_account_master(view: pd.DataFrame, extract_date: str,
         # LIC actually received does not.
         "OpenDate": _fmt_date(col("open_date")),
         "Rating": col("rating_worst").astype(str),
-        "PastDueDays": col("past_dues_worst"),
+        # Investments are written with PastDueDays 0, as R does
+        # (R/output_writers.R: past_due_days = rep(0, nrow(ia)), the V4
+        # convention): the investment book is staged on rating deterioration,
+        # not days past due. Carrying the raw DPD here staged a bond 100 days
+        # past due at Stage 3 in Python only -- and pulled five sister
+        # holdings of the same issuer to Stage 2 by contagion.
+        # INPUT_AccountMasterInvestments_dpd_ignored reports any such DPD.
+        "PastDueDays": ([0] * n if investments else col("past_dues_worst")),
         "PD12M": blank,
         "PDLifetimeValue": blank,
         "IsPOCI": blank,

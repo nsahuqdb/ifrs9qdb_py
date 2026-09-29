@@ -188,23 +188,34 @@ def _fmt_date(s, pad: bool = False):
 
 
 # ------------------------------------------------------------- transforms --
-def transform_collateral(raw: pd.DataFrame) -> pd.DataFrame:
+def _stamp(extract_date, raw_dates, index):
+    """The ExtractDate column: the run's reporting date on every row, as R's
+    writers stamp it (format_extract_date(run_cfg$run$extract_date)); the
+    file's own EXTRACTDA only when no run date is given."""
+    if extract_date:
+        return pd.Series(extract_date, index=index, dtype=object)
+    return _fmt_date(raw_dates)
+
+
+def transform_collateral(raw: pd.DataFrame,
+                         extract_date: str | None = None) -> pd.DataFrame:
     """Collateral master.
 
     The SQL*Plus export aliases these to single letters, so they are matched by
-    several possible names rather than one.
+    several possible names rather than one. ``extract_date`` (M/D/YYYY) is the
+    run's reporting date, stamped on every row as R does.
     """
     return pd.DataFrame({
-        "ExtractDate": _fmt_date(pick(raw, "EXTRACTDA", "ExtractDate")),
+        "ExtractDate": _stamp(extract_date, pick(raw, "EXTRACTDA", "ExtractDate"),
+                              raw.index),
         "CollateralId": pick(raw, "COLLATERALID", "CollateralId"),
         # The SQL aliases are truncated, and only the truncation tells you
-        # which is which:  P -> ParentCollateralId (never populated),
-        # CO -> CollateralTypeId, COL -> CollateralCurrency. CollateralCode has
-        # no source column at all and is emitted empty, as the R writer does.
-        "ParentCollateralId": pick(raw, "PARENTCOLLATERALID",
-                                   "ParentCollateralId", "P", default=""),
-        "CollateralCode": pick(raw, "COLLATERALCODE", "CollateralCode",
-                               default=""),
+        # which is which:  P -> ParentCollateralId, CO -> CollateralTypeId,
+        # COL -> CollateralCurrency. R's writer emits ParentCollateralId and
+        # CollateralCode empty whatever the extract carries (P has never been
+        # populated), and so does this.
+        "ParentCollateralId": pd.Series("", index=raw.index, dtype=object),
+        "CollateralCode": pd.Series("", index=raw.index, dtype=object),
         "CollateralTypeId": pick(raw, "COLLATERALTYPEID", "CollateralTypeId",
                                  "CO", default=""),
         "CollateralCurrency": pick(raw, "COLLATERALCURRENCY",
@@ -213,7 +224,8 @@ def transform_collateral(raw: pd.DataFrame) -> pd.DataFrame:
     })
 
 
-def transform_allocation(raw: pd.DataFrame) -> pd.DataFrame:
+def transform_allocation(raw: pd.DataFrame,
+                         extract_date: str | None = None) -> pd.DataFrame:
     """Which collateral is allocated to which contract.
 
     An allocation pointing at a collateral record that does not exist makes LIC
@@ -226,14 +238,21 @@ def transform_allocation(raw: pd.DataFrame) -> pd.DataFrame:
     # to contract "CONTRACTID".
     from .lending import drop_repeated_headers
     raw = drop_repeated_headers(raw)
+    # The source writes 10.09 for ten per cent; LIC wants the fraction.
+    # Getting this wrong scales every collateral allocation by a hundred,
+    # which would show up as coverage far above 100% rather than as an error.
+    # R's writer detects the scale: it divides only when some value exceeds 1,
+    # so a file already in fractions passes through unchanged (and a percent
+    # file whose every allocation is at most 1% would too -- see
+    # INPUT_DATA_ISSUES.md).
+    pct = _num(at(raw, 3, "ALLOCATIONPERCENTAGE"))
+    if bool((pct > 1).any()):
+        pct = pct / 100.0
     return pd.DataFrame({
-        "ExtractDate": _fmt_date(at(raw, 0, "EXTRACTDA")),
+        "ExtractDate": _stamp(extract_date, at(raw, 0, "EXTRACTDA"), raw.index),
         "CollateralId": at(raw, 1, "COLLATERALID"),
         "ContractId": at(raw, 2, "CONTRACTID"),
-        # The source writes 10.09 for ten per cent; LIC wants the fraction.
-        # Getting this wrong scales every collateral allocation by a hundred,
-        # which would show up as coverage far above 100% rather than as an error.
-        "AllocationPercentage": _num(at(raw, 3, "ALLOCATIONPERCENTAGE")) / 100.0,
+        "AllocationPercentage": pct,
     })
 
 

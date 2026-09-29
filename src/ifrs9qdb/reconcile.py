@@ -261,7 +261,13 @@ def build_export(run, dest_zip, include_inputs: bool = False) -> dict:
             inp = next((run / n for n in ("input", "inputs", "Inputs")
                         if (run / n).is_dir()), None)
             if inp is None:
-                skipped.append("input/")
+                # R's .resolve_input_dir_for_run(): the directory the run read,
+                # from reports/input_source.yml, else the manifest.
+                src = _input_dir_for_run(run)
+                if src is not None:
+                    add_tree(zf, src, "inputs")
+                else:
+                    skipped.append("inputs/")
             else:
                 add_tree(zf, inp, "input")
 
@@ -275,9 +281,39 @@ def build_export(run, dest_zip, include_inputs: bool = False) -> dict:
         zf.writestr(f"{root}/README.txt",
                     _readme(run.name, contents, skipped, include_inputs))
 
+    from .audit_log import audit_event
+    audit_event({"event": "run_export", "run_id": run.name,
+                 "include_inputs": bool(include_inputs),
+                 "n_files": len(contents), "bytes": dest.stat().st_size})
     return {"zip": str(dest), "bytes": dest.stat().st_size,
             "files": len(contents), "skipped": skipped,
             "contents": [c["path"] for c in contents]}
+
+
+def _input_dir_for_run(run: Path) -> Path | None:
+    """Where a run's inputs were read from, if that folder still exists."""
+    import json as _json
+
+    import yaml as _yaml
+    src = run / "reports" / "input_source.yml"
+    if src.is_file():
+        try:
+            meta = _yaml.safe_load(src.read_text(encoding="utf-8")) or {}
+            p = (meta.get("details") or {}).get("path")
+            if p and Path(p).is_dir():
+                return Path(p)
+        except Exception:
+            pass
+    for cand in (run / "reports" / "manifest.json", run / "manifest.json"):
+        if cand.is_file():
+            try:
+                m = _json.loads(cand.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            p = m.get("input_dir") or (m.get("run") or {}).get("input_dir")
+            if p and Path(str(p)).is_dir():
+                return Path(str(p))
+    return None
 
 
 def _code_version_block(run: Path) -> str:

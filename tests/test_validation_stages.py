@@ -28,11 +28,16 @@ def static():
 
 class TestTheCatalogue:
     def test_the_run_suite_has_the_same_shape_as_the_r_report(self):
-        """R's own validation.md reads: Total checks: 114, INPUT (57 checks)."""
-        assert len(V.INPUT_STAGE) == 57
+        """R's validation.csv on a phased run: 147 checks -- INPUT 68,
+        TRANSFORM 28, DERIVED 29, READY 20, REPORT 2."""
+        from ifrs9qdb.validation.readiness import (READY_STAGE_VALIDATORS,
+                                                   REPORT_STAGE_VALIDATORS)
+        assert len(V.INPUT_STAGE) == 68
         assert len(V.TRANSFORM_STAGE) == 28
         assert len(V.DERIVED_STAGE) == 29
-        assert len(V.STAGE_VALIDATORS) == 114
+        assert len(V.STAGE_VALIDATORS) == 125
+        assert len(READY_STAGE_VALIDATORS) == 20
+        assert len(REPORT_STAGE_VALIDATORS) == 2
 
     def test_ids_are_unique(self):
         ids = [v.id for v in V.STAGE_VALIDATORS + V.PREFLIGHT_VALIDATORS]
@@ -41,9 +46,13 @@ class TestTheCatalogue:
     @pytest.mark.skipif(not R_IDS.is_file(), reason="R id list not bundled")
     def test_every_r_validator_id_exists_here(self):
         """Parity, by id. Suppressions key on these."""
+        from ifrs9qdb.validation.readiness import (READY_STAGE_VALIDATORS,
+                                                   REPORT_STAGE_VALIDATORS)
         r = {line.strip() for line in R_IDS.read_text().split() if line.strip()}
-        mine = {v.id for v in V.STAGE_VALIDATORS + V.PREFLIGHT_VALIDATORS}
+        mine = {v.id for v in V.STAGE_VALIDATORS + V.PREFLIGHT_VALIDATORS
+                + READY_STAGE_VALIDATORS + REPORT_STAGE_VALIDATORS}
         assert not (r - mine), f"missing from the port: {sorted(r - mine)}"
+        assert not (mine - r), f"not in R: {sorted(mine - r)}"
 
     def test_every_check_says_what_to_do_about_it(self):
         """A finding with no remediation gets ignored on the second quarter."""
@@ -56,10 +65,14 @@ class TestTheCatalogue:
             assert v.severity in ("ERROR", "WARN", "INFO")
 
     def test_a_missing_file_can_never_be_suppressed(self):
-        """Some findings are not negotiable."""
-        for v in V.STAGE_VALIDATORS:
-            if v.id.endswith("_present"):
-                assert not v.suppressible, v.id
+        """Some findings are not negotiable. (INPUT_<file>_present; a field
+        check such as INPUT_AccountMaster_eir_present is a data finding.)"""
+        import re
+        files = [v for v in V.STAGE_VALIDATORS
+                 if re.fullmatch(r"INPUT_[A-Za-z]+_present", v.id)]
+        assert len(files) == 12
+        for v in files:
+            assert not v.suppressible, v.id
 
 
 class TestTheChecksActuallyCatchThings:
@@ -101,23 +114,45 @@ class TestTheChecksActuallyCatchThings:
         bad = {i.id for i in res.issues if not i.passed}
         assert "INPUT_ACA_contract_fk" not in bad
 
+    # The TRANSFORM checks read R's cm_view: one row per CustomerMaster
+    # customer, with dpd_status, watchlist_status ("Watchlist" or "") and
+    # restructuring_final ("Restructured" or "").
     def test_a_watchlisted_stage_1_customer_is_caught(self):
-        view = pd.DataFrame({
-            "customer_id": ["a", "b"], "worst_dpd": [10, 10],
-            "is_watchlist": [True, False], "is_restructured": [False, False],
+        cm_view = pd.DataFrame({
+            "customer_id": ["a", "b"], "dpd_status": [10, 10],
+            "watchlist_status": ["Watchlist", ""],
+            "restructuring_final": ["", ""],
             "stage_final": ["Stage 1", "Stage 1"]})
-        res = self._run(V.TRANSFORM_STAGE, {"lending_view": view})
+        res = self._run(V.TRANSFORM_STAGE, {"cm_view": cm_view})
         bad = {i.id for i in res.issues if not i.passed}
         assert "TRANS_LENDPV_watchlist_implies_stage_2_or_3" in bad
 
     def test_dpd_over_90_not_stage_3_is_caught(self):
-        view = pd.DataFrame({
-            "customer_id": ["a"], "worst_dpd": [120],
-            "is_watchlist": [False], "is_restructured": [False],
+        cm_view = pd.DataFrame({
+            "customer_id": ["a"], "dpd_status": [120],
+            "watchlist_status": [""], "restructuring_final": [""],
             "stage_final": ["Stage 2"]})
-        res = self._run(V.TRANSFORM_STAGE, {"lending_view": view})
+        res = self._run(V.TRANSFORM_STAGE, {"cm_view": cm_view})
         bad = {i.id for i in res.issues if not i.passed}
         assert "TRANS_LENDPV_dpd_gt_90_implies_stage3" in bad
+
+    def test_a_contract_whose_customer_is_not_in_customermaster_is_caught(self):
+        """R failed three TRANSFORM checks here that the old port passed."""
+        trans_l = pd.DataFrame({
+            "contract_id": ["1", "2"], "customer_id": ["a", "z"],
+            "exposure_amount": [100.0, 50.0],
+            "rating_after_override": ["QDB 3", None],
+            "is_default_final": [0, None]})
+        cm_view = pd.DataFrame({
+            "customer_id": ["a"], "exposure_total": [100.0],
+            "dpd_status": [0], "watchlist_status": [""],
+            "restructuring_final": [""], "stage_final": ["Stage 1"]})
+        res = self._run(V.TRANSFORM_STAGE,
+                        {"trans_l": trans_l, "cm_view": cm_view})
+        bad = {i.id for i in res.issues if not i.passed}
+        assert {"TRANS_LEND_pass6_overrides_filled",
+                "TRANS_LENDPV_customer_count_matches_trans",
+                "TRANS_LENDPV_exposure_reconciles"} <= bad
 
     def test_weights_that_do_not_sum_to_one_are_caught(self):
         res = self._run(V.DERIVED_STAGE,

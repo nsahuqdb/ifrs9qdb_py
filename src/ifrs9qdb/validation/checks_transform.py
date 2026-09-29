@@ -1,628 +1,471 @@
-"""Transform-stage checks: the book after it has been shaped, before pricing.
+"""TRANSFORM stage: the book after it has been shaped, before pricing.
 
-This is where the staging rule and the rating resolution can be checked as
-STATEMENTS -- a customer over 90 days past due is Stage 3, a watchlisted one is
-not Stage 1 -- rather than by reading the code that produced them.
+A literal port of R/validators_transform.R -- the same 28 checks, in R's
+order, reading the same columns of the same intermediates (built in R's shape
+by ``r_frames``), with the same messages. The previous Python checks read
+Python's own frames with fallbacks and passed wherever a column was missing;
+on a book where a contract's customer is absent from CustomerMaster they
+passed three checks R fails.
 
-The checks accept either the R column names or this package's, because the two
-pipelines name the same quantity differently and a check should not depend on
-which produced the frame.
-
-Ids match the R package exactly.
+Args, as R names them: ``trans_l``, ``cm_view``, ``trans_i``, ``inv_view``,
+``static``.
 """
 from __future__ import annotations
 
-import numpy as np
+import math
+
 import pandas as pd
 
-from ..ids import as_id
-from ._helpers import blank_detail, col, dup_detail, fail, ok
+from ._helpers import col, dup_detail, text
+from ._texts import STAGE_TEXTS
 from .framework import Severity, Validator
 
-__all__ = ["TRANSFORM_STAGE_VALIDATORS"]
-
-_STAGES = {"Stage 1", "Stage 2", "Stage 3"}
+__all__ = ["TRANSFORM_STAGE_VALIDATORS", "r_format"]
 
 
-def _empty(df) -> bool:
-    return df is None or len(df) == 0
+def r_format(x) -> str:
+    """R's format() of a number: 7 significant digits, fixed unless
+    scientific is narrower, trailing zeros dropped."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    if math.isnan(x):
+        return "NA"
+    if x == 0:
+        return "0"
+    e = math.floor(math.log10(abs(x)))
+    decimals = max(0, 6 - e)
+    fixed = f"{x:.{decimals}f}"
+    if "." in fixed:
+        fixed = fixed.rstrip("0").rstrip(".")
+    mant, exp = f"{x:.6e}".split("e")
+    if "." in mant:
+        mant = mant.rstrip("0").rstrip(".")
+    sci = f"{mant}e{int(exp):+03d}"
+    return fixed if len(fixed) <= len(sci) else sci
 
 
-def _exposure(df):
-    c = col(df, "exposure_amount", "exposure", "on_balance", "ONBALANCE")
-    return None if c is None else pd.to_numeric(c, errors="coerce")
+def _ok():
+    return {"passed": True}
 
 
-def _hierarchy(df, static, rating_col, rating_type):
-    """The rating's position on its scale, from the frame or from the static."""
-    c = col(df, "rating_hierarchy", "hierarchy", "bucket")
-    if c is not None:
-        return pd.to_numeric(c, errors="coerce")
-    if static is None:
+def _bad(message, count=0):
+    return {"passed": False, "count": int(count), "detail": message}
+
+
+def _c(df, name):
+    """R's .get_col(): the column, or None when the frame or column is absent."""
+    if df is None or name not in getattr(df, "columns", []):
         return None
-    scale = static.get("master_rating_scale")
-    r = col(df, *rating_col)
-    if scale is None or r is None:
-        return None
-    rt = col(scale, "rating_type")
-    sub = scale
-    if rt is not None:
-        sub = scale[pd.Series(rt).astype(str).str.lower().str.startswith(
-            rating_type[:3])]
-    names = col(sub, "rating")
-    hier = col(sub, "hierarchy")
-    if names is None or hier is None:
-        return None
-    lut = dict(zip(pd.Series(names).astype(str).str.strip(),
-                   pd.to_numeric(hier, errors="coerce")))
-    return pd.Series(r).astype(str).str.strip().map(lut)
+    return df[name]
 
 
-def _scale_names(static, rating_type: str) -> set[str]:
-    if static is None:
+def _na(s) -> pd.Series:
+    s = pd.Series(s)
+    return s.isna() | s.astype(object).map(lambda v: v is None)
+
+
+# ---------------------------------------------------------------- lending ---
+def _lend_contract_unique(trans_l=None):
+    ids = _c(trans_l, "contract_id")
+    if ids is None:
+        return _ok()
+    ids = pd.Series(ids)
+    dup = ids[ids.duplicated()]
+    if dup.empty:
+        return _ok()
+    return _bad(f"{len(dup)} duplicate contract_id (e.g. "
+                f"{', '.join(map(str, pd.unique(dup)[:5]))})", len(dup))
+
+
+def _lend_customer_populated(trans_l=None):
+    ids = _c(trans_l, "customer_id")
+    if ids is None:
+        return _ok()
+    n = int((text(ids) == "").sum())
+    return _ok() if n == 0 else _bad(f"{n} contracts have NA/blank customer_id", n)
+
+
+def _lend_rating_populated(trans_l=None):
+    r = _c(trans_l, "rating")
+    if r is None:
+        return _ok()
+    n = int(_na(r).sum())
+    return _ok() if n == 0 else _bad(f"{n} contracts have NA rating", n)
+
+
+def _scale_set(static, rating_type):
+    ms = static.get("master_rating_scale") if static is not None else None
+    if ms is None:
         return set()
-    scale = static.get("master_rating_scale")
-    if scale is None or len(scale) == 0:
-        return set()
-    rt = col(scale, "rating_type")
-    sub = scale
-    if rt is not None:
-        sub = scale[pd.Series(rt).astype(str).str.lower().str.startswith(
-            rating_type[:3])]
-    out = set(pd.Series(col(sub, "rating")).astype(str).str.strip())
-    ext = col(sub, "external_equivalent")
-    if ext is not None:
-        out |= set(pd.Series(ext).astype(str).str.strip())
-    return {v for v in out if v and v.lower() != "nan"}
+    return set(text(col(ms, "rating"))[text(col(ms, "rating_type")) == rating_type])
 
 
-# ------------------------------------------------------- trans_lending -----
-def _v_lend_contract_unique(trans_lending=None):
-    if _empty(trans_lending):
-        return ok()
-    return dup_detail(col(trans_lending, "contract_id", "CONTRACTID"), "contract_id")
+def _rating_in_scale(series, static, rating_type):
+    if series is None:
+        return _ok()
+    ok_set = _scale_set(static, rating_type)
+    vals = pd.Series(series)[~_na(series)]
+    bad = [v for v in pd.unique(vals) if v not in ok_set]
+    return _ok() if not bad else _bad("Unknown ratings: " + ", ".join(map(str, bad)),
+                                      len(bad))
 
 
-def _v_lend_customer_populated(trans_lending=None):
-    if _empty(trans_lending):
-        return ok()
-    return blank_detail(col(trans_lending, "customer_id", "CUSTOMERID"),
-                        "customer_id")
-
-
-def _v_lend_rating_populated(trans_lending=None):
-    if _empty(trans_lending):
-        return ok()
-    c = col(trans_lending, "rating_worst", "rating_after_override", "rating")
-    if c is None:
-        return fail(0, "no rating column on the lending view")
-    return blank_detail(c, "rating")
-
-
-def _v_lend_rating_in_scale(trans_lending=None, static=None):
-    if _empty(trans_lending) or static is None:
-        return ok()
-    known = _scale_names(static, "internal")
-    if not known:
-        return ok()
-    c = col(trans_lending, "rating_worst", "rating_after_override", "rating")
-    if c is None:
-        return ok()
-    s = pd.Series(c).astype(str).str.strip()
-    bad = (s != "") & ~s.isin(known | {"nan"})
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} contract(s) carry a rating outside the internal scale",
-                examples=sorted(set(s[bad]))[:10])
-
-
-def _v_lend_hierarchy_range(trans_lending=None, static=None):
-    if _empty(trans_lending):
-        return ok()
-    h = _hierarchy(trans_lending, static,
-                   ("rating_worst", "rating_after_override", "rating"), "internal")
+def _hierarchy_range(h, noun):
     if h is None:
-        return ok()
-    bad = h.notna() & ((h < 1) | (h > 21))
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} contract(s) have a rating hierarchy outside 1..21",
-                examples=[str(v) for v in h[bad].unique()[:10]])
+        return _ok()
+    h = pd.to_numeric(h, errors="coerce")
+    n = int((h.notna() & ((h < 1) | (h > 21))).sum())
+    return _ok() if n == 0 else _bad(f"{n} {noun} have hierarchy outside 1..21", n)
 
 
-def _v_lend_exposure_nonneg(trans_lending=None):
-    if _empty(trans_lending):
-        return ok()
-    x = _exposure(trans_lending)
-    if x is None:
-        return ok()
-    bad = x.isna() | (x < 0)
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} contract(s) have a missing or negative exposure")
+def _exposure_nonneg(e):
+    if e is None:
+        return _ok()
+    e = pd.to_numeric(e, errors="coerce")
+    n_na, n_neg = int(e.isna().sum()), int((e < 0).sum())
+    if n_na == 0 and n_neg == 0:
+        return _ok()
+    return _bad(f"{n_na} NA, {n_neg} negative", n_na + n_neg)
 
 
-def _v_lend_total_exposure_positive(trans_lending=None):
-    if _empty(trans_lending):
-        return ok()
-    x = _exposure(trans_lending)
-    if x is None:
-        return ok()
-    total = float(x.fillna(0).sum())
-    if total > 0:
-        return ok()
-    return fail(0, f"total lending exposure is {total:,.2f}; the book priced to "
-                   "nothing, which is almost always a failed join rather than "
-                   "an empty book")
+def _total_exposure_positive(e):
+    if e is None:
+        return _ok()
+    tot = float(pd.to_numeric(e, errors="coerce").sum())
+    return _ok() if tot > 0 else _bad(f"Total exposure = {r_format(tot)}")
 
 
-def _v_lend_dpd_nonneg(trans_lending=None):
-    if _empty(trans_lending):
-        return ok()
-    c = col(trans_lending, "past_dues_days", "past_due_days", "dpd")
-    if c is None:
-        return ok()
-    x = pd.to_numeric(c, errors="coerce")
-    bad = x.notna() & (x < 0)
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} contract(s) have negative days past due")
+def _lend_dpd_nonneg(trans_l=None):
+    d = _c(trans_l, "past_dues_days")
+    if d is None:
+        return _ok()
+    n = int((pd.to_numeric(d, errors="coerce") < 0).sum())
+    return _ok() if n == 0 else _bad(f"{n} contracts have negative DPD", n)
 
 
-def _v_lend_product_type_known(trans_lending=None, static=None):
-    if _empty(trans_lending) or static is None:
-        return ok()
-    m = static.get("product_portfolio_mapping")
+def _product_types(static):
+    m = static.get("product_portfolio_mapping") if static is not None else None
     if m is None or len(m) == 0:
-        return ok()
-    known = set(pd.Series(col(m, "product_type", "account_type")
-                          ).astype(str).str.strip())
-    c = col(trans_lending, "account_type", "product_type")
-    if c is None:
-        return ok()
-    s = pd.Series(c).astype(str).str.strip()
-    bad = {v for v in s.unique() if v and v.lower() != "nan"} - known
-    if not bad:
-        return ok()
-    return fail(int(s.isin(bad).sum()),
-                f"{len(bad)} product type(s) are not in the mapping",
-                examples=sorted(bad)[:10])
+        return None
+    return set(text(col(m, "product_type")))
 
 
-def _v_lend_portfolio_complete(trans_lending=None):
-    if _empty(trans_lending):
-        return ok()
-    c = col(trans_lending, "portfolio_code", "portfolio")
-    if c is None:
-        return fail(0, "no portfolio column on the lending view")
-    return blank_detail(c, "portfolio_code")
+def _lend_product_type_known(trans_l=None, static=None):
+    a = _c(trans_l, "account_type")
+    if a is None:
+        return _ok()
+    known = _product_types(static)
+    if known is None:
+        return _bad("product_portfolio_mapping is empty")
+    obs = text(a)
+    bad = [v for v in pd.unique(obs[obs != ""]) if v not in known]
+    return _ok() if not bad else _bad(
+        f"{len(bad)} product types not in product_portfolio_mapping: "
+        + ", ".join(bad), len(bad))
 
 
-def _v_lend_overrides_filled(trans_lending=None):
-    if _empty(trans_lending):
-        return ok()
+def _lend_portfolio_complete(trans_l=None, static=None):
+    a = _c(trans_l, "account_type")
+    known = _product_types(static)
+    if a is None or known is None:
+        return _ok()
+    obs = text(a)
+    orphan = (obs != "") & ~obs.isin(known)
+    n = int(orphan.sum())
+    if n == 0:
+        return _ok()
+    counts = obs[orphan].value_counts().sort_index()
+    return _bad(f"{n} contracts have product types not mapped to a portfolio: "
+                + ", ".join(f"{k} ({int(v)})" for k, v in counts.items()), n)
+
+
+def _lend_pass6(trans_l=None):
+    r = _c(trans_l, "rating_after_override")
+    d = _c(trans_l, "is_default_final")
     missing = []
-    for name in (("rating_worst", "rating_after_override"),
-                 ("payment_type",), ("portfolio_code", "portfolio")):
-        if col(trans_lending, *name) is None:
-            missing.append(name[0])
-    if not missing:
-        return ok()
-    return fail(len(missing),
-                "the lending view is missing back-filled column(s): "
-                + ", ".join(missing))
+    if r is None or bool(_na(r).any()):
+        missing.append("rating_after_override")
+    if d is None or bool(_na(d).any()):
+        missing.append("is_default_final")
+    return _ok() if not missing else _bad("Unfilled: " + ", ".join(missing))
 
 
-# ----------------------------------------------- lending portfolio view ----
-def _v_pv_customer_unique(lending_view=None):
-    if _empty(lending_view):
-        return ok()
-    return dup_detail(col(lending_view, "customer_id", "CUSTOMERID"), "customer_id")
+# ------------------------------------------------------- lending view (cm) ---
+def _pv_customer_unique(cm_view=None):
+    ids = _c(cm_view, "customer_id")
+    if ids is None:
+        return _ok()
+    n = int(pd.Series(ids).duplicated().sum())
+    return _ok() if n == 0 else _bad(f"{n} duplicate customer_id", n)
 
 
-def _v_pv_stage_in_set(lending_view=None):
-    if _empty(lending_view):
-        return ok()
-    c = col(lending_view, "stage_final", "stage")
-    if c is None:
-        return ok()
-    s = pd.Series(c).astype(str).str.strip()
-    bad = ~s.isin(_STAGES)
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} customer(s) have a stage outside {sorted(_STAGES)}",
-                examples=sorted(set(s[bad]))[:10])
+def _stage_in_set(s):
+    if s is None:
+        return _ok()
+    vals = pd.Series(s)[~_na(s)]
+    bad = [v for v in pd.unique(vals) if v not in ("Stage 1", "Stage 2", "Stage 3")]
+    return _ok() if not bad else _bad("Unknown stages: " + ", ".join(map(str, bad)),
+                                      len(bad))
 
 
-def _v_pv_dpd90_stage3(lending_view=None):
-    if _empty(lending_view):
-        return ok()
-    d = col(lending_view, "worst_dpd", "past_dues_worst", "dpd")
-    s = col(lending_view, "stage_final", "stage")
-    if d is None or s is None:
-        return ok()
-    dpd = pd.to_numeric(d, errors="coerce")
-    stage = pd.Series(s).astype(str).str.strip()
-    bad = (dpd > 90) & (stage != "Stage 3")
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} customer(s) over 90 days past due are not Stage 3",
-                examples=list(as_id(col(lending_view, "customer_id"))[bad][:10]))
+def _pv_dpd90(cm_view=None):
+    s, d = _c(cm_view, "stage_final"), _c(cm_view, "dpd_status")
+    if s is None or d is None:
+        return _ok()
+    d = pd.to_numeric(d, errors="coerce")
+    n = int((d.notna() & (d > 90) & (pd.Series(s) != "Stage 3")).sum())
+    return _ok() if n == 0 else _bad(
+        f"{n} customers have DPD>90 but stage != Stage 3", n)
 
 
-def _v_pv_clean_low_dpd_stage1(lending_view=None, dpd_threshold: float = 60):
-    if _empty(lending_view):
-        return ok()
-    d = pd.to_numeric(col(lending_view, "worst_dpd", "past_dues_worst", "dpd"),
-                      errors="coerce")
-    s = pd.Series(col(lending_view, "stage_final", "stage")).astype(str).str.strip()
-    w = col(lending_view, "is_watchlist", "watchlist")
-    r = col(lending_view, "is_restructured", "restructured", "is_local1")
-    if d is None or s is None:
-        return ok()
-    watch = pd.Series(w).fillna(False).astype(bool) if w is not None \
-        else pd.Series(False, index=s.index)
-    restr = pd.Series(r).fillna(False).astype(bool) if r is not None \
-        else pd.Series(False, index=s.index)
-    clean = (d <= dpd_threshold) & ~watch & ~restr
-    bad = clean & (s != "Stage 1")
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} clean, low-DPD customer(s) are staged above Stage 1",
-                examples=list(as_id(col(lending_view, "customer_id"))[bad][:10]))
+def _threshold(static, default=60.0):
+    try:
+        th = static.get("staging_thresholds")
+        k = text(col(th, "key"))
+        v = pd.to_numeric(col(th, "value")[k == "dpd_stage2_threshold_days"],
+                          errors="coerce").dropna()
+        return float(v.iloc[0]) if len(v) else default
+    except Exception:
+        return default
 
 
-def _v_pv_watchlist_stage23(lending_view=None):
-    if _empty(lending_view):
-        return ok()
-    w = col(lending_view, "is_watchlist", "watchlist")
-    s = col(lending_view, "stage_final", "stage")
-    if w is None or s is None:
-        return ok()
-    watch = pd.Series(w).fillna(False).astype(bool)
-    stage = pd.Series(s).astype(str).str.strip()
-    bad = watch & ~stage.isin({"Stage 2", "Stage 3"})
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} watchlisted customer(s) are still Stage 1",
-                examples=list(as_id(col(lending_view, "customer_id"))[bad][:10]))
+def _blank(x) -> pd.Series:
+    x = pd.Series(x)
+    return _na(x) | (x.astype(object) == "")
 
 
-def _v_pv_restructured_stage23(lending_view=None):
-    if _empty(lending_view):
-        return ok()
-    r = col(lending_view, "is_restructured", "restructured", "is_local1")
-    s = col(lending_view, "stage_final", "stage")
-    if r is None or s is None:
-        return ok()
-    restr = pd.Series(r).fillna(False).astype(bool)
-    stage = pd.Series(s).astype(str).str.strip()
-    bad = restr & ~stage.isin({"Stage 2", "Stage 3"})
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} restructured customer(s) are still Stage 1",
-                examples=list(as_id(col(lending_view, "customer_id"))[bad][:10]))
+def _pv_clean_low_dpd(cm_view=None, static=None):
+    s, d = _c(cm_view, "stage_final"), _c(cm_view, "dpd_status")
+    r, w = _c(cm_view, "restructuring_final"), _c(cm_view, "watchlist_status")
+    if s is None or d is None or r is None or w is None:
+        return _ok()
+    d = pd.to_numeric(d, errors="coerce")
+    clean = d.notna() & (d <= _threshold(static)) & _blank(r) & _blank(w)
+    n = int((clean & (pd.Series(s) != "Stage 1")).sum())
+    return _ok() if n == 0 else _bad(f"{n} clean low-DPD customers not in Stage 1", n)
 
 
-def _v_pv_customer_count(lending_view=None, trans_lending=None):
-    if _empty(lending_view) or _empty(trans_lending):
-        return ok()
-    a = len(lending_view)
-    b = as_id(col(trans_lending, "customer_id")).nunique()
-    if a == b:
-        return ok()
-    return fail(abs(a - b),
-                f"the customer view has {a:,} rows against {b:,} distinct "
-                "customers on the contracts")
+def _pv_watchlist(cm_view=None):
+    s, f = _c(cm_view, "stage_final"), _c(cm_view, "watchlist_status")
+    if s is None or f is None:
+        return _ok()
+    n = int(((pd.Series(f) == "Watchlist").fillna(False)
+             & ~pd.Series(s).isin(["Stage 2", "Stage 3"])).sum())
+    return _ok() if n == 0 else _bad(f"{n} watchlist customers not in Stage 2/3", n)
 
 
-def _v_pv_exposure_reconciles(lending_view=None, trans_lending=None):
-    if _empty(lending_view) or _empty(trans_lending):
-        return ok()
-    v = col(lending_view, "exposure_total", "exposure", "on_balance")
-    t = _exposure(trans_lending)
-    if v is None or t is None:
-        return ok()
-    a = float(pd.to_numeric(v, errors="coerce").fillna(0).sum())
-    b = float(t.fillna(0).sum())
-    if abs(a - b) <= max(1.0, 1e-6 * max(abs(a), abs(b))):
-        return ok()
-    return fail(1, f"customer-level exposure {a:,.2f} does not reconcile to "
-                   f"contract-level {b:,.2f} (difference {a - b:,.2f})")
+def _pv_restructured(cm_view=None):
+    s, f = _c(cm_view, "stage_final"), _c(cm_view, "restructuring_final")
+    if s is None or f is None:
+        return _ok()
+    n = int(((pd.Series(f) == "Restructured").fillna(False)
+             & ~pd.Series(s).isin(["Stage 2", "Stage 3"])).sum())
+    return _ok() if n == 0 else _bad(f"{n} restructured customers not in Stage 2/3", n)
 
 
-# --------------------------------------------------- trans_investments -----
-def _v_inv_account_unique(trans_investments=None):
-    if _empty(trans_investments):
-        return ok()
-    return dup_detail(col(trans_investments, "account_id", "contract_id",
-                          "CONTRACTID"), "account_id")
+def _pv_customer_count(trans_l=None, cm_view=None):
+    if trans_l is None or cm_view is None:
+        return _ok()
+    n_cm = len(cm_view)
+    n_trans = int(pd.Series(trans_l["customer_id"]).nunique(dropna=False))
+    return _ok() if n_cm == n_trans else _bad(
+        f"cm_view={n_cm}, distinct trans customers={n_trans}")
 
 
-def _v_inv_rating_populated(trans_investments=None):
-    if _empty(trans_investments):
-        return ok()
-    c = col(trans_investments, "rating_current", "rating")
-    if c is None:
-        return ok()
-    return blank_detail(c, "rating_current")
+def _pv_exposure_reconciles(trans_l=None, cm_view=None):
+    if trans_l is None or cm_view is None:
+        return _ok()
+    a = float(pd.to_numeric(_c(cm_view, "exposure_total"), errors="coerce").sum())
+    b = float(pd.to_numeric(_c(trans_l, "exposure_amount"), errors="coerce").sum())
+    tol = max(1e-2, abs(b) * 1e-9)
+    if abs(a - b) <= tol:
+        return _ok()
+    return _bad(f"cm_view sum={r_format(a)}, trans sum={r_format(b)}, "
+                f"diff={r_format(a - b)}")
 
 
-def _v_inv_rating_in_scale(trans_investments=None, static=None):
-    if _empty(trans_investments) or static is None:
-        return ok()
-    known = _scale_names(static, "external")
-    if not known:
-        return ok()
-    c = col(trans_investments, "rating_current", "rating")
-    if c is None:
-        return ok()
-    s = pd.Series(c).astype(str).str.strip()
-    bad = (s != "") & ~s.isin(known | {"nan"})
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} investment(s) carry a grade outside the external scale",
-                examples=sorted(set(s[bad]))[:10])
+# ------------------------------------------------------------ investments ---
+def _inv_account_unique(trans_i=None):
+    ids = _c(trans_i, "account_id")
+    if ids is None:
+        return _ok()
+    return dup_detail(ids, "account_id")
 
 
-def _v_inv_hierarchy_range(trans_investments=None, static=None):
-    if _empty(trans_investments):
-        return ok()
-    h = _hierarchy(trans_investments, static, ("rating_current", "rating"),
-                   "external")
-    if h is None:
-        return ok()
-    bad = h.notna() & ((h < 1) | (h > 21))
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} investment(s) have a rating hierarchy outside 1..21")
+def _inv_rating_populated(trans_i=None):
+    r = _c(trans_i, "rating_current")
+    if r is None:
+        return _ok()
+    n = int(_na(r).sum())
+    return _ok() if n == 0 else _bad(f"{n} investments have NA rating_current", n)
 
 
-def _v_inv_exposure_nonneg(trans_investments=None):
-    if _empty(trans_investments):
-        return ok()
-    x = _exposure(trans_investments)
-    if x is None:
-        return ok()
-    bad = x.isna() | (x < 0)
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} investment(s) have a missing or negative exposure")
+def _invpv_count(trans_i=None, inv_view=None):
+    if trans_i is None or inv_view is None:
+        return _ok()
+    return _ok() if len(inv_view) == len(trans_i) else _bad(
+        f"inv_view={len(inv_view)}, trans_i={len(trans_i)}")
 
 
-def _v_inv_total_exposure_positive(trans_investments=None):
-    if _empty(trans_investments):
-        return ok()
-    x = _exposure(trans_investments)
-    if x is None:
-        return ok()
-    total = float(x.fillna(0).sum())
-    if total > 0:
-        return ok()
-    return fail(0, f"total investment exposure is {total:,.2f}")
+def _invpv_top_tier(trans_i=None, inv_view=None):
+    h, s = _c(trans_i, "rating_hierarchy"), _c(inv_view, "stage_final")
+    if h is None or s is None or len(inv_view) != len(trans_i):
+        return _ok()
+    h = pd.to_numeric(h, errors="coerce").reset_index(drop=True)
+    s = pd.Series(s).reset_index(drop=True)
+    n = int((h.notna() & (h <= 4) & (s != "Stage 1")).sum())
+    return _ok() if n == 0 else _bad(f"{n} top-tier investments not in Stage 1", n)
 
 
-def _v_invpv_count(investment_view=None, trans_investments=None):
-    if _empty(investment_view) or _empty(trans_investments):
-        return ok()
-    a, b = len(investment_view), len(trans_investments)
-    if a == b:
-        return ok()
-    return fail(abs(a - b), f"the investment view has {a:,} rows against "
-                            f"{b:,} transformed investments")
-
-
-def _v_invpv_stage_in_set(investment_view=None):
-    if _empty(investment_view):
-        return ok()
-    c = col(investment_view, "stage_final", "stage")
-    if c is None:
-        return ok()
-    s = pd.Series(c).astype(str).str.strip()
-    bad = ~s.isin(_STAGES)
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} investment(s) have a stage outside {sorted(_STAGES)}",
-                examples=sorted(set(s[bad]))[:10])
-
-
-def _v_invpv_top_tier_stage1(investment_view=None, static=None):
-    if _empty(investment_view):
-        return ok()
-    h = _hierarchy(investment_view, static, ("rating_current", "rating"),
-                   "external")
-    s = col(investment_view, "stage_final", "stage")
-    if h is None or s is None:
-        return ok()
-    stage = pd.Series(s).astype(str).str.strip()
-    bad = h.notna() & (h <= 4) & (stage != "Stage 1")
-    n = int(bad.sum())
-    if n == 0:
-        return ok()
-    return fail(n, f"{n} top-tier investment(s) (hierarchy <= 4) are staged "
-                   "above Stage 1")
-
-
-def _v(id, severity, description, fn, context, rationale, remediation):
+def _v(id, severity, description, fn, context, rationale="", remediation=""):
+    why, fix = STAGE_TEXTS.get(id, ("", ""))
     return Validator(id=id, severity=severity, description=description, fn=fn,
-                     context=context, rationale=rationale,
-                     remediation=remediation, tags=("transform",))
+                     context=context, rationale=rationale or why,
+                     remediation=remediation or fix, tags=("transform",))
+
+
+def _lend_rating_scale(trans_l=None, static=None):
+    return _rating_in_scale(_c(trans_l, "rating"), static, "Internal")
+
+
+def _lend_hierarchy(trans_l=None):
+    return _hierarchy_range(_c(trans_l, "rating_hierarchy"), "contracts")
+
+
+def _lend_exposure(trans_l=None):
+    return _exposure_nonneg(_c(trans_l, "exposure_amount"))
+
+
+def _lend_total(trans_l=None):
+    return _total_exposure_positive(_c(trans_l, "exposure_amount"))
+
+
+def _pv_stage(cm_view=None):
+    return _stage_in_set(_c(cm_view, "stage_final"))
+
+
+def _inv_rating_scale(trans_i=None, static=None):
+    return _rating_in_scale(_c(trans_i, "rating_current"), static, "External")
+
+
+def _inv_hierarchy(trans_i=None):
+    return _hierarchy_range(_c(trans_i, "rating_hierarchy"), "investments")
+
+
+def _inv_exposure(trans_i=None):
+    return _exposure_nonneg(_c(trans_i, "exposure_amount"))
+
+
+def _inv_total(trans_i=None):
+    return _total_exposure_positive(_c(trans_i, "exposure_amount"))
+
+
+def _invpv_stage(inv_view=None):
+    return _stage_in_set(_c(inv_view, "stage_final"))
 
 
 TRANSFORM_STAGE_VALIDATORS: list[Validator] = [
     _v("TRANS_LEND_contract_id_unique", Severity.ERROR,
-       "Every contract_id in trans_lending is unique", _v_lend_contract_unique,
-       "trans_lending",
-       "A duplicate after the id transformation means two source contracts "
-       "collapsed onto one id, which double-counts exposure.",
-       "Check apply_id_substitutions against the source ids."),
+       "Every contract_id in trans_lending is unique",
+       _lend_contract_unique, "trans_lending",
+       "A contract that survives the transformation twice is priced twice."),
     _v("TRANS_LEND_customer_id_populated", Severity.ERROR,
-       "Every contract has a non-NA customer_id", _v_lend_customer_populated,
-       "trans_lending",
-       "The rating and the staging both come from the customer. A contract "
-       "with no customer gets neither.",
-       "Check the customer join in transform_lending()."),
+       "Every contract has a non-NA customer_id",
+       _lend_customer_populated, "trans_lending",
+       "Rating, staging and contagion are all customer attributes."),
     _v("TRANS_LEND_rating_populated", Severity.ERROR,
-       "Every contract has a rating after the customer back-fill",
-       _v_lend_rating_populated, "trans_lending",
-       "The lending rating is a CUSTOMER attribute and is not on the account "
-       "rows. If the join fails every rating is blank, no bucket resolves, and "
-       "the run prices almost nothing while completing normally.",
-       "Check that CustomerMaster was read and the ids join."),
+       "Every contract has a non-NA rating after Pass 6 back-fill",
+       _lend_rating_populated, "trans_lending",
+       "A contract with no rating resolves no PD bucket."),
     _v("TRANS_LEND_rating_in_internal_scale", Severity.ERROR,
        "Every rating is in the Internal portion of master_rating_scale",
-       _v_lend_rating_in_scale, "trans_lending",
-       "A grade off the scale resolves to no bucket.",
-       "Add the grade to master_rating_scale.csv or correct it at source."),
+       _lend_rating_scale, "trans_lending",
+       "A rating outside the internal scale has no hierarchy and no PD curve."),
     _v("TRANS_LEND_hierarchy_in_range", Severity.ERROR,
-       "rating_hierarchy is in 1..21 for every contract", _v_lend_hierarchy_range,
-       "trans_lending",
-       "The hierarchy is the PD bucket key. Outside 1..21 there is no curve.",
-       "Check master_rating_scale.csv for a bad hierarchy value."),
+       "rating_hierarchy is in 1..21 for every contract",
+       _lend_hierarchy, "trans_lending"),
     _v("TRANS_LEND_exposure_nonneg", Severity.WARN,
-       "exposure_amount is present and >= 0 for every contract",
-       _v_lend_exposure_nonneg, "trans_lending",
-       "A missing exposure prices to zero; a negative one gives a negative "
-       "provision.",
-       "Trace the contract back to ONBALANCE in the extract."),
+       "exposure_amount is non-NA and >= 0 for every contract",
+       _lend_exposure, "trans_lending",
+       "A blank balance is carried as 0 on the transformation; a negative one "
+       "produces a negative provision."),
     _v("TRANS_LEND_total_exposure_positive", Severity.ERROR,
-       "Total lending exposure > 0", _v_lend_total_exposure_positive,
-       "trans_lending",
-       "A zero total is the signature of a failed join, not of an empty book.",
-       "Check the account extract and the customer join."),
+       "Total lending exposure > 0",
+       _lend_total, "trans_lending"),
     _v("TRANS_LEND_dpd_nonneg", Severity.WARN,
-       "past_dues_days >= 0 for every contract", _v_lend_dpd_nonneg,
-       "trans_lending",
-       "Negative days past due is a data-entry artefact and distorts staging.",
-       "Correct at source, or suppress with a reason if legacy."),
+       "past_dues_days >= 0 for every contract",
+       _lend_dpd_nonneg, "trans_lending"),
     _v("TRANS_LEND_product_type_known", Severity.INFO,
-       "account_type is in product_portfolio_mapping", _v_lend_product_type_known,
-       "trans_lending",
-       "An unmapped product falls to the default portfolio, which may not be "
-       "the intended one.",
-       "Extend product_portfolio_mapping.csv."),
+       "account_type (product type) is in product_portfolio_mapping",
+       _lend_product_type_known, "trans_lending",
+       "When a product type is missing from the mapping, contracts of that type "
+       "fall back to the default 'Business Finance' portfolio.",
+       "Add the missing product types to product_portfolio_mapping.csv, or "
+       "confirm the fallback is intended and suppress this validator."),
     _v("TRANS_LEND_portfolio_mapping_complete", Severity.WARN,
-       "Every contract resolves to a portfolio", _v_lend_portfolio_complete,
-       "trans_lending",
-       "The PD curves are keyed on the six real portfolios. A blank portfolio "
-       "resolves to no curve.",
-       "Extend product_portfolio_mapping.csv."),
+       "Every contract's account_type maps to a portfolio (no orphans)",
+       _lend_portfolio_complete, "trans_lending",
+       "Contracts of an unmapped product type fall through to the default "
+       "'Business Finance' bucket and are mis-bucketed in AccountMaster_1.csv.",
+       "Update product_portfolio_mapping.csv to cover every observed type."),
     _v("TRANS_LEND_pass6_overrides_filled", Severity.ERROR,
-       "The back-filled columns are present on the lending view",
-       _v_lend_overrides_filled, "trans_lending",
-       "The worst rating, the payment type and the portfolio are all derived "
-       "rather than copied. A missing one silently changes every curve.",
-       "Check transform_lending() completed its derivation passes."),
-
+       "Pass 6 back-fills (rating_after_override, is_default_final) populated",
+       _lend_pass6, "trans_lending",
+       "The back-fill comes from the customer view, which is keyed on "
+       "CustomerMaster: a contract whose customer is missing there has none."),
     _v("TRANS_LENDPV_customer_id_unique", Severity.ERROR,
-       "Every customer_id in the lending portfolio view is unique",
-       _v_pv_customer_unique, "lending_portfolio_view",
-       "The view is one row per customer. A duplicate means the grouping "
-       "failed and the staging flags are ambiguous.",
-       "Check the groupby key in derive_customer_flags()."),
+       "Every customer_id in lending portfolio view is unique",
+       _pv_customer_unique, "lending_portfolio_view"),
     _v("TRANS_LENDPV_stage_in_set", Severity.ERROR,
-       "stage_final is in {Stage 1, Stage 2, Stage 3}", _v_pv_stage_in_set,
-       "lending_portfolio_view",
-       "Anything else is not a stage LIC will accept.",
-       "Check apply_staging_rule()."),
+       "stage_final is in {Stage 1, Stage 2, Stage 3}",
+       _pv_stage, "lending_portfolio_view"),
     _v("TRANS_LENDPV_dpd_gt_90_implies_stage3", Severity.ERROR,
-       "DPD > 90 implies stage_final = Stage 3", _v_pv_dpd90_stage3,
-       "lending_portfolio_view",
-       "This is the first rule in the staging order, and it is absolute: a "
-       "defaulted customer cannot be pulled back to Stage 2 by also being "
-       "watchlisted.",
-       "Check the order of the conditions in apply_staging_rule()."),
+       "DPD > 90 implies stage_final = Stage 3",
+       _pv_dpd90, "lending_portfolio_view"),
     _v("TRANS_LENDPV_clean_low_dpd_stage1", Severity.WARN,
-       "Clean, low-DPD customers are Stage 1", _v_pv_clean_low_dpd_stage1,
-       "lending_portfolio_view",
-       "A customer with no trigger at all should not be provisioned at "
-       "lifetime. Rows here usually mean a flag is being read from the wrong "
-       "column.",
-       "Check the watchlist and restructuring joins."),
+       "Clean low-DPD customers (DPD<=60, no watchlist, not restructured) -> Stage 1",
+       _pv_clean_low_dpd, "lending_portfolio_view"),
     _v("TRANS_LENDPV_watchlist_implies_stage_2_or_3", Severity.ERROR,
-       "A watchlisted customer is Stage 2 or 3", _v_pv_watchlist_stage23,
-       "lending_portfolio_view",
-       "Watchlist is a significant-increase trigger by policy.",
-       "Check the watchlist flag reaches the staging rule."),
+       "watchlist_status='Watchlist' implies stage in {Stage 2, Stage 3}",
+       _pv_watchlist, "lending_portfolio_view"),
     _v("TRANS_LENDPV_restructured_implies_stage_2_or_3", Severity.ERROR,
-       "A restructured customer is Stage 2 or 3", _v_pv_restructured_stage23,
-       "lending_portfolio_view",
-       "Restructuring is a significant-increase trigger by policy.",
-       "Check IsLocal1 in the staging extract is being read as restructuring."),
+       "restructuring_final='Restructured' implies stage in {Stage 2, Stage 3}",
+       _pv_restructured, "lending_portfolio_view"),
     _v("TRANS_LENDPV_customer_count_matches_trans", Severity.ERROR,
-       "The view has one row per distinct customer on the contracts",
-       _v_pv_customer_count, "lending_portfolio_view",
-       "A shortfall means customers were dropped in the grouping and their "
-       "facilities are staged against nothing.",
-       "Check for blank customer ids before the groupby."),
+       "cm_view row count == distinct customer_id in trans_lending",
+       _pv_customer_count, "lending_portfolio_view",
+       "The customer view is keyed on CustomerMaster; a contract whose customer "
+       "is not there is missing from it, and so from staging."),
     _v("TRANS_LENDPV_exposure_reconciles", Severity.ERROR,
-       "Customer-level exposure equals contract-level exposure",
-       _v_pv_exposure_reconciles, "lending_portfolio_view",
-       "The two views describe the same book. A difference means one of them "
-       "lost rows.",
-       "Compare the row counts before and after the grouping."),
-
+       "Sum of cm_view exposure_total == sum of trans_lending exposure_amount",
+       _pv_exposure_reconciles, "lending_portfolio_view"),
     _v("TRANS_INV_account_id_unique", Severity.ERROR,
-       "Every account_id in trans_investments is unique", _v_inv_account_unique,
-       "trans_investments",
-       "Investment ids are surrogate sequential numbers; a duplicate means the "
-       "sequence was generated twice.",
-       "Check the surrogate id assignment."),
+       "Every account_id in trans_investments is unique",
+       _inv_account_unique, "trans_investments"),
     _v("TRANS_INV_rating_populated", Severity.ERROR,
-       "Every investment has a rating_current", _v_inv_rating_populated,
-       "trans_investments",
-       "Without a grade the holding has no bucket and prices to zero.",
-       "Check the counterparty join."),
+       "Every investment has a non-NA rating_current",
+       _inv_rating_populated, "trans_investments"),
     _v("TRANS_INV_rating_in_external_scale", Severity.ERROR,
        "Every rating_current is in the External portion of master_rating_scale",
-       _v_inv_rating_in_scale, "trans_investments",
-       "The external book uses the agency scale, not the QDB ladder.",
-       "Add the grade to master_rating_scale.csv."),
+       _inv_rating_scale, "trans_investments"),
     _v("TRANS_INV_hierarchy_in_range", Severity.ERROR,
        "rating_hierarchy is in 1..21 for every investment",
-       _v_inv_hierarchy_range, "trans_investments",
-       "Outside 1..21 there is no curve. Note the two scales reuse the same "
-       "numbers, so the lookup must be on (rating_type, rating).",
-       "Check master_rating_scale.csv."),
+       _inv_hierarchy, "trans_investments"),
     _v("TRANS_INV_exposure_nonneg", Severity.WARN,
-       "exposure_amount is present and >= 0 for every investment",
-       _v_inv_exposure_nonneg, "trans_investments",
-       "A missing holding prices to zero.",
-       "Trace back to ONBALANCE in the investment extract."),
+       "exposure_amount is non-NA and >= 0 for every investment",
+       _inv_exposure, "trans_investments"),
     _v("TRANS_INV_total_exposure_positive", Severity.ERROR,
-       "Total investment exposure > 0", _v_inv_total_exposure_positive,
-       "trans_investments",
-       "A zero total means the investment extract did not join.",
-       "Check AccountMasterInvestments was read."),
-
+       "Total investment exposure > 0",
+       _inv_total, "trans_investments"),
     _v("TRANS_INVPV_account_count_matches_trans", Severity.ERROR,
-       "The investment view has one row per transformed investment",
-       _v_invpv_count, "investment_portfolio_view",
-       "The file is keyed on the ACCOUNT, not the counterparty - 73 rows "
-       "against 62 counterparties is correct and a shortfall is not.",
-       "Check the surrogate id assignment."),
+       "inv_view row count == nrow(trans_investments)",
+       _invpv_count, "investment_portfolio_view"),
     _v("TRANS_INVPV_stage_in_set", Severity.ERROR,
-       "stage_final is in {Stage 1, Stage 2, Stage 3}", _v_invpv_stage_in_set,
-       "investment_portfolio_view",
-       "Anything else is not a stage LIC will accept.",
-       "Check the investment staging rule."),
+       "stage_final is in {Stage 1, Stage 2, Stage 3}",
+       _invpv_stage, "investment_portfolio_view"),
     _v("TRANS_INVPV_top_tier_implies_stage1", Severity.WARN,
-       "Top-tier investments (hierarchy <= 4) are Stage 1",
-       _v_invpv_top_tier_stage1, "investment_portfolio_view",
-       "An Aaa-to-Aa3 holding staged above 1 is almost always a rating that "
-       "failed to resolve rather than a genuine deterioration.",
-       "Check the counterparty rating join."),
+       "Top-tier investments (rating_hierarchy <= 4) -> Stage 1",
+       _invpv_top_tier, "investment_portfolio_view"),
 ]

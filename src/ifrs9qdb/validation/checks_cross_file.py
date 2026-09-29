@@ -12,185 +12,261 @@ from __future__ import annotations
 import pandas as pd
 
 from ..ids import as_id
-from ._helpers import col, fail, fk_detail, has, ok
+from ._helpers import col, fail, has, ok, pad4, text
 from .framework import Severity, Validator
 
 __all__ = ["CROSS_FILE_STAGE_VALIDATORS", "CONFIG_COVERAGE_VALIDATORS"]
 
 
-def _fk(child_table, child_col, parent_table, parent_col, label, parent_label):
-    def check(inputs, _ct=child_table, _cc=child_col, _pt=parent_table,
-              _pc=parent_col, _l=label, _pl=parent_label):
-        if not (has(inputs, _ct) and has(inputs, _pt)):
-            return ok()
-        c = col(inputs[_ct], *_cc)
-        p = col(inputs[_pt], *_pc)
-        if c is None or p is None:
-            return fail(0, f"key column missing on {_ct} or {_pt}")
-        return fk_detail(c, p, _l, _pl)
-    return check
+_WS = str.maketrans({" ": " ", "​": " ", "‌": " ",
+                     "‍": " ", "﻿": " "})
+
+
+def _xf_chr(df, *names) -> pd.Series:
+    """R's .xf_chr(): a key column as text that joins across extracts.
+
+    Non-breaking and zero-width spaces become spaces, runs of whitespace
+    collapse, the ends are trimmed, and blanks are dropped -- Oracle HTML
+    exports render spaces as U+00A0, and issuer names used as ids carry
+    different internal spacing between two files.
+    """
+    c = col(df, *names) if df is not None else None
+    if c is None:
+        return pd.Series([], dtype=object)
+    x = as_id(c).map(lambda v: " ".join(str(v).translate(_WS).split()))
+    return x[x != ""].reset_index(drop=True)
+
+
+def _missing_from(child_df, child_cols, parent_df, parent_cols):
+    """setdiff(unique(child), unique(parent)), in R's first-seen order."""
+    have = set(_xf_chr(parent_df, *parent_cols))
+    return [v for v in pd.unique(_xf_chr(child_df, *child_cols)) if v not in have]
+
+
+def _sample(values, n=15) -> str:
+    return ", ".join(list(values)[:n])
+
+
+def _v_aca_collateral_exists(inputs):
+    if not (has(inputs, "AccountCollateralAllocation") and has(inputs, "Collateral")):
+        return ok()
+    aca, coll = inputs["AccountCollateralAllocation"], inputs["Collateral"]
+    have = set(_xf_chr(coll, "collateral_id"))
+    ref = _xf_chr(aca, "collateral_id")
+    bad = [v for v in pd.unique(ref) if v not in have]
+    if not bad:
+        return ok()
+    nrows = int(ref.isin(bad).sum())
+    rows = aca[as_id(col(aca, "collateral_id")).str.strip().isin(bad).to_numpy()]
+    ncontracts = int(pd.Series(_xf_chr(rows, "contract_id")).nunique())
+    return {"passed": False, "count": nrows,
+            "detail": (f"{len(bad)} CollateralId(s) referenced by {nrows} row(s) "
+                       f"are MISSING from Collateral.xlsx. Sample: {_sample(bad)}"
+                       f" ({ncontracts} contract(s) affected - LIC may omit their "
+                       "provision)"),
+            "examples": bad[:10]}
 
 
 def _v_collateral_unallocated(inputs):
-    if not (has(inputs, "Collateral") and has(inputs, "AccountCollateralAllocation")):
+    if not (has(inputs, "AccountCollateralAllocation") and has(inputs, "Collateral")):
         return ok()
-    coll = as_id(col(inputs["Collateral"], "COLLATERALID", "collateral_id"))
-    alloc = set(as_id(col(inputs["AccountCollateralAllocation"],
-                          "COLLATERALID", "collateral_id")))
-    orphan = sorted(set(coll[coll != ""]) - alloc)
-    if not orphan:
+    used = set(_xf_chr(inputs["AccountCollateralAllocation"], "collateral_id"))
+    all_ids = list(pd.unique(_xf_chr(inputs["Collateral"], "collateral_id")))
+    idle = [v for v in all_ids if v not in used]
+    if not idle:
         return ok()
-    return fail(len(orphan),
-                f"{len(orphan)} collateral record(s) are allocated to nothing, "
-                "so their value is never applied",
-                examples=orphan[:10])
+    return {"passed": False, "count": len(idle),
+            "detail": (f"{len(idle)} of {len(all_ids)} collateral id(s) have no "
+                       f"allocation row (no benefit taken). Sample: {_sample(idle)}"),
+            "examples": idle[:10]}
 
 
-def _v_collateral_value_valid(inputs):
-    if not has(inputs, "Collateral"):
+def _v_collateral_value_valid(inputs, static=None):
+    """Allocated collateral with no value -- and how much of it matters.
+
+    Most collateral types carry a 100% haircut and give no benefit whatever
+    their value, so a zero value on those changes nothing. The count that
+    moves the provision is the zero-valued collateral of a type that WOULD
+    reduce the loss (haircut below 100%: property, bank guarantees).
+    """
+    if not (has(inputs, "AccountCollateralAllocation") and has(inputs, "Collateral")):
         return ok()
-    df = inputs["Collateral"]
-    cid = col(df, "COLLATERALID", "collateral_id")
-    val = pd.to_numeric(col(df, "COLLATERALVALUE", "collateral_value"),
-                        errors="coerce")
-    if cid is None or val is None:
-        return fail(0, "CollateralId or CollateralValue column missing")
-    allocated = set()
-    if has(inputs, "AccountCollateralAllocation"):
-        allocated = set(as_id(col(inputs["AccountCollateralAllocation"],
-                                  "COLLATERALID", "collateral_id")))
-    ids = as_id(cid)
-    used = ids.isin(allocated) if allocated else pd.Series(True, index=ids.index)
-    bad = used & (val.isna() | (val <= 0))
-    n = int(bad.sum())
-    if n == 0:
+    aca, coll = inputs["AccountCollateralAllocation"], inputs["Collateral"]
+    val = col(coll, "value", "collateral_value")
+    if val is None:
         return ok()
-    return fail(n, f"{n} allocated collateral record(s) have no positive value",
-                examples=list(ids[bad].head(10)))
+    used = set(_xf_chr(aca, "collateral_id"))
+    cid = as_id(col(coll, "collateral_id")).str.strip()
+    v = pd.to_numeric(val, errors="coerce")
+    m = cid.isin(used) & (v.isna() | (v <= 0))
+    bad = list(pd.unique(cid[m]))
+    if not bad:
+        return ok()
+    n_benefit = 0
+    ct = static.get("collateral_types") if static is not None else None
+    tcol = col(coll, "collateral_type_id")
+    if ct is not None and tcol is not None:
+        hc = dict(zip(as_id(col(ct, "collateral_type_id")).str.strip(),
+                      pd.to_numeric(col(ct, "haircut_general"), errors="coerce")))
+        h = pd.Series([hc.get(x) for x in as_id(tcol)[m]], dtype=float)
+        n_benefit = int(pd.Series(cid[m].to_numpy())[(h < 1).to_numpy()].nunique())
+    return {"passed": False, "count": len(bad),
+            "detail": (f"{len(bad)} allocated collateral id(s) have missing/zero "
+                       f"CollateralValue (no LGD benefit); {n_benefit} of them "
+                       "are of a type that would reduce the loss (haircut < 100%). "
+                       f"Sample: {_sample(bad)}"),
+            "examples": bad[:10]}
 
 
 def _v_alloc_sum_per_collateral(inputs):
     if not has(inputs, "AccountCollateralAllocation"):
         return ok()
     df = inputs["AccountCollateralAllocation"]
-    cid = col(df, "COLLATERALID", "collateral_id")
-    pct = pd.to_numeric(col(df, "ALLOCATIONPERCENTAGE", "allocation_percentage"),
-                        errors="coerce")
-    if cid is None or pct is None:
-        return fail(0, "CollateralId or AllocationPercentage column missing")
-    tot = pd.DataFrame({"c": as_id(cid), "p": pct}).groupby("c")["p"].sum()
-    over = tot[tot > 100.5]
+    pcol = col(df, "allocation_percentage")
+    if pcol is None:
+        return ok()
+    cid = as_id(col(df, "collateral_id")).str.strip()
+    pct = pd.to_numeric(pcol, errors="coerce")
+    keep = (cid != "") & pct.notna()
+    sums = pct[keep].groupby(cid[keep]).sum()
+    over = sums[sums > 100.5]
     if over.empty:
         return ok()
-    return fail(len(over),
-                f"{len(over)} collateral record(s) are allocated more than once "
-                "over, so the same security covers more than it is worth",
-                examples=[f"{k}={v:.2f}%" for k, v in over.head(10).items()])
+    order = sorted(over.index, key=lambda k: (-over[k], k))
+    return {"passed": False, "count": len(over),
+            "detail": (f"{len(over)} collateral id(s) allocated above 100% (max "
+                       f"{over.max():.1f}%) - benefit double-counted. Sample: "
+                       f"{', '.join(order[:10])}"),
+            "examples": order[:10]}
 
 
+def _missing_check(child, child_cols, parent, parent_cols, template):
+    def check(inputs, _c=child, _cc=child_cols, _p=parent, _pc=parent_cols,
+              _t=template):
+        if not (has(inputs, _c) and has(inputs, _p)):
+            return ok()
+        bad = _missing_from(inputs[_c], _cc, inputs[_p], _pc)
+        if not bad:
+            return ok()
+        return {"passed": False, "count": len(bad),
+                "detail": _t.format(n=len(bad), sample=_sample(bad)),
+                "examples": bad[:10]}
+    return check
+
+
+def _xv(id, severity, description, fn, context, rationale, remediation):
+    return Validator(id, severity, description, fn, context=context,
+                     rationale=rationale, remediation=remediation,
+                     tags=("pre_run", "cross_file"))
+
+
+# The eleven checks of R/validators_cross_file.R, in its order, rule for rule
+# and message for message.
 CROSS_FILE_STAGE_VALIDATORS: list[Validator] = [
-    Validator("XFILE_ACA_collateral_exists", Severity.ERROR,
-              "Every CollateralId in AccountCollateralAllocation exists in Collateral",
-              _fk("AccountCollateralAllocation", ("COLLATERALID", "collateral_id"),
-                  "Collateral", ("COLLATERALID", "collateral_id"),
-                  "allocation CollateralId", "Collateral"),
-              context="AccountCollateralAllocation", tags=("cross_file",),
-              rationale="An allocation pointing at a collateral record that does "
-                        "not exist makes coverage NaN, which zeroes the "
-                        "contract's provision with no error anywhere.",
-              remediation="Ask IT whether the collateral extract is filtered "
-                          "differently from the allocation extract."),
-    Validator("XFILE_collateral_unallocated", Severity.WARN,
-              "Every CollateralId in Collateral is referenced by an allocation",
-              _v_collateral_unallocated, context="Collateral",
-              tags=("cross_file",),
-              rationale="Unallocated collateral is value the bank holds and does "
-                        "not get credit for.",
-              remediation="Confirm with Credit whether the allocation is missing "
-                          "or the security is genuinely unassigned."),
-    Validator("XFILE_collateral_value_valid", Severity.WARN,
-              "Allocated collateral has a positive CollateralValue",
-              _v_collateral_value_valid, context="Collateral",
-              tags=("cross_file",),
-              rationale="A zero or missing value contributes nothing, so the "
-                        "allocation looks like cover and is not.",
-              remediation="Get the valuation from Credit Admin."),
-    Validator("XFILE_ACA_allocation_sum_per_collateral", Severity.WARN,
-              "Sum of AllocationPercentage per CollateralId is <= 100.5%",
-              _v_alloc_sum_per_collateral,
-              context="AccountCollateralAllocation", tags=("cross_file",),
-              rationale="Allocating one security more than once over gives more "
-                        "cover than the security is worth.",
-              remediation="Review the allocations for the named collateral."),
-    Validator("XFILE_AM_customer_in_staging_flags", Severity.WARN,
-              "Every lending CustomerId has a CustomerStagingFlag row",
-              _fk("AccountMaster", ("CUSTOMERID", "customer_id"),
-                  "CustomerStagingFlag", ("CUSTOMERID", "customer_id"),
-                  "AccountMaster.CustomerId", "CustomerStagingFlag"),
-              context="AccountMaster", tags=("cross_file",),
-              rationale="No staging row means no watchlist or restructuring "
-                        "flag, so the customer cannot be staged above Stage 1 "
-                        "except by DPD.",
-              remediation="Check the staging extract's filter."),
-    Validator("XFILE_AM_customer_in_industry", Severity.WARN,
-              "Every lending CustomerId has an IndustryCode row",
-              _fk("AccountMaster", ("CUSTOMERID", "customer_id"),
-                  "IndustryCode", ("CUSTOMERID", "customer_id"),
-                  "AccountMaster.CustomerId", "IndustryCode"),
-              context="AccountMaster", tags=("cross_file",),
-              rationale="Without an industry the exposure is missing from every "
-                        "sector concentration figure.",
-              remediation="Ask IT to extend the industry extract."),
-    Validator("XFILE_AM_contract_in_origination", Severity.WARN,
-              "Every lending ContractId has an Origination row",
-              _fk("AccountMaster", ("CONTRACTID", "contract_id"),
-                  "Origination", ("CONTRACTID", "contract_id"),
-                  "AccountMaster.ContractId", "Origination"),
-              context="AccountMaster", tags=("cross_file",),
-              rationale="The origination rating is what the SICR test compares "
-                        "against. Without it the contract cannot migrate to "
-                        "Stage 2 on rating deterioration.",
-              remediation="Check the origination extract's filter."),
-    Validator("XFILE_RS_orphans", Severity.WARN,
-              "Every RepaymentSchedule ContractId exists in AccountMaster",
-              _fk("RepaymentSchedule", ("CONTRACTID", "contract_id"),
-                  "AccountMaster", ("CONTRACTID", "contract_id"),
-                  "RepaymentSchedule.ContractId", "AccountMaster"),
-              context="RepaymentSchedule", tags=("cross_file",),
-              rationale="A schedule for a contract that is not on the book is "
-                        "usually a closed account still in the extract.",
-              remediation="Confirm the account extract's closing filter."),
-    Validator("XFILE_AMI_customer_in_CMI", Severity.ERROR,
-              "Every investment CustomerId exists in CustomerMasterInvestments",
-              _fk("AccountMasterInvestments", ("CUSTOMERID", "customer_id"),
-                  "CustomerMasterInvestments", ("CUSTOMERID", "customer_id"),
-                  "AccountMasterInvestments.CustomerId",
-                  "CustomerMasterInvestments"),
-              context="AccountMasterInvestments", tags=("cross_file",),
-              rationale="The counterparty carries the external rating. Without "
-                        "it the holding has no PD bucket.",
-              remediation="Check the counterparty extract."),
-    Validator("XFILE_AMI_customer_in_CSFI", Severity.WARN,
-              "Every investment CustomerId has a CustomerStagingFlagInvestments row",
-              _fk("AccountMasterInvestments", ("CUSTOMERID", "customer_id"),
-                  "CustomerStagingFlagInvestments", ("CUSTOMERID", "customer_id"),
-                  "AccountMasterInvestments.CustomerId",
-                  "CustomerStagingFlagInvestments"),
-              context="AccountMasterInvestments", tags=("cross_file",),
-              rationale="No staging row means the holding stays Stage 1 whatever "
-                        "the counterparty's condition.",
-              remediation="Check the investment staging extract."),
-    Validator("XFILE_AMI_account_in_origination", Severity.WARN,
-              "Every investment AccountId has an OriginationInvestments row",
-              _fk("AccountMasterInvestments", ("CONTRACTID", "contract_id",
-                                               "ACCOUNTID", "account_id"),
-                  "OriginationInvestments", ("CONTRACTID", "contract_id",
-                                             "ACCOUNTID", "account_id"),
-                  "AccountMasterInvestments.AccountId", "OriginationInvestments"),
-              context="AccountMasterInvestments", tags=("cross_file",),
-              rationale="Without an origination grade the SICR test cannot run "
-                        "on the investment book.",
-              remediation="Check the investment origination extract."),
+    _xv("XFILE_ACA_collateral_exists", Severity.ERROR,
+        "Every CollateralId in AccountCollateralAllocation exists in Collateral",
+        _v_aca_collateral_exists, "AccountCollateralAllocation",
+        "Both files are cut from the same collateral module on the same night, "
+        "so every allocated CollateralId must appear in the Collateral extract. "
+        "When one is missing, the ETL still runs but the LIC engine cannot value "
+        "the allocation and has been observed to DROP THE PROVISION for the "
+        "affected facilities entirely - a silent understatement.",
+        "Raise with the data team: the Collateral extract is missing rows that "
+        "AccountCollateralAllocation references. Regenerate both files from the "
+        "same business date."),
+    _xv("XFILE_collateral_unallocated", Severity.WARN,
+        "Every CollateralId in Collateral is referenced by at least one allocation",
+        _v_collateral_unallocated, "Collateral",
+        "A collateral with no allocation row signals the two extracts have "
+        "drifted apart. The collateral gives no benefit (conservative), but the "
+        "drift itself should be raised.",
+        "Ask the data team to confirm both spools ran on the same business date."),
+    _xv("XFILE_collateral_value_valid", Severity.WARN,
+        "Allocated collateral has a positive CollateralValue",
+        _v_collateral_value_valid, "Collateral",
+        "CollateralValue comes from nvl(appraisal_value, market_value). An "
+        "allocated collateral with a missing/zero value contributes no benefit, "
+        "so LGD silently rises to the unsecured 45%.",
+        "Send the listed collateral ids to the collateral unit to fix the "
+        "appraisal or market value at source."),
+    _xv("XFILE_ACA_allocation_sum_per_collateral", Severity.WARN,
+        "Sum of AllocationPercentage per CollateralId is <= 100.5%",
+        _v_alloc_sum_per_collateral, "AccountCollateralAllocation",
+        "Each collateral's value is split across the exposures it secures "
+        "(loan_bal / sum_loan_bal), so per COLLATERAL the percentages must sum "
+        "to about 100%.",
+        "Review the allocations for the named collateral."),
+    _xv("XFILE_AM_customer_in_staging_flags", Severity.WARN,
+        "Every lending CustomerId has a CustomerStagingFlag row",
+        _missing_check("AccountMaster", ("customer_id",), "CustomerStagingFlag",
+                       ("customer_id",),
+                       "{n} lending customer(s) missing from CustomerStagingFlag "
+                       "(flags default to 0). Sample: {sample}"),
+        "AccountMaster",
+        "No staging row means no watchlist or restructuring flag, so the "
+        "customer cannot be staged above Stage 1 except by DPD.",
+        "Check the staging extract's filter."),
+    _xv("XFILE_AM_customer_in_industry", Severity.WARN,
+        "Every lending CustomerId has an IndustryCode row",
+        _missing_check("AccountMaster", ("customer_id",), "IndustryCode",
+                       ("customer_id",),
+                       "{n} lending customer(s) have no IndustryCode row "
+                       "(sector = NA). Sample: {sample}"),
+        "AccountMaster",
+        "Without an industry the sector is NA: the customer drops out of the "
+        "sector collective-assessment rules and every sector concentration.",
+        "Ask IT to extend the industry extract."),
+    _xv("XFILE_AM_contract_in_origination", Severity.WARN,
+        "Every lending ContractId has an Origination row",
+        _missing_check("AccountMaster", ("contract_id",), "Origination",
+                       ("contract_id",),
+                       "{n} lending contract(s) missing from Origination "
+                       "(no SICR baseline). Sample: {sample}"),
+        "AccountMaster",
+        "The origination rating is what the SICR test compares against.",
+        "Check the origination extract's filter."),
+    _xv("XFILE_RS_orphans", Severity.WARN,
+        "Every RepaymentSchedule ContractId exists in AccountMaster",
+        _missing_check("RepaymentSchedule", ("contract_id",), "AccountMaster",
+                       ("contract_id",),
+                       "{n} contract(s) in RepaymentSchedule are not in "
+                       "AccountMaster (schedules ignored). Sample: {sample}"),
+        "RepaymentSchedule",
+        "A schedule for a contract that is not on the book is usually a closed "
+        "account still in the extract; the EAD-curve builder leaves it out.",
+        "Confirm the account extract's closing filter."),
+    _xv("XFILE_AMI_customer_in_CMI", Severity.ERROR,
+        "Every investment CustomerId exists in CustomerMasterInvestments",
+        _missing_check("AccountMasterInvestments", ("customer_id",),
+                       "CustomerMasterInvestments", ("customer_id",),
+                       "{n} investment customer(s) missing from "
+                       "CustomerMasterInvestments (fallback rating/PD used). "
+                       "Sample: {sample}"),
+        "AccountMasterInvestments",
+        "The counterparty carries the external rating; without it the holding "
+        "falls back to the segment rating.",
+        "Check the counterparty extract."),
+    _xv("XFILE_AMI_customer_in_CSFI", Severity.WARN,
+        "Every investment CustomerId has a CustomerStagingFlagInvestments row",
+        _missing_check("AccountMasterInvestments", ("customer_id",),
+                       "CustomerStagingFlagInvestments", ("customer_id",),
+                       "{n} investment customer(s) missing from "
+                       "CustomerStagingFlagInvestments (flags default to 0). "
+                       "Sample: {sample}"),
+        "AccountMasterInvestments",
+        "No staging row means the holding's flags default to 0.",
+        "Check the investment staging extract."),
+    _xv("XFILE_AMI_account_in_origination", Severity.WARN,
+        "Every investment AccountId has an OriginationInvestments row",
+        _missing_check("AccountMasterInvestments", ("account_id",),
+                       "OriginationInvestments", ("contract_id",),
+                       "{n} investment account(s) missing from "
+                       "OriginationInvestments (no SICR baseline). "
+                       "Sample: {sample}"),
+        "AccountMasterInvestments",
+        "Without an origination grade the SICR test cannot run on the "
+        "investment book.",
+        "Check the investment origination extract."),
 ]
 
 
@@ -204,28 +280,34 @@ def _static_keys(static, table, column):
     c = col(df, column)
     if c is None:
         return None
-    return set(pd.Series(c).astype(str).str.strip())
+    return set(text(c)) - {""}
 
+
+def _coverage(bad, n, message):
+    if not bad:
+        return ok()
+    return {"passed": False, "count": int(n), "detail": message,
+            "examples": list(bad)[:10]}
+
+
+# The five coverage checks below mirror R's validators_config_coverage.R rule
+# for rule and message for message: which values count, in what order they
+# are listed, and how blanks are treated. A coverage check that disagrees with
+# its R twin by one value is how the two reports stop being comparable.
 
 def _v_product_portfolio_coverage(inputs, static=None):
     if not has(inputs, "AccountMaster") or static is None:
         return ok()
-    known = _static_keys(static, "product_portfolio_mapping", "product_type")
-    if known is None:
-        known = _static_keys(static, "product_portfolio_mapping", "account_type")
-    if known is None:
+    have = _static_keys(static, "product_portfolio_mapping", "product_type")
+    if have is None:
         return ok()
-    c = col(inputs["AccountMaster"], "ACCOUNTTYPE", "account_type")
+    c = col(inputs["AccountMaster"], "account_type")
     if c is None:
         return ok()
-    seen = pd.Series(c).astype(str).str.strip()
-    missing = sorted({v for v in seen.unique() if v and v.lower() != "nan"} - known)
-    if not missing:
-        return ok()
-    n = int(seen.isin(missing).sum())
-    return fail(n, f"{len(missing)} product type(s) map to no portfolio, so no "
-                   "PD curve resolves for them",
-                examples=missing[:10])
+    bad = [v for v in _first_seen(c) if v not in have]
+    return _coverage(bad, text(c).isin(bad).sum(),
+                     f"{len(bad)} product type(s) with no portfolio mapping: "
+                     + ", ".join(bad))
 
 
 def _v_internal_rating_coverage(inputs, static=None):
@@ -236,23 +318,16 @@ def _v_internal_rating_coverage(inputs, static=None):
         return ok()
     rt = col(scale, "rating_type")
     names = col(scale, "rating")
-    if names is None:
+    if names is None or rt is None:
         return ok()
-    if rt is not None:
-        internal = scale[pd.Series(rt).astype(str).str.lower().str.startswith("int")]
-        known = set(pd.Series(col(internal, "rating")).astype(str).str.strip())
-    else:
-        known = set(pd.Series(names).astype(str).str.strip())
+    have = set(text(names[text(rt) == "Internal"]))
     c = col(inputs["AccountMaster"], "RATING", "rating")
     if c is None:
         return ok()
-    seen = pd.Series(c).astype(str).str.strip()
-    bad = {v for v in seen.unique() if v and v.lower() != "nan"} - known
-    if not bad:
-        return ok()
-    n = int(seen.isin(bad).sum())
-    return fail(n, f"{len(bad)} internal rating(s) are not in the master scale",
-                examples=sorted(bad)[:10])
+    bad = [v for v in _first_seen(c) if v not in have]
+    return _coverage(bad, text(c).isin(bad).sum(),
+                     f"{len(bad)} internal rating(s) not in master_rating_scale: "
+                     + ", ".join(bad))
 
 
 def _v_portfolio_referential(static=None):
@@ -262,82 +337,104 @@ def _v_portfolio_referential(static=None):
     mapping = static.get("product_portfolio_mapping")
     if pf is None or mapping is None or len(pf) == 0:
         return ok()
-    known = set(pd.Series(col(pf, "portfolio", "portfolio_code")
-                          ).astype(str).str.strip())
-    mapped = col(mapping, "portfolio", "portfolio_code")
+    have = set(text(col(pf, "portfolio_code", "portfolio")))
+    mapped = col(mapping, "portfolio")
     if mapped is None:
         return ok()
-    missing = sorted({v for v in pd.Series(mapped).astype(str).str.strip().unique()
-                      if v and v.lower() != "nan"} - known)
-    if not missing:
-        return ok()
-    return fail(len(missing),
-                f"{len(missing)} mapped portfolio(s) are not in portfolios.csv",
-                examples=missing[:10])
+    bad = [v for v in _first_seen(mapped) if v not in have]
+    return _coverage(bad, len(bad),
+                     f"{len(bad)} portfolio(s) mapped but missing from "
+                     "portfolios.csv: " + ", ".join(bad))
+
+
+def _first_seen(values) -> list:
+    """Distinct non-blank values in the order they first appear, as R's
+    unique() returns them -- so a message lists them in the same order."""
+    v = text(values)
+    return list(pd.unique(v[(v != "") & (v.str.upper() != "NA")]))
 
 
 def _v_collateral_type_coverage(inputs, static=None):
+    """Mirrors R's CONFIG_collateral_type_coverage exactly.
+
+    The haircut is looked up by collateral_type_id, so an unmapped type has no
+    haircut. The R and Python engines then treat that collateral as worth
+    nothing; what LIC does with it is not documented, which is the reason to
+    stop it here rather than find out from the provision.
+    """
     if not has(inputs, "Collateral") or static is None:
         return ok()
-    known = _static_keys(static, "collateral_types", "collateral_type_id")
-    if known is None:
+    ct = static.get("collateral_types") if hasattr(static, "get") else None
+    if ct is None or len(ct) == 0:
         return ok()
-    c = col(inputs["Collateral"], "COLLATERALTYPEID", "collateral_type_id")
+    have = set(as_id(col(ct, "collateral_type_id")))
+    df = inputs["Collateral"]
+    c = col(df, "collateral_type_id")
     if c is None:
+        # the positional column the Collateral schema puts it in
+        c = df.iloc[:, 3] if df.shape[1] >= 4 else pd.Series([], dtype=object)
+    need = _first_seen(as_id(c))
+    bad = [v for v in need if v not in have]
+    if not bad:
         return ok()
-    seen = as_id(c)
-    known = {str(k).strip() for k in known}
-    known |= {k[:-2] for k in known if k.endswith(".0")}
-    missing = sorted({v for v in seen.unique() if v} - known)
-    if not missing:
-        return ok()
-    n = int(seen.isin(missing).sum())
-    return fail(n, f"{len(missing)} collateral type(s) have no haircut defined, "
-                   "so they are treated as unsecured",
-                examples=missing[:10])
+    n = int(as_id(c).isin(bad).sum())
+    return {"passed": False, "count": n,
+            "detail": (f"{len(bad)} collateral type id(s) not in "
+                       f"collateral_types: {', '.join(bad)}"),
+            "examples": bad[:10]}
 
 
 def _v_industry_sector_coverage(inputs, static=None):
+    """Mirrors R's CONFIG_industry_sector_coverage exactly.
+
+    The sector comes from the leading 4-digit code of the industry
+    DESCRIPTION, because the numeric INDUST column drops the leading zero
+    (113 for 0113). Both sides are compared as zero-padded 4-digit codes.
+    """
     if not has(inputs, "IndustryCode") or static is None:
         return ok()
-    known = _static_keys(static, "industry_sector_mapping", "industry_code")
-    if known is None:
+    ism = static.get("industry_sector_mapping") if hasattr(static, "get") else None
+    if ism is None or len(ism) == 0:
         return ok()
-    c = col(inputs["IndustryCode"], "INDUSTRYCODE", "industry_code")
-    if c is None:
+    have = set(pad4(col(ism, "industry_code"))) - {""}
+    df = inputs["IndustryCode"]
+    src = col(df, "industry_description")
+    if src is None:
+        src = col(df, "industry_code")
+    if src is None:
         return ok()
-    seen = pd.Series(c).astype(str).str.strip()
-    missing = sorted({v for v in seen.unique() if v and v.lower() != "nan"} - known)
-    if not missing:
+    codes = pad4(src)
+    need = list(pd.unique(codes[codes != ""]))
+    bad = [v for v in need if v not in have]
+    if not bad:
         return ok()
-    n = int(seen.isin(missing).sum())
-    return fail(n, f"{len(missing)} industry code(s) map to no sector",
-                examples=missing[:10])
+    n = int(codes.isin(bad).sum())
+    return {"passed": False, "count": n,
+            "detail": (f"{len(bad)} industry code(s) not in "
+                       f"industry_sector_mapping: {', '.join(bad[:25])}"),
+            "examples": bad[:10]}
 
 
 def _v_off_balance_products_coverage(inputs, static=None):
     if not has(inputs, "AccountMaster") or static is None:
         return ok()
-    known = _static_keys(static, "off_balance_products", "product_code")
-    if known is None:
+    have = _static_keys(static, "off_balance_products", "product_code")
+    if have is None:
         return ok()
     c = col(inputs["AccountMaster"], "CONTRACTID", "contract_id")
     if c is None:
         return ok()
-    ids = pd.Series(c).astype(str).str.strip()
-    # The product code is the three characters after the first seven, and only
-    # in the alphanumeric contract ids - a numeric id carries no product code.
-    codes = ids[ids.str.len() >= 10].str[7:10]
-    codes = codes[codes.str.isalpha()]
-    if codes.empty:
-        return ok()
-    missing = sorted(set(codes.unique()) - known)
-    if not missing:
-        return ok()
-    n = int(codes.isin(missing).sum())
-    return fail(n, f"{len(missing)} off-balance product code(s) in contract ids "
-                   "are not mapped, so the id transformation cannot resolve them",
-                examples=missing[:10])
+    ids = text(c)
+    ids = ids[ids != ""]
+    # A non-numeric id of at least ten characters embeds the product code at
+    # characters 8-10 ("0000112FGG000471" -> "FGG"); a numeric id carries none.
+    numeric = pd.to_numeric(ids, errors="coerce").notna()
+    cand = ids[~numeric & (ids.str.len() >= 10)]
+    codes = cand.str[7:10]
+    bad = [v for v in pd.unique(codes) if v not in have]
+    return _coverage(bad, codes.isin(bad).sum(),
+                     f"{len(bad)} off-balance product code(s) not in "
+                     "off_balance_products: " + ", ".join(bad))
 
 
 CONFIG_COVERAGE_VALIDATORS: list[Validator] = [
