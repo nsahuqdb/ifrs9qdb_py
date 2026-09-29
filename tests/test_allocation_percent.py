@@ -1,5 +1,7 @@
-"""ALLOCATIONPERCENTAGE arrives as a percentage (0-100), always; the LIC file
-carries the fraction. Mirrors the R engine's tests/testthat/test-allocation-percent.R."""
+"""ALLOCATIONPERCENTAGE arrives as a percentage (0-100); the LIC file carries
+the fraction. Divided by 100 when any value is above 1; a file with no value
+above 1 is taken as fractions already. Mirrors the R engine's
+tests/testthat/test-allocation-percent.R."""
 from __future__ import annotations
 
 import pandas as pd
@@ -22,18 +24,18 @@ def _run(id_, p):
     return v.fn(inputs=canonicalise({"AccountCollateralAllocation": _aca(p)}))
 
 
-def test_the_share_is_always_divided_by_100(tmp_path):
+def test_divided_by_100_when_any_value_is_above_1(tmp_path):
     share = lambda p: list(transform_allocation(_aca(p), "6/9/2026")
                            ["AllocationPercentage"])
     assert share([60, 40, 100]) == pytest.approx([0.6, 0.4, 1])
-    # small shares are percentages too: the old guess (divide only when some
-    # value exceeded 1) read these as fractions, 100 times too large
-    assert share([0.5, 1, 0.25]) == pytest.approx([0.005, 0.01, 0.0025])
+    assert share([60, 0.5, 1]) == pytest.approx([0.6, 0.005, 0.01])
+    # no value above 1: already fractions, passed through
+    assert share([0.6, 0.4, 1]) == pytest.approx([0.6, 0.4, 1])
     # four decimals in the file, as R writes it
     write_outputs(tmp_path, {"AccountCollateralAllocation.csv":
-                             transform_allocation(_aca([0.5, 1, 0.25]), "6/9/2026")})
+                             transform_allocation(_aca([0.6, 0.4, 1]), "6/9/2026")})
     lines = (tmp_path / "AccountCollateralAllocation.csv").read_text().splitlines()
-    assert lines[1] == "6/9/2026,C1,1,0.0050"
+    assert lines[1] == "6/9/2026,C1,1,0.6000"
 
 
 def test_the_range_and_sum_checks_read_percentages():

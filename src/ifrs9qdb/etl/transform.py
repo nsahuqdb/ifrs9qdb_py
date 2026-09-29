@@ -237,19 +237,22 @@ def transform_allocation(raw: pd.DataFrame,
     return NaN coverage, which blanks the whole contract's ECL. The transform
     does not drop those rows -- the validators report them, so a silent
     correction here cannot hide a source-data problem.
-
-    The source writes 10.09 for ten per cent, always; LIC wants the fraction,
-    so the share is always divided by 100, as R's
-    write_account_collateral_allocation() does. (Both engines used to divide
-    only when some value exceeded 1, which would read a file of shares all at
-    most 1% as fractions, 100 times too large.)
     """
     # The export repeats its headings every page. R strips them before this
     # point; left in, one arrives as an allocation of collateral "COLLATERALID"
     # to contract "CONTRACTID".
     from .lending import drop_repeated_headers
     raw = drop_repeated_headers(raw)
-    pct = _num(at(raw, 3, "ALLOCATIONPERCENTAGE")) / 100.0
+    # The source writes 10.09 for ten per cent; LIC wants the fraction.
+    # Getting this wrong scales every collateral allocation by a hundred,
+    # which would show up as coverage far above 100% rather than as an error.
+    # R's writer detects the scale: it divides only when some value exceeds 1,
+    # so a file already in fractions passes through unchanged (and a percent
+    # file whose every allocation is at most 1% would too -- see
+    # INPUT_DATA_ISSUES.md).
+    pct = _num(at(raw, 3, "ALLOCATIONPERCENTAGE"))
+    if bool((pct > 1).any()):
+        pct = pct / 100.0
     return pd.DataFrame({
         "ExtractDate": _stamp(extract_date, at(raw, 0, "EXTRACTDA"), raw.index),
         "CollateralId": at(raw, 1, "COLLATERALID"),

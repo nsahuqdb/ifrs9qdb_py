@@ -170,7 +170,7 @@ fix R against Python.
 | 2 | The pre-run check did not apply the inputs' EXTRACTDA to `run.extract_date` before the config checks | Python | the shipped `config.yml` (empty `extract_date`, by design) blocked every run | applied first, as R's `pre_run_check()` does; `internal_model` is checked too |
 | 3 | The PD model was hardcoded to `internal_v4_production`; `run.internal_model` and `mev_model_weights.mode` were ignored, a null weight was not derived from the p-values, an unknown model was not refused | Python | a config version switching either priced on the old model, silently | `etl/model_registry.py` mirrors R's `resolve_model()`; the manifest records the resolved model; the run freezes `config.yml` with a `config_used.yml` marker |
 | 4 | Outputs, EAD and PD curves were dated from the latest EXTRACTDA | Python | a mixed-date bundle priced on a different date from R | R's rule: `resolve_input_extract_date()` for the run date; each transform's own latest date for maturity extension |
-| 5 | Collateral files stamped with their own dates; `AllocationPercentage` always divided by 100 | Python | differed from R on a mixed-date file | the run's date; the share as R divides it (always by 100 since R3 below) |
+| 5 | Collateral files stamped with their own dates; `AllocationPercentage` always divided by 100 | Python | differed from R on a mixed-date or fraction-scaled file | the run's date; R's rule (divided by 100 when any value exceeds 1) |
 | 6 | No check caught a wrong reporting date | both | a stale or stray EXTRACTDA re-dated the book silently | `INPUT_extract_date_plausible` |
 | 7 | An overlay moved the provision but the indicative attribution split it over EAD/PD/LGD (or showed all zeros) | both | factors did not sum to the move | an **Overlay** line; the factors explain the model move |
 | 8 | The MEV forecast and weight tables read the default model | both apps | wrong components after a model switch | the run's own model, with R's resolved weights |
@@ -188,7 +188,7 @@ never depends on which one produced it.
 | R1b | `INPUT_extract_date_matches_run_cfg` compared each file's first row | both | a stray row anywhere else passed | every row of every file, with the rows named |
 | R1c | The maturity extension anchored on each file's own latest EXTRACTDA | both | a stray later row moved every lapsed maturity | the run's reporting date, as the stamps, EAD and PD curves (`run_reporting_date()`) |
 | R2 | The date parsers tried an unanchored list of formats | both | "31-DEC-2025" read as 2020-12-31, "31-12-2025" as the year 31, "6/9/26" as the year 26 | each format only on values of its shape; any date outside 1900-2200 is blank, so the checks report it |
-| R3 | `AllocationPercentage` was divided by 100 only if some value exceeded 1 | both | a percent file of shares all at most 1% read 100 times too large | always divided by 100: the extract always writes a percentage (0-100) |
+| R3 | `AllocationPercentage` is divided by 100 only if some value exceeds 1 | both | -- | kept, by decision: the extract delivers percentages (0-100), so a file always has values above 1 and is divided by 100; no setting, no new check |
 | D | Python typed dates with the format that fitted most of a column; R value by value | Python | "31/12/2025", "2025/12/31" typed in Python, blank in R | R's schema rules, value for value (`ifrs9qdb.dates`) |
 
 And found on the way, while proving those:

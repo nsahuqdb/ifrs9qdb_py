@@ -49,8 +49,8 @@ What the Python engine now does as R does, that it did not:
 * **Dates and typing** — `ifrs9qdb.dates` reads a date exactly as R's schema,
   checks and transforms do, value for value; the schema records what it could
   not read (`INPUT_values_typed`).
-* **The allocation share** — always a percentage (0-100) divided by 100, as
-  the extract always delivers it, and written with R's four decimals.
+* **The allocation share** — divided by 100 when any value is above 1, as R
+  does, and written with R's four decimals.
 * **The config checks** — R's path and `run:` block rules, with the inputs'
   EXTRACTDA applied first.
 

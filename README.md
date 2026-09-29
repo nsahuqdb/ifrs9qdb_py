@@ -115,7 +115,7 @@ The fixtures under `tests/fixtures/` ship with the repository, so the suite
 means something on a fresh clone with nothing configured:
 
 ```bash
-pytest             # 675 passed, 11 skipped with reference runs configured
+pytest             # 677 passed, 11 skipped with reference runs configured
                    #   (below); without them the data tests skip
 ```
 
