@@ -41,6 +41,8 @@ CONFIG_FILE_FOR = {
     "CONFIG_portfolio_referential": "portfolios.csv",
     "CONFIG_collateral_type_coverage": "collateral_types.csv",
     "CONFIG_industry_sector_coverage": "industry_sector_mapping.csv",
+    # run.allocation_percentage_unit: the likely fix for a file in the other unit
+    "INPUT_ACA_allocation_unit_consistent": "config.yml",
 }
 
 
@@ -110,14 +112,17 @@ def pre_run_check(input_dir, static_dir=None, config_dir=None,
     if rd:
         t = pd.to_datetime(rd)
         rep_date = f"{t.month}/{t.day}/{t.year}"
+    # the INPUT checks, like the config checks, see the run config the run
+    # would use (R passes run_cfg with the inputs' date applied)
+    applied = apply_input_extract_date(run_config, ext)
     inp = validate_stages(inputs=src, static=static, reporting_date=rep_date,
-                          suppressions=supp, stages=["INPUT"])
+                          suppressions=supp, run_config=applied,
+                          stages=["INPUT"])
     if include_preflight:
         # As R's pre_run_check(): the config checks see the run config the
         # run would use, i.e. with the inputs' reporting date applied.
         pre = run_suite("PREFLIGHT", PREFLIGHT_VALIDATORS,
-                        {"static": static,
-                         "run_config": apply_input_extract_date(run_config, ext),
+                        {"static": static, "run_config": applied,
                          "base_dir": base_dir}, supp)
         res = combine(pre, inp)
     else:

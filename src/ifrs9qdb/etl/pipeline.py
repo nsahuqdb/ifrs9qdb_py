@@ -316,15 +316,15 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
 
         am, am2 = src["AccountMaster"], src["AccountMasterInvestments"]
         # The dates, as R takes them. The run's reporting date -- the stamp on
-        # every output file, the anchor of the EAD and PD curves -- is the
-        # AccountMaster EXTRACTDA R's resolve_input_extract_date() adopts;
-        # config.yml's run.extract_date is only the fallback for inputs that
-        # carry none (R's apply_input_extract_date). Each transform extends a
-        # lapsed maturity from the LATEST EXTRACTDA of its own file, as R's
-        # transform_lending and transform_investments do. On a clean bundle
-        # these are all one date; they part only when the files mix dates,
-        # which INPUT_extract_date_matches_run_cfg and
-        # INPUT_consistent_extract_date report.
+        # every output file, the anchor of the EAD and PD curves and of the
+        # maturity extension -- is the AccountMaster EXTRACTDA most rows carry
+        # (R's resolve_input_extract_date()); config.yml's run.extract_date is
+        # only the fallback for inputs that carry none (R's
+        # apply_input_extract_date). The transforms extend a lapsed maturity
+        # from that same date, and from the latest EXTRACTDA of their own file
+        # only when the run has none (R's run_reporting_date()), so one stray
+        # row cannot move part of the calculation onto another date --
+        # INPUT_extract_date_matches_run_cfg reports any such row.
         # R reads every date from the schema-typed inputs (read_all_inputs
         # types EXTRACTDA before anything looks at it), so the same typed
         # tables are used here.
@@ -334,13 +334,15 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
         from ..validation.schema import canonicalise
         typed = canonicalise(src)
         adopted = resolve_input_extract_date(typed)
-        ref = (reporting_date or adopted or _config_extract_date(run_config)
+        cfg_date = _config_extract_date(run_config)
+        ref = (reporting_date or adopted or cfg_date
                or _infer_reporting_date(am))
         if reporting_date or adopted is not None:
             st.run_config = apply_input_extract_date(
                 run_config, pd.Timestamp(ref).strftime("%Y-%m-%d"))
-        lend_ref = reporting_date or latest_extract_date(typed["AccountMaster"])
-        inv_ref = reporting_date or latest_extract_date(
+        run_date = reporting_date or adopted or cfg_date
+        lend_ref = run_date or latest_extract_date(typed["AccountMaster"])
+        inv_ref = run_date or latest_extract_date(
             typed["AccountMasterInvestments"])
         st.reporting_date = ref
         # Not strftime("%-m/..."): that is a glibc extension and raises
@@ -365,7 +367,7 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
         st.say("validate", "Validating the source extracts…")
         v_in = validate_stages(inputs=src, static=static,
                                reporting_date=extract_date, suppressions=st.supp,
-                               stages=["INPUT"])
+                               run_config=st.run_config, stages=["INPUT"])
         if not gate("INPUT", v_in):
             _halt(result, run_dir, run_id, input_dir, extract_date,
                   st.stage_results, user, started, state=st)
@@ -397,8 +399,10 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
         st.say("collateral", "Collateral and allocations…")
         tables["Collateral.csv"] = transform_collateral(src["Collateral"],
                                                         extract_date)
+        from ..runconfig import allocation_percentage_unit
         tables["AccountCollateralAllocation.csv"] = transform_allocation(
-            src["AccountCollateralAllocation"], extract_date)
+            src["AccountCollateralAllocation"], extract_date,
+            unit=allocation_percentage_unit(st.run_config))
         result.steps.append({
             "step": "Collateral", "ok": True,
             "detail": (f"{len(tables['Collateral.csv']):,} items, "
@@ -1078,15 +1082,17 @@ def _build_stpd(static, config_dir, extract_date: str,
 
 def _config_extract_date(run_config):
     """config.yml's run.extract_date, when it is set and parses -- R's
-    fallback for inputs that carry no EXTRACTDA."""
+    fallback for inputs that carry none, read as R's normalise_extract_date()
+    reads it."""
     if not isinstance(run_config, dict):
         return None
     run = run_config.get("run")
     v = run.get("extract_date") if isinstance(run, dict) else None
     if v in (None, ""):
         return None
-    t = pd.to_datetime(str(v), errors="coerce")
-    return None if pd.isna(t) else t.normalize()
+    from ..dates import normalise_extract_dates
+    t = normalise_extract_dates([v]).iloc[0]
+    return None if pd.isna(t) else pd.Timestamp(t)
 
 
 def _infer_reporting_date(accounts: pd.DataFrame):

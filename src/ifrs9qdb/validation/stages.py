@@ -65,7 +65,7 @@ def validate_stages(*, inputs=None, static=None, trans_lending=None,
                     internal_weights=None, external_weights=None,
                     mev_weights=None, reporting_date=None,
                     header_strip_log=None, suppressions=None,
-                    stages=None) -> ValidationResult:
+                    run_config=None, stages=None) -> ValidationResult:
     """Run the staged suites over whatever of the run is available.
 
     Every argument is optional. A suite whose inputs are absent still runs and
@@ -102,6 +102,7 @@ def validate_stages(*, inputs=None, static=None, trans_lending=None,
         "external_weights": external_weights, "mev_weights": mev_weights,
         "reporting_date": reporting_date,
         "header_strip_log": header_strip_log,
+        "run_config": run_config,
     }
     supp = suppressions or {}
     want = stages or list(STAGE_SUITES)

@@ -82,7 +82,7 @@ src/ifrs9qdb/
                   write out the rows that differ
   analytics/      walk, staging, concentration, data quality, profiles
   stress.py       what-if, packages, reverse stress, roll-forward
-  validation/     147 run checks with the R engine's ids -- input,
+  validation/     149 run checks with the R engine's ids -- input,
                   transform, derived, pricing readiness (READY) and report
                   -- plus 15 pre-flight checks on the config and static
                   reference, and the suppressions file (reason, approver,
@@ -100,6 +100,10 @@ src/ifrs9qdb/
   acquisition.py  getting a quarter's extracts in: zip upload, data drops,
                   a structural check, and recording where they came from
   ids.py          ids that join, whatever dtype the column was read as
+  dates.py        dates read exactly as the R engine reads them: the
+                  schema's typing, the checks' and the transforms' parsers
+  runconfig.py    run settings read from config.yml as R reads them (the
+                  collateral allocation unit)
   overlays.py     management overlays: the engine, the bundle a
                   person authors, its approval trail, and applying
                   one to a completed run without touching it
@@ -113,7 +117,7 @@ The fixtures under `tests/fixtures/` ship with the repository, so the suite
 means something on a fresh clone with nothing configured:
 
 ```bash
-pytest             # 662 passed, 11 skipped with reference runs configured
+pytest             # 678 passed, 11 skipped with reference runs configured
                    #   (below); without them the data tests skip
 ```
 
@@ -124,7 +128,8 @@ in git. Point the environment at a copy instead:
 ```bash
 export IFRS9_REF_RUN=/path/to/runs/run_00001     # holds Output/
 export IFRS9_SRC_INPUTS=/path/to/extracts        # the raw Oracle files
-pytest -q                                        # 205 passed, 29 skipped
+export IFRS9_REF_RUN_PREV=/path/to/runs/run_00002   # optional, the run before
+pytest -q                                        # the data tests now run too
 ```
 
 Without them those tests skip and name the variable that was missing, rather

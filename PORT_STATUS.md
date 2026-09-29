@@ -23,13 +23,14 @@ print(reconciliation_report("out/", "runs/run_00001/Output"))
 ## From raw extracts to every file, R against Python — and the run itself
 
 The ETL now reproduces the R engine from the raw extracts: every one of the 29
-files a run writes, all 147 run checks, the pricing-readiness report and its
+files a run writes, all 149 run checks, the pricing-readiness report and its
 row funnel, identical R against Python on the June 2026 book as delivered, with
-its dates repaired, with defects injected into every file, with a stray
-EXTRACTDA row, and under two model configurations (a switched internal model
-with a null weight; `mev_model_weights: auto_p_value`). The pre-run check — 83
-config, static and input checks — gives identical results and messages on all
-of them. Details, and what was found and fixed on the way, in
+its dates repaired, with defects injected into every file, with mixed and
+stray EXTRACTDA rows, with allocations delivered as fractions, with unreadable
+values in five files, and under two model configurations (a switched internal
+model with a null weight; `mev_model_weights: auto_p_value`). The pre-run
+check -- 85 config, static and input checks -- gives identical results and
+messages on all of them. Details, and what was found and fixed on the way, in
 `PRICING_READINESS.md`.
 
 What the Python engine now does as R does, that it did not:
@@ -43,8 +44,14 @@ What the Python engine now does as R does, that it did not:
   `mev_model_weights.mode` the MEV weights (`etl/model_registry.py`, R's
   `resolve_model()`); the run freezes `config.yml` beside `config/` and
   records the resolved model in its manifest.
-* **The reporting date** — R's `resolve_input_extract_date()` dates the run;
-  each transform extends a lapsed maturity from its own file's latest date.
+* **The reporting date** — the EXTRACTDA most rows carry dates the run, and
+  the maturity extension anchors on it too (decided with R this round: it
+  used to count spellings, so one stray row could re-date the run).
+* **Dates and typing** — `ifrs9qdb.dates` reads a date exactly as R's schema,
+  checks and transforms do, value for value; the schema records what it could
+  not read (`INPUT_values_typed`).
+* **The allocation unit** — `run.allocation_percentage_unit`, with the check
+  that refuses a file in the other unit (`runconfig.py`).
 * **The config checks** — R's path and `run:` block rules, with the inputs'
   EXTRACTDA applied first.
 

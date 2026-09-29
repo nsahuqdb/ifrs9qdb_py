@@ -519,15 +519,17 @@ cannot be assessed at all.
 entirely empty** — every value blank on every row. Only `EXTRACTDA` and
 `CONTRACTID` carry data.
 
-The schema reads it positionally:
+The schema reads it positionally (both engines; the positions used to start at
+1, which read the contract id as the origination PD -- corrected, see
+PRICING_READINESS.md):
 
 | position | field | populated |
 | --- | --- | --- |
-| 1 | `contract_id` | 7,259 |
-| 2 | `origination_pd_12m` | **0** |
-| 3 | `origination_rating` | **0** |
-| 4 | `origination_dpd` | **0** |
-| 5 | `origination_watchlist` | **0** |
+| 2 | `contract_id` | 7,259 |
+| 3 | `origination_pd_12m` | **0** |
+| 4 | `origination_rating` | **0** |
+| 5 | `origination_dpd` | **0** |
+| 6 | `origination_watchlist` | **0** |
 
 Every one of those four is declared `required = FALSE`, so the loader accepts the
 file without complaint.

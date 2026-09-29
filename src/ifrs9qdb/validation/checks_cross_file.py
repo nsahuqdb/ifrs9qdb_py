@@ -118,15 +118,18 @@ def _v_collateral_value_valid(inputs, static=None):
             "examples": bad[:10]}
 
 
-def _v_alloc_sum_per_collateral(inputs):
+def _v_alloc_sum_per_collateral(inputs, run_config=None):
     if not has(inputs, "AccountCollateralAllocation"):
         return ok()
     df = inputs["AccountCollateralAllocation"]
     pcol = col(df, "allocation_percentage")
     if pcol is None:
         return ok()
+    from ..runconfig import allocation_divisor, allocation_percentage_unit
     cid = as_id(col(df, "collateral_id")).str.strip()
     pct = pd.to_numeric(pcol, errors="coerce")
+    # in percent, whatever the extract's unit (run.allocation_percentage_unit)
+    pct = pct * (100 / allocation_divisor(pct, allocation_percentage_unit(run_config)))
     keep = (cid != "") & pct.notna()
     sums = pct[keep].groupby(cid[keep]).sum()
     over = sums[sums > 100.5]

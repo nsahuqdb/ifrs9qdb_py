@@ -14,9 +14,10 @@ import pandas as pd
 from ..etl.read_inputs import INPUT_SPECS
 from ..ids import as_id
 from ._helpers import (blank_detail, col, dup_detail, examples_of, fail,
-                       fk_detail, has, numeric_detail, ok, parse_any_date,
-                       r_parse_dates, resolve_input_extract_date,
-                       text)
+                       extract_date_column, extract_date_counts, fk_detail,
+                       has, numeric_detail, ok,
+                       parse_any_date, r_parse_dates,
+                       resolve_input_extract_date, text)
 from .framework import Severity, Validator
 
 __all__ = ["INPUT_STAGE_VALIDATORS"]
@@ -365,21 +366,38 @@ def _v_ami_dpd_ignored(inputs):
                    "them to Stage 2 or 3", examples=list(ids))
 
 
-def _date_parses(table: str, column: str, template: str):
+def _unparsed_dates(df, column: str):
+    """R's .unparsed_dates(): the values of a date column that do not read as
+    a date, and up to five of them. On the schema-typed column such a value
+    is already blank, so the count is what the typing recorded
+    (schema_unread_values); on raw text the column is parsed here, with the
+    schema's own parser."""
+    c = col(df, column)
+    if c is None:
+        return None
+    if pd.api.types.is_datetime64_any_dtype(c):
+        u = (getattr(df, "attrs", {}).get("schema_unread") or {}).get(column)
+        return (0, []) if u is None else (int(u["n"]), list(u.get("sample", [])))
+    from ..dates import schema_parse_dates
+    from .schema import _unread
+    u = _unread(pd.Series(c), schema_parse_dates(c), "date", column)
+    return (0, []) if u is None else (u["n"], u["sample"])
+
+
+def _date_parses(table: str, column: str, template: str, required: bool = True):
     """R: a value present but unparseable. On the schema-typed column R reads,
     an unparseable date is already NA, so this counts what the schema layer
-    could not type (the raw text beside it)."""
-    def check(inputs, _t=table, _c=column, _tpl=template):
+    could not type."""
+    def check(inputs, _t=table, _c=column, _tpl=template, _req=required):
         if not has(inputs, _t):
             return ok()
-        raw = col(inputs[_t], _c)
-        if raw is None:
-            return fail(0, f"{_c} column not found")
-        parsed = parse_any_date(raw)
-        n = int((parsed.isna() & pd.Series(raw).notna()).sum())
+        got = _unparsed_dates(inputs[_t], _c)
+        if got is None:
+            return fail(0, f"{_c} column not found") if _req else ok()
+        n, sample = got
         if n == 0:
             return ok()
-        return fail(n, _tpl.format(n=n))
+        return fail(n, _tpl.format(n=n), examples=sample)
     return check
 
 
@@ -415,20 +433,73 @@ def _v_account_customer_fk(inputs):
                 examples=orphans[:10])
 
 
-def _v_aca_percent_range(inputs):
-    """R: every blank counts as non-numeric; out of range beyond 100.0001."""
+def _v_aca_percent_range(inputs, run_config=None):
+    """R: every blank counts as non-numeric; out of range beyond 100.0001 --
+    or 1.000001 when run.allocation_percentage_unit is fraction."""
     if not has(inputs, "AccountCollateralAllocation"):
         return ok()
     c = col(inputs["AccountCollateralAllocation"], "allocation_percentage",
             "ALLOCATIONPERCENTAGE")
     if c is None:
         return fail(0, "AllocationPercentage column not found")
+    from ..runconfig import allocation_divisor, allocation_percentage_unit
     x = pd.to_numeric(text(c), errors="coerce")
-    n_bad = int((x.notna() & ((x < 0) | (x > 100.0001))).sum())
+    top = allocation_divisor(x, allocation_percentage_unit(run_config))
+    n_bad = int((x.notna() & ((x < 0) | (x > top * 1.000001))).sum())
     n_na = int(x.isna().sum())
     if n_bad == 0 and n_na == 0:
         return ok()
-    return fail(n_bad + n_na, f"{n_bad} outside [0,100], {n_na} non-numeric")
+    return fail(n_bad + n_na, f"{n_bad} outside [0,{top:g}], {n_na} non-numeric")
+
+
+def _v_aca_unit_consistent(inputs, run_config=None):
+    """R: the file's values contradict run.allocation_percentage_unit -- every
+    value at most 1 under percent, any value above 1 under fraction."""
+    from ..runconfig import ALLOCATION_UNITS, allocation_percentage_unit
+    unit = allocation_percentage_unit(run_config)
+    if unit not in ALLOCATION_UNITS:
+        return fail(1, f"run.allocation_percentage_unit is '{unit}'; use percent, "
+                       "fraction or auto (the run guesses as auto meanwhile)")
+    if unit == "auto" or not has(inputs, "AccountCollateralAllocation"):
+        return ok()
+    c = col(inputs["AccountCollateralAllocation"], "allocation_percentage",
+            "ALLOCATIONPERCENTAGE")
+    if c is None:
+        return ok()
+    x = pd.to_numeric(text(c), errors="coerce").dropna()
+    if x.empty:
+        return ok()
+    if unit == "percent" and x.max() <= 1 and bool((x > 0).any()):
+        return fail(len(x), f"every AllocationPercentage is at most 1 ({len(x)} "
+                            f"value(s), max {_r_num(x.max())}): the file looks like "
+                            "fractions, but run.allocation_percentage_unit is "
+                            "percent, so each share would count a hundredth of itself")
+    if unit == "fraction" and bool((x > 1).any()):
+        n = int((x > 1).sum())
+        return fail(n, f"{n} AllocationPercentage value(s) above 1 (max "
+                       f"{_r_num(x.max())}): the file looks like percentages, but "
+                       "run.allocation_percentage_unit is fraction, so those "
+                       "shares would count up to a hundred times")
+    return ok()
+
+
+def _r_num(v) -> str:
+    """A number as R's format() writes it: up to 7 significant digits, no
+    trailing zeros, and scientific notation only when it is narrower than the
+    fixed form (R's scipen = 0): 0.6, 60, 111892, but 1e-04."""
+    import math
+    x = float(v)
+    if x == 0 or not math.isfinite(x):
+        return "0" if x == 0 else str(x)
+    e = math.floor(math.log10(abs(x)))
+    fixed = f"{x:.{max(0, 6 - e)}f}"
+    if "." in fixed:
+        fixed = fixed.rstrip("0").rstrip(".")
+    mant, _, exp = f"{x:.6e}".partition("e")
+    if "." in mant:
+        mant = mant.rstrip("0").rstrip(".")
+    sci = f"{mant}e{exp}"
+    return fixed if len(fixed) <= len(sci) else sci
 
 
 def _v_aca_contract_fk(inputs, static=None):
@@ -470,7 +541,7 @@ def _v_aca_contract_fk(inputs, static=None):
                 examples=orphans[:10])
 
 
-def _v_aca_total_per_contract(inputs):
+def _v_aca_total_per_contract(inputs, run_config=None):
     """Shares summed per contract -- expected above 100% for a contract
     secured by several items, since each share is a fraction of ITS
     collateral. Informational: double allocation of one item is what
@@ -479,11 +550,14 @@ def _v_aca_total_per_contract(inputs):
         return ok()
     df = inputs["AccountCollateralAllocation"]
     cid = col(df, "contract_id", "CONTRACTID")
-    pct = pd.to_numeric(col(df, "allocation_percentage", "ALLOCATIONPERCENTAGE"),
-                        errors="coerce")
+    pc = col(df, "allocation_percentage", "ALLOCATIONPERCENTAGE")
     coll = col(df, "collateral_id", "COLLATERALID")
-    if cid is None or pct is None:
+    if cid is None or pc is None:
         return fail(0, "ContractId or AllocationPercentage column missing")
+    from ..runconfig import allocation_divisor, allocation_percentage_unit
+    pct = pd.to_numeric(pc, errors="coerce")
+    # in percent: a fraction file is scaled up to compare against 100
+    pct = pct * (100 / allocation_divisor(pct, allocation_percentage_unit(run_config)))
     d = pd.DataFrame({"c": as_id(cid), "p": pct,
                       "k": as_id(coll) if coll is not None else ""})
     d = d[d["c"] != ""]
@@ -580,19 +654,19 @@ def _extract_dates(inputs):
 
 def _v_consistent_extract_date(inputs):
     """R: the distinct dates EXTRACTDA parses to across the files, in the
-    order the files are read."""
+    order the files are read -- every distinct value, not a sample."""
     dates = []
     for spec in INPUT_SPECS:
         if not has(inputs, spec.name):
             continue
-        c = col(inputs[spec.name], "extract_date", "EXTRACTDA", "EXTRACTDATE")
+        c = extract_date_column(inputs[spec.name])
         if c is None:
             continue
         raw = pd.Series(c).dropna()
         if raw.empty:
             continue
-        raw = raw[~raw.duplicated()].head(5)
-        d = parse_any_date(raw).dropna()
+        raw = raw[~raw.duplicated()]
+        d = r_parse_dates(raw).dropna()
         for x in pd.unique(d.dt.strftime("%Y-%m-%d")):
             if x not in dates:
                 dates.append(x)
@@ -603,38 +677,37 @@ def _v_consistent_extract_date(inputs):
 
 
 def _v_extract_date_matches_cfg(inputs, reporting_date=None):
-    """R: every file's EXTRACTDA agrees with the date the run adopts -- the
-    modal AccountMaster EXTRACTDA, not the config -- so a bundle that mixes
-    vintages cannot blend two reporting dates."""
+    """R: every row of every file carries the date the run adopts -- the
+    AccountMaster EXTRACTDA most rows carry, not the config. A stray row is
+    data from another vintage, and a file dated otherwise another extract."""
     anchor = _anchor_date(inputs)
     if anchor is None:
         return ok()
-    seen = []
+    parts, n_rows, files = [], 0, []
     for spec in INPUT_SPECS:
         if not has(inputs, spec.name):
             continue
-        c = col(inputs[spec.name], "extract_date", "EXTRACTDA", "EXTRACTDATE")
-        if c is None:
+        counts = extract_date_counts(inputs[spec.name])
+        other = counts[counts["date"] != anchor].sort_values("date")
+        if other.empty:
             continue
-        rv = pd.Series(c).dropna()
-        if rv.empty:
-            continue
-        d = parse_any_date(rv.head(1)).dropna()
-        if len(d):
-            x = d.iloc[0].strftime("%Y-%m-%d")
-            if x not in seen:
-                seen.append(x)
-    a = anchor.strftime("%Y-%m-%d")
-    if seen and all(x == a for x in seen):
+        parts.append(f"{spec.name}: " + ", ".join(
+            f"{int(r)} row(s) dated {d.strftime('%Y-%m-%d')}"
+            for d, r in zip(other["date"], other["rows"])))
+        n_rows += int(other["rows"].sum())
+        files.append(spec.name)
+    if not parts:
         return ok()
-    return fail(len(seen), f"input files disagree on EXTRACTDA (reporting date "
-                           f"{a}): " + ", ".join(seen))
+    return fail(n_rows, "input files disagree on EXTRACTDA (reporting date "
+                        f"{anchor.strftime('%Y-%m-%d')}): " + "; ".join(parts),
+                examples=files)
 
 
 def _v_extract_date_plausible(inputs):
     """R: the adopted reporting date is not before any contract's OPENDATE,
     nor after today -- the symptom of a stale, mistyped or mixed EXTRACTDA
-    (one stray earlier row sets the date, see resolve_input_extract_date)."""
+    (a file split evenly between two dates is dated by the earlier, see
+    resolve_input_extract_date)."""
     anchor = _anchor_date(inputs)
     if anchor is None:
         return ok()
@@ -668,6 +741,21 @@ def _v_duplicate_headers_stripped(inputs, header_strip_log=None):
                 f"Auto-removed repeated header row(s) from {len(log)} file(s): "
                 + ", ".join(parts),
                 examples=list(log)[:10])
+
+
+def _v_values_typed(inputs):
+    """R: every non-blank value in a date or number column reads as one --
+    what the schema could not type, by file and column."""
+    from .schema import schema_unread_values
+    u = schema_unread_values(inputs)
+    if u.empty:
+        return ok()
+    parts = [f"{f}.{src} {n} (e.g. {smp.replace(' | ', ', ')})"
+             for f, src, n, smp in zip(u["file"], u["source"], u["n"], u["sample"])]
+    return fail(int(u["n"].sum()),
+                f"{int(u['n'].sum())} value(s) in {len(u)} column(s) could not be "
+                "read and are treated as blank: " + "; ".join(parts),
+                examples=[f"{f}.{src}" for f, src in zip(u["file"], u["source"])])
 
 
 # ------------------------------------------------------------------ suite ---
@@ -738,12 +826,26 @@ INPUT_STAGE_VALIDATORS: list[Validator] = _presence_validators() + [
        "wins is an accident of ordering.",
        "De-duplicate at source."),
     _v("INPUT_ACA_allocation_in_percent_range", Severity.WARN,
-       "AllocationPercentage (raw, in % units) in [0, 100]",
+       "AllocationPercentage in [0, 100] ([0, 1] when "
+       "run.allocation_percentage_unit is fraction)",
        _v_aca_percent_range, "AccountCollateralAllocation",
        "The source writes 10.09 for ten per cent. A value outside the range "
        "usually means the column has already been converted, which would "
        "divide the collateral by a hundred again.",
        "Check the extract's units before changing anything downstream."),
+    _v("INPUT_ACA_allocation_unit_consistent", Severity.ERROR,
+       "AllocationPercentage values are in the unit config.yml "
+       "run.allocation_percentage_unit names",
+       _v_aca_unit_consistent, "AccountCollateralAllocation",
+       "The run divides each AllocationPercentage by 100 when the unit is "
+       "percent and by 1 when it is fraction, and the share decides how much "
+       "of the collateral's value reduces each contract's loss. A file in the "
+       "other unit moves every collateral benefit by a factor of 100: "
+       "fractions read as percentages lose almost all of it, percentages read "
+       "as fractions overstate it a hundredfold.",
+       "Set run.allocation_percentage_unit in config.yml to the unit the "
+       "extract uses (percent: 57.25 for 57.25%; fraction: 0.5725), or have "
+       "the extract re-delivered in the configured unit."),
     _v("INPUT_ACA_contract_fk", Severity.WARN,
        "Every ContractId in AccountCollateralAllocation exists in AccountMaster",
        _v_aca_contract_fk, "AccountCollateralAllocation",
@@ -883,7 +985,7 @@ INPUT_STAGE_VALIDATORS: list[Validator] = _presence_validators() + [
     _v("INPUT_AccountMasterInvestments_opendate_parses", Severity.WARN,
        "OPENDATE column in AccountMasterInvestments parses as a date",
        _date_parses("AccountMasterInvestments", "open_date",
-                    "{n} unparseable OPENDATE values"),
+                    "{n} unparseable OPENDATE values", required=False),
        "AccountMasterInvestments",
        "Two date formats appear in this file - ExtractDate is unpadded and the "
        "others are zero-padded - so a single-format parse drops rows.",
@@ -950,13 +1052,27 @@ INPUT_STAGE_VALIDATORS: list[Validator] = _presence_validators() + [
        "The reporting date is read from AccountMaster EXTRACTDA and anchors "
        "every output stamp, maturity extension, EAD and PD curve. A wrong "
        "EXTRACTDA fails no other check when every file carries it: a stale or "
-       "mistyped date, or one stray row with an earlier date (the run adopts "
-       "the earliest of the dates a mixed file carries), prices the whole "
-       "book at the wrong date. A reporting date before contracts' opening "
-       "dates, or after today, is the symptom.",
+       "mistyped date, or a file where as many rows carry an earlier date as "
+       "the reporting date (the run adopts the date most rows carry, and the "
+       "earliest on a tie), prices the whole book at the wrong date. A "
+       "reporting date before contracts' opening dates, or after today, is "
+       "the symptom.",
        "Check EXTRACTDA in the extract - every row should carry the reporting "
        "date - and re-export if it is stale, mistyped or mixed.",
        suppressible=False),
+    _v("INPUT_values_typed", Severity.WARN,
+       "Every non-blank value in a date or number column reads as a date or "
+       "number",
+       _v_values_typed, "",
+       "Each input column is typed before any check or calculation sees it. A "
+       "value the typing cannot read - a date in an unknown format, text in an "
+       "amount, a number with a thousands separator - becomes blank, and "
+       "the run treats it as missing: a blank ONBALANCE prices at zero, a "
+       "blank MATURITYDATE at the 3-month minimum horizon, a blank allocation "
+       "loses the collateral. The field checks count the blanks; this one "
+       "names the values that were lost, so the extract can be fixed.",
+       "Re-export the file with the column in its usual format: dates as "
+       "M/D/YYYY, YYYY-MM-DD or DD-MON-YY, numbers without separators or text."),
     _v("INPUT_duplicate_headers_stripped", Severity.WARN,
        "No repeated header rows were found in the input files",
        _v_duplicate_headers_stripped, "",

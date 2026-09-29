@@ -37,6 +37,7 @@ DERIVED_STPD_row_count
 DERIVED_STPD_schema
 DERIVED_STPD_zero_ttc_zero_curve
 INPUT_ACA_allocation_in_percent_range
+INPUT_ACA_allocation_unit_consistent
 INPUT_ACA_contract_fk
 INPUT_ACA_pair_unique
 INPUT_ACA_total_allocation_per_contract
@@ -87,6 +88,7 @@ INPUT_consistent_extract_date
 INPUT_duplicate_headers_stripped
 INPUT_extract_date_matches_run_cfg
 INPUT_extract_date_plausible
+INPUT_values_typed
 READY_allocation_contract_present
 READY_allocation_share_valid
 READY_collateral_allocation_links

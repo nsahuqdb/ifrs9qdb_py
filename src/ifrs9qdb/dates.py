@@ -33,7 +33,9 @@ import numpy as np
 import pandas as pd
 
 __all__ = ["fer_parse_date", "months_between", "years_between",
-           "calendar_months"]
+           "calendar_months", "DATE_MIN", "DATE_MAX", "date_in_range",
+           "schema_parse_dates", "r_parse_any_dates", "normalise_extract_dates",
+           "r_text"]
 
 _RX_ISO = re.compile(r"^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}$")
 _RX_ISO_SL = re.compile(r"^[0-9]{4}/[0-9]{1,2}/[0-9]{1,2}$")
@@ -173,3 +175,272 @@ def calendar_months(start, end) -> pd.Series:
     """
     a, b = pd.to_datetime(pd.Series(start)), pd.to_datetime(pd.Series(end))
     return ((b.dt.year - a.dt.year) * 12 + (b.dt.month - a.dt.month)).astype(float)
+
+
+# ---------------------------------------------------------------------------
+# The input parsers: R's schema typing (.coerce_to_type(type = "date"),
+# R/input_schemas.R), its checks' parser (.parse_any_date,
+# R/validators_input.R) and its transforms' parser (normalise_extract_date,
+# R/transform_lending.R), value for value. Each format is tried only on values
+# of its shape -- as.Date() reads a prefix and ignores the rest, which is how
+# an unanchored list once read "31-DEC-2025" as 2020-12-31 -- and a date
+# outside 1900-2200 is NA. Each distinct value is parsed once, so a million
+# rows cost what their few distinct dates cost.
+# ---------------------------------------------------------------------------
+import datetime as _dt
+import math as _math
+
+DATE_MIN = pd.Timestamp("1900-01-01")
+DATE_MAX = pd.Timestamp("2200-12-31")
+_ORIGIN = pd.Timestamp("1899-12-30")          # Excel's day 0, as R's origin
+_SERIAL_MAX = (DATE_MAX - _ORIGIN).days
+_EPOCH = pd.Timestamp("1970-01-01")
+_UNIX_MAX = (DATE_MAX - _EPOCH).days * 86400 + 86399
+
+_MONTH_ABB = {m: i + 1 for i, m in enumerate(
+    ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT",
+     "NOV", "DEC"])}
+_MONTH_FULL = {m: i + 1 for i, m in enumerate(
+    ["JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST",
+     "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"])}
+# R's as.numeric() on text: a decimal or scientific number, signed
+_RX_NUMBER = re.compile(r"^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$")
+
+
+def date_in_range(d) -> pd.Series:
+    """NA for a date outside 1900-2200, R's .date_in_range()."""
+    d = pd.Series(d)
+    if not pd.api.types.is_datetime64_any_dtype(d):
+        d = pd.to_datetime(d, errors="coerce")
+    return d.where(d.isna() | ((d >= DATE_MIN) & (d <= DATE_MAX)))
+
+
+def _ts(y, m, d):
+    try:
+        t = pd.Timestamp(year=int(y), month=int(m), day=int(d))
+    except (ValueError, OverflowError):
+        return pd.NaT
+    return t if DATE_MIN <= t <= DATE_MAX else pd.NaT
+
+
+def _yy(y: str) -> int:
+    return _two_digit_year(int(y))
+
+
+def _mon(tok: str, full: bool):
+    """R's %b / %B: the month's full name or its abbreviation, any case."""
+    t = tok.upper()
+    m = _MONTH_FULL.get(t) if full else None
+    return m if m is not None else _MONTH_ABB.get(t)
+
+
+# (anchored shape, [readers]); a reader takes the match and returns a date or
+# NaT, and the next reader is tried only when one returns NaT.
+def _rule(rx, *readers):
+    return (re.compile(rx), readers)
+
+
+_ISO_GUARDED = _rule(r"^(\d{4})-(\d{1,2})-(\d{1,2})(?:\D|$)",
+                     lambda g: _ts(g[0], g[1], g[2]))
+_MDY4_EITHER = _rule(r"^(\d{1,2})/(\d{1,2})/(\d{4})$",
+                     lambda g: _ts(g[2], g[0], g[1]),     # %m/%d/%Y
+                     lambda g: _ts(g[2], g[1], g[0]))     # %d/%m/%Y
+_MDY2 = _rule(r"^(\d{1,2})/(\d{1,2})/(\d{2})$",
+              lambda g: _ts(_yy(g[2]), g[0], g[1]))       # %m/%d/%y
+_DMON2 = _rule(r"^(\d{1,2})-([A-Za-z]{3})-(\d{2})$",
+               lambda g: _ts(_yy(g[2]), _mon(g[1], True) or 0, g[0]))
+_DMON4_ANY = _rule(r"^(\d{1,2})-([A-Za-z]{3,9})-(\d{4})$",
+                   lambda g: _ts(g[2], _mon(g[1], True) or 0, g[0]))
+_DMY_DASH = _rule(r"^(\d{1,2})-(\d{1,2})-(\d{4})$",
+                  lambda g: _ts(g[2], g[1], g[0]))        # %d-%m-%Y
+_YMD_SLASH = _rule(r"^(\d{4})/(\d{1,2})/(\d{1,2})(?:\D|$)",
+                   lambda g: _ts(g[0], g[1], g[2]))
+_COMPACT = _rule(r"^(\d{4})(\d{2})(\d{2})$",
+                 lambda g: _ts(g[0], g[1], g[2]))         # %Y%m%d
+
+# R's .EXTRACT_DATE_SHAPES and .ANY_DATE_SHAPES
+_EXTRACT_RULES = (_ISO_GUARDED, _MDY4_EITHER, _MDY2, _DMON2, _DMON4_ANY,
+                  _DMY_DASH, _YMD_SLASH)
+_ANY_RULES = _EXTRACT_RULES + (_COMPACT,)
+# R's schema chain (after the serial): ISO (a prefix, no guard), M/D/YYYY,
+# DD-MON-YY, DD-MON-YYYY with a 3-letter month, M/D/YY.
+_SCHEMA_RULES = (
+    _rule(r"^(\d{4})-(\d{1,2})-(\d{1,2})", lambda g: _ts(g[0], g[1], g[2])),
+    _rule(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", lambda g: _ts(g[2], g[0], g[1])),
+    _DMON2,
+    _rule(r"^(\d{1,2})-([A-Za-z]{3})-(\d{4})$",
+          lambda g: _ts(g[2], _mon(g[1], True) or 0, g[0])),
+    _MDY2,
+)
+
+
+def _by_shape(t: str, rules):
+    for rx, readers in rules:
+        m = rx.match(t)
+        if m is None:
+            continue
+        g = m.groups()
+        for read in readers:
+            d = read(g)
+            if d is not pd.NaT:
+                return d
+    return pd.NaT
+
+
+def _serial(x: float):
+    """An Excel serial as R reads it: whole days from 1899-12-30."""
+    if not _math.isfinite(x):
+        return pd.NaT
+    days = _math.floor(x)
+    if days < 2 or days > _SERIAL_MAX:
+        return pd.NaT
+    return _ORIGIN + pd.Timedelta(days=days)
+
+
+def _is_datelike(v) -> bool:
+    return isinstance(v, (pd.Timestamp, _dt.datetime, _dt.date, np.datetime64))
+
+
+def _as_date(v):
+    t = pd.Timestamp(v)
+    if t is pd.NaT or pd.isna(t):
+        return pd.NaT
+    if t.tzinfo is not None:
+        t = t.tz_localize(None)
+    t = t.normalize()
+    return t if DATE_MIN <= t <= DATE_MAX else pd.NaT
+
+
+def _is_number(v) -> bool:
+    return (isinstance(v, (int, float, np.integer, np.floating))
+            and not isinstance(v, (bool, np.bool_)))
+
+
+def r_text(v):
+    """A cell as R's as.character() writes it: an integral number without
+    a decimal point (46182, not 46182.0), TRUE/FALSE for a logical, None
+    for a missing value."""
+    if v is None:
+        return None
+    if isinstance(v, (bool, np.bool_)):
+        return "TRUE" if v else "FALSE"
+    if _is_number(v):
+        x = float(v)
+        if _math.isnan(x):
+            return None
+        if x.is_integer() and abs(x) < 1e15:
+            return str(int(x))
+        return f"{x:.15g}"
+    if isinstance(v, float) and _math.isnan(v):
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return str(v)
+
+
+def _map_unique(values, one) -> pd.Series:
+    s = pd.Series(values)
+    out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
+    if s.empty:
+        return out
+    if pd.api.types.is_datetime64_any_dtype(s):
+        d = s
+        if getattr(d.dt, "tz", None) is not None:
+            d = d.dt.tz_localize(None)
+        return date_in_range(d.dt.normalize().astype("datetime64[ns]"))
+    obj = s.astype(object)
+    notna = obj.notna()
+    if not notna.any():
+        return out
+    try:
+        uniq = pd.unique(obj[notna])
+    except TypeError:
+        uniq = list(dict.fromkeys(obj[notna].tolist()))
+    parsed = {}
+    for u in uniq:
+        try:
+            parsed[u] = one(u)
+        except Exception:
+            parsed[u] = pd.NaT
+    out.loc[notna] = pd.to_datetime(obj[notna].map(parsed), errors="coerce")
+    return out
+
+
+def _schema_one(v):
+    if _is_datelike(v):
+        return _as_date(v)
+    if _is_number(v):
+        x = float(v)
+        return pd.NaT if _math.isnan(x) or x <= 0 else _serial(x)
+    t = r_text(v)
+    if t is None:
+        return pd.NaT
+    t = t.strip()
+    if t == "" or t.lower() == "na":
+        return pd.NaT
+    if _RX_NUMBER.match(t) and float(t) > 0:
+        return _serial(float(t))
+    return _by_shape(t, _SCHEMA_RULES)
+
+
+def schema_parse_dates(values) -> pd.Series:
+    """R's schema typing of a date column (.coerce_to_type, R/input_schemas.R).
+
+    An Excel serial (a number above 0, as text or not) is whole days from
+    1899-12-30; text is YYYY-MM-DD (a time after it ignored), M/D/YYYY,
+    DD-MON-YY, DD-MON-YYYY or M/D/YY. Nothing else is read -- not D/M/YYYY,
+    not a compact 20260609 (that is a serial far beyond 2200) -- and a date
+    outside 1900-2200 is NA. Every check and the calculation read the typed
+    column, so this decides what a date in an extract means.
+    """
+    return _map_unique(values, _schema_one)
+
+
+def _any_one(v):
+    if _is_datelike(v):
+        return _as_date(v)
+    t = r_text(v)
+    if t is None:
+        return pd.NaT
+    t = t.strip()
+    if _RX_NUMBER.match(t):
+        x = float(t)
+        if 1 <= x < 100000:
+            return _serial(x)
+        if 1e8 <= x < 1e11:
+            secs = _math.floor(x)
+            if secs > _UNIX_MAX:
+                return pd.NaT
+            return _EPOCH + pd.Timedelta(days=secs // 86400)
+    return _by_shape(t, _ANY_RULES)
+
+
+def r_parse_any_dates(values) -> pd.Series:
+    """R's .parse_any_date() (R/validators_input.R), the checks' parser.
+
+    A number is an Excel serial (1 to 99,999) or Unix epoch seconds (1e8 to
+    1e11) by magnitude; text takes the format its shape allows: YYYY-MM-DD,
+    M/D/YYYY (else D/M/YYYY), M/D/YY, DD-MON-YY, DD-MON-YYYY (month
+    abbreviated or in full), D-M-YYYY, YYYY/MM/DD or YYYYMMDD.
+    """
+    return _map_unique(values, _any_one)
+
+
+def _extract_one(v):
+    if _is_datelike(v):
+        return _as_date(v)
+    t = r_text(v)
+    if t is None:
+        return pd.NaT
+    t = t.strip()
+    return pd.NaT if t == "" else _by_shape(t, _EXTRACT_RULES)
+
+
+def normalise_extract_dates(values) -> pd.Series:
+    """R's normalise_extract_date() (R/transform_lending.R): the shapes of
+    r_parse_any_dates without the numbers and the compact form."""
+    return _map_unique(values, _extract_one)
+

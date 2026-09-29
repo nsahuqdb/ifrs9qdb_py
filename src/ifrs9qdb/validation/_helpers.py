@@ -14,7 +14,7 @@ from ..ids import as_id
 
 __all__ = ["ok", "fail", "col", "has", "squash", "parse_any_date",
            "r_parse_date", "r_parse_dates", "resolve_input_extract_date",
-           "latest_extract_date",
+           "latest_extract_date", "extract_date_counts", "extract_date_column",
            "dup_detail", "blank_detail", "numeric_detail", "fk_detail",
            "examples_of", "text", "pad4"]
 
@@ -120,60 +120,12 @@ def parse_any_date(values) -> pd.Series:
     return best
 
 
-# R's .parse_any_date() tries these in this order, value by value.
-_R_ANY_DATE_FORMATS = ("%Y-%m-%d", "%d-%b-%y", "%d-%B-%Y", "%m/%d/%Y",
-                       "%d/%m/%Y", "%Y%m%d")
-# R's normalise_extract_date() -- the transforms' parser -- uses this order.
-_R_EXTRACT_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y",
-                      "%d-%b-%y", "%d-%b-%Y", "%d-%m-%Y", "%Y/%m/%d")
-
-
-def _by_formats(text: pd.Series, formats, out: pd.Series | None = None) -> pd.Series:
-    """Parse ``text`` as R's as.Date(format=) loops do: each format in turn,
-    applied to whatever is still unparsed. R ignores anything after the date
-    (a time of day), hence ``exact=False``."""
-    if out is None:
-        out = pd.Series(pd.NaT, index=text.index, dtype="datetime64[ns]")
-    blank = text.isna() | text.str.lower().isin(["", "nan", "nat", "none"])
-    for fmt in formats:
-        todo = out.isna() & ~blank
-        if not todo.any():
-            break
-        p = pd.to_datetime(text[todo], format=fmt, errors="coerce", exact=False)
-        good = p.notna()
-        if good.any():
-            out.loc[p.index[good]] = p[good].dt.normalize()
-    return out
-
-
 def r_parse_dates(values) -> pd.Series:
-    """R's .parse_any_date(), vectorised as R runs it.
-
-    A number is an Excel serial (1 to 99,999) or Unix epoch seconds (1e8 to
-    1e11), by magnitude; anything else takes the first of R's formats that
-    parses it (%Y-%m-%d, %d-%b-%y, %d-%B-%Y, %m/%d/%Y, %d/%m/%Y, %Y%m%d).
-
-    Faithful to R, faults included: "31-DEC-2025" matches %d-%b-%y first and
-    reads as 2020-12-31, because R (like exact=False here) ignores what
-    follows the match. The schema layer types dates before the checks and the
-    pipeline see them, so on real inputs this chain only meets values that
-    are already dates.
-    """
-    s = pd.Series(values)
-    if pd.api.types.is_datetime64_any_dtype(s):
-        return pd.to_datetime(s).dt.normalize()
-    text = s.astype(str).str.strip().where(s.notna())
-    out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
-    num = pd.to_numeric(text, errors="coerce")
-    excel = num.notna() & (num >= 1) & (num < 100000)
-    unix = num.notna() & (num >= 1e8) & (num < 1e11)
-    if excel.any():
-        out.loc[excel] = (pd.Timestamp("1899-12-30")
-                          + pd.to_timedelta(np.floor(num[excel]), unit="D"))
-    if unix.any():
-        out.loc[unix] = pd.to_datetime(num[unix].astype("int64"),
-                                       unit="s").dt.normalize()
-    return _by_formats(text, _R_ANY_DATE_FORMATS, out)
+    """R's .parse_any_date(), the checks' parser: see
+    ifrs9qdb.dates.r_parse_any_dates. Each format reads only values of its
+    shape, and a date outside 1900-2200 is NA."""
+    from ..dates import r_parse_any_dates
+    return r_parse_any_dates(values)
 
 
 def r_parse_date(value) -> pd.Timestamp | None:
@@ -184,53 +136,74 @@ def r_parse_date(value) -> pd.Timestamp | None:
     return None if pd.isna(t) else pd.Timestamp(t)
 
 
+def extract_date_column(frame):
+    """A file's EXTRACTDA as R's checks see it. On a schema-typed frame only
+    the typed ``extract_date`` counts: R's typed table carries EXTRACTDA only
+    where the file's schema defines it (not Origination, RepaymentSchedule,
+    CustomerStagingFlagInvestments...), and the raw column kept beside the
+    typed ones here must not add a file R does not look at. A raw frame
+    (a test's dict) is read by its header."""
+    if frame is None or len(frame) == 0:
+        return None
+    if getattr(frame, "attrs", {}).get("canonical"):
+        return frame["extract_date"] if "extract_date" in frame.columns else None
+    return col(frame, "extract_date", "EXTRACTDA", "EXTRACTDATE")
+
+
+def extract_date_counts(frame) -> pd.DataFrame:
+    """Every EXTRACTDA date one file carries, with its row count: columns
+    date and rows, most rows first, a tie earliest first -- R's
+    .extract_date_counts(). Pass a schema-typed frame, as R does: EXTRACTDA
+    is then already a date and only a raw string is parsed here."""
+    empty = pd.DataFrame({"date": pd.Series(dtype="datetime64[ns]"),
+                          "rows": pd.Series(dtype="int64")})
+    c = extract_date_column(frame)
+    if c is None:
+        return empty
+    s = pd.Series(c)
+    if pd.api.types.is_datetime64_any_dtype(s):
+        from ..dates import date_in_range
+        d = date_in_range(s.dt.normalize())
+    else:
+        key = text(s)
+        key = key.where(key != "")
+        d = r_parse_dates(key)
+    d = d.dropna()
+    if d.empty:
+        return empty
+    counts = d.value_counts()
+    out = pd.DataFrame({"date": pd.to_datetime(counts.index),
+                        "rows": counts.to_numpy().astype("int64")})
+    return out.sort_values(["rows", "date"], ascending=[False, True],
+                           kind="mergesort").reset_index(drop=True)
+
+
 def resolve_input_extract_date(inputs) -> pd.Timestamp | None:
     """The reporting date a run adopts, exactly as R's
-    resolve_input_extract_date() takes it from AccountMaster's EXTRACTDA.
-
-    R counts each distinct SPELLING once, not each row: the date written the
-    most different ways wins, and a tie goes to the earliest date (table()
-    sorts its names and the decreasing sort is stable). On a clean extract
-    that is its one date. On a file that mixes dates it is usually the
-    EARLIEST date, even when a single stray row carries it -- an R quirk this
-    mirrors, so that both engines date a run alike, and which
-    INPUT_extract_date_matches_run_cfg, INPUT_consistent_extract_date and
-    INPUT_extract_date_plausible report. Pass the schema-typed inputs, as R
-    does: EXTRACTDA is then already a date and only a raw string reaches the
-    format chain.
-    """
+    resolve_input_extract_date() takes it: the AccountMaster EXTRACTDA most
+    rows carry, a tie going to the earliest. Every row should carry it;
+    INPUT_extract_date_matches_run_cfg reports any that does not and
+    INPUT_extract_date_plausible a date before contracts' opening dates or
+    after today. Pass the schema-typed inputs, as R does."""
     if not has(inputs, "AccountMaster"):
         return None
-    c = col(inputs["AccountMaster"], "extract_date", "EXTRACTDA")
-    if c is None:
+    counts = extract_date_counts(inputs["AccountMaster"])
+    if counts.empty:
         return None
-    raw = pd.Series(c).dropna()
-    if raw.empty:
-        return None
-    uniq = pd.Series(pd.unique(raw.astype(str)))
-    parsed = r_parse_dates(uniq).dropna()
-    if parsed.empty:
-        return None
-    counts = parsed.dt.strftime("%Y-%m-%d").value_counts().to_dict()
-    top = max(counts.values())
-    return pd.Timestamp(min(k for k, v in counts.items() if v == top))
+    return pd.Timestamp(counts["date"].iloc[0])
 
 
 def latest_extract_date(frame) -> pd.Timestamp | None:
-    """The latest EXTRACTDA of one file -- R's transforms anchor a lapsed
-    maturity on it (max(normalise_extract_date(extract_date))). None when
-    the file carries no parseable date, and then R extends nothing."""
+    """The latest EXTRACTDA of one file: the anchor of a lapsed maturity only
+    when the run has no reporting date (R's run_reporting_date()). None when
+    the file carries no parseable date."""
     if frame is None or len(frame) == 0:
         return None
     c = col(frame, "extract_date", "EXTRACTDA", "EXTRACTDATE", "ExtractDate")
     if c is None:
         return None
-    s = pd.Series(c)
-    if pd.api.types.is_datetime64_any_dtype(s):
-        d = s.dropna()
-        return pd.Timestamp(d.max()).normalize() if len(d) else None
-    uniq = pd.Series(pd.unique(s.dropna().astype(str).str.strip()))
-    d = _by_formats(uniq, _R_EXTRACT_FORMATS).dropna()
+    from ..dates import normalise_extract_dates
+    d = normalise_extract_dates(c).dropna()
     return pd.Timestamp(d.max()) if len(d) else None
 
 

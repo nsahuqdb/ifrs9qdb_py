@@ -125,9 +125,14 @@ def _bool(s):
 
 
 def _date(s):
+    """An input date column as R's schema types it before the transforms see
+    it (ifrs9qdb.dates.schema_parse_dates): only the formats the extracts
+    use, a date outside 1900-2200 blank. A looser parse would read a value R
+    leaves blank -- "31/12/2025", "2025/12/31" -- and price it."""
     if s is None:
         return None
-    return pd.to_datetime(s, errors="coerce", format="mixed", dayfirst=False)
+    from ..dates import schema_parse_dates
+    return schema_parse_dates(s)
 
 
 
@@ -225,29 +230,31 @@ def transform_collateral(raw: pd.DataFrame,
 
 
 def transform_allocation(raw: pd.DataFrame,
-                         extract_date: str | None = None) -> pd.DataFrame:
+                         extract_date: str | None = None,
+                         unit: str = "percent") -> pd.DataFrame:
     """Which collateral is allocated to which contract.
 
     An allocation pointing at a collateral record that does not exist makes LIC
     return NaN coverage, which blanks the whole contract's ECL. The transform
     does not drop those rows -- the validators report them, so a silent
     correction here cannot hide a source-data problem.
+
+    ``unit`` is config.yml's run.allocation_percentage_unit (see
+    ifrs9qdb.runconfig): the source writes 10.09 for ten per cent and LIC
+    wants the fraction, so a percent file is divided by 100. The unit is
+    configured, not guessed from the values -- a guess read a file whose
+    percentages were all at most 1 as fractions, 100 times too large -- and
+    INPUT_ACA_allocation_unit_consistent reports a file that contradicts it.
+    As R's write_account_collateral_allocation().
     """
     # The export repeats its headings every page. R strips them before this
     # point; left in, one arrives as an allocation of collateral "COLLATERALID"
     # to contract "CONTRACTID".
     from .lending import drop_repeated_headers
+    from ..runconfig import allocation_divisor
     raw = drop_repeated_headers(raw)
-    # The source writes 10.09 for ten per cent; LIC wants the fraction.
-    # Getting this wrong scales every collateral allocation by a hundred,
-    # which would show up as coverage far above 100% rather than as an error.
-    # R's writer detects the scale: it divides only when some value exceeds 1,
-    # so a file already in fractions passes through unchanged (and a percent
-    # file whose every allocation is at most 1% would too -- see
-    # INPUT_DATA_ISSUES.md).
     pct = _num(at(raw, 3, "ALLOCATIONPERCENTAGE"))
-    if bool((pct > 1).any()):
-        pct = pct / 100.0
+    pct = pct / allocation_divisor(pct, unit)
     return pd.DataFrame({
         "ExtractDate": _stamp(extract_date, at(raw, 0, "EXTRACTDA"), raw.index),
         "CollateralId": at(raw, 1, "COLLATERALID"),
@@ -546,6 +553,13 @@ def write_outputs(out_dir, tables: dict[str, pd.DataFrame],
             df = df.copy()
             v = pd.to_numeric(df["PDLifetime"], errors="coerce")
             df["PDLifetime"] = [("" if pd.isna(x) else f"{x:.16f}") for x in v]
+        if name == "AccountCollateralAllocation.csv" and "AllocationPercentage" in df.columns:
+            # Four decimals, as R writes it (formatC(, "f", digits = 4) in
+            # write_account_collateral_allocation): the share LIC reads is
+            # the rounded one, and a share below 0.00005 is written 0.0000.
+            df = df.copy()
+            v = pd.to_numeric(df["AllocationPercentage"], errors="coerce")
+            df["AllocationPercentage"] = [("" if pd.isna(x) else f"{x:.4f}") for x in v]
         df.to_csv(path, index=False, na_rep="")
         written[name] = path
         if verbose:

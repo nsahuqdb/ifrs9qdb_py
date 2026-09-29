@@ -27,7 +27,8 @@ import pandas as pd
 
 from ..ids import as_id
 
-__all__ = ["INPUT_SCHEMAS", "canonicalise", "CanonicalInputs", "strip_junk_rows"]
+__all__ = ["INPUT_SCHEMAS", "canonicalise", "CanonicalInputs", "strip_junk_rows",
+           "schema_unread_values"]
 
 
 def _c(canonical, sources, position, type_="character", required=True):
@@ -138,22 +139,22 @@ INPUT_SCHEMAS: dict[str, list[dict]] = {
         _c("industry_code", ["INDUSTRYCODE"], 2, required=False),
         _c("industry_description", ["INDUSTRYDESCRIPTION"], 3, required=False),
     ],
-    # R/input_schemas.R lists these positions as 1..5, but the extract carries
-    # EXTRACTDA first and CONTRACTID second, so everything after the id is read
-    # from the wrong column (origination_pd_12m would hold the contract id).
-    # Mirrored exactly for parity; recorded in INPUT_DATA_ISSUES.md. Harmless
-    # only because both writers emit origination values blank.
+    # The extract carries EXTRACTDA first and CONTRACTID second, as every
+    # other file does; the origination fields follow under truncated headers
+    # ("O", "I"), so they are found by position. The positions used to start
+    # at 1 in both engines, which read the contract id as the origination PD
+    # (INPUT_values_typed reported 1,065 "unreadable" ids); corrected in both.
     "Origination": [
-        _c("contract_id", ["CONTRACTID", "KEY_1"], 1),
-        _c("origination_pd_12m", ["PD12M"], 2, "numeric", False),
-        _c("origination_rating", ["RATING"], 3, required=False),
-        _c("origination_dpd", ["PASTDUEDAYS"], 4, "integer", False),
-        _c("origination_watchlist", ["ISWATCHLIST"], 5, "integer", False),
+        _c("contract_id", ["CONTRACTID", "KEY_1"], 2),
+        _c("origination_pd_12m", ["PD12M"], 3, "numeric", False),
+        _c("origination_rating", ["RATING"], 4, required=False),
+        _c("origination_dpd", ["PASTDUEDAYS"], 5, "integer", False),
+        _c("origination_watchlist", ["ISWATCHLIST"], 6, "integer", False),
     ],
     "OriginationInvestments": [
-        _c("contract_id", ["CONTRACTID", "KEY_1"], 1),
-        _c("origination_pd_12m", ["PD12M"], 2, "numeric", False),
-        _c("origination_rating", ["RATING"], 3, required=False),
+        _c("contract_id", ["CONTRACTID", "KEY_1"], 2),
+        _c("origination_pd_12m", ["PD12M"], 3, "numeric", False),
+        _c("origination_rating", ["RATING"], 4, required=False),
     ],
 }
 
@@ -197,14 +198,20 @@ def strip_junk_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 
 
 def _coerce(values: pd.Series, type_: str, canonical: str) -> pd.Series:
+    """R's .coerce_to_type(), type by type."""
     if type_ in ("numeric", "integer"):
         v = pd.to_numeric(values, errors="coerce")
-        return v.round() if type_ == "integer" else v
+        if type_ == "integer":
+            # R's as.integer(): truncates toward zero, NA beyond 32 bits
+            v = np.trunc(v).where(v.abs() <= 2147483647)
+        return v
     if type_ == "date":
-        from ._helpers import parse_any_date
-        return parse_any_date(values)
+        from ..dates import schema_parse_dates
+        return schema_parse_dates(values)
     if type_ == "logical":
-        s = values.astype(str).str.strip().str.upper()
+        from ..dates import r_text
+        s = values.map(r_text).astype(object).where(values.notna(), "")
+        s = s.astype(str).str.strip().str.upper()
         out = pd.Series(np.nan, index=values.index, dtype=object)
         out[s.isin(["TRUE", "T", "1", "Y", "YES"])] = True
         out[s.isin(["FALSE", "F", "0", "N", "NO"])] = False
@@ -215,11 +222,39 @@ def _coerce(values: pd.Series, type_: str, canonical: str) -> pd.Series:
     return s.replace({"": np.nan, "nan": np.nan})
 
 
+# Missing-value markers: a value the typing reads as blank, not as a value it
+# could not read. The markers pandas' readers turn into NaN, so both engines
+# count the same values whichever reader met the file (R keeps them as text).
+_BLANK_MARKERS = {"", "NA", "N/A", "#N/A", "#N/A N/A", "#NA", "NULL", "NAN",
+                  "-NAN", "NONE", "<NA>", "-1.#IND", "-1.#QNAN", "1.#IND",
+                  "1.#QNAN"}
+
+
+def _unread(raw: pd.Series, typed: pd.Series, type_: str, source) -> dict | None:
+    """R's .unread_values(): the non-blank raw values a date or number column
+    holds that did not read as its type."""
+    if type_ not in ("date", "numeric", "integer", "logical") or len(raw) == 0:
+        return None
+    from ..dates import r_text
+    txt = raw.map(r_text)
+    blank = txt.isna() | txt.astype(str).str.strip().str.upper().isin(_BLANK_MARKERS)
+    lost = pd.Series(typed).isna().to_numpy() & ~blank.to_numpy()
+    if not lost.any():
+        return None
+    vals = txt[lost].astype(str).str.strip()
+    # the header as the file wrote it: pandas' "O.1" is R's "O...2"
+    return {"source": re.sub(r"\.\d+$", "", str(source)).strip(),
+            "type": type_, "n": int(lost.sum()),
+            "sample": list(dict.fromkeys(vals.tolist()))[:5]}
+
+
 def _canonical_frame(raw: pd.DataFrame, schema: list[dict]) -> pd.DataFrame:
     """Raw columns kept, canonical columns added -- so a check written against
-    either spelling finds its data."""
+    either spelling finds its data. What the typing could not read is kept in
+    ``attrs["schema_unread"]``, as R keeps it in attr(, "schema_unread")."""
     out = raw.copy()
     upper = {str(c).strip().upper(): c for c in raw.columns}
+    unread = {}
     for spec in schema:
         src = None
         for name in spec["sources"]:
@@ -231,8 +266,36 @@ def _canonical_frame(raw: pd.DataFrame, schema: list[dict]) -> pd.DataFrame:
         if src is None:
             out[spec["canonical"]] = np.nan
             continue
-        out[spec["canonical"]] = _coerce(raw[src], spec["type"], spec["canonical"])
+        typed = _coerce(raw[src], spec["type"], spec["canonical"])
+        out[spec["canonical"]] = typed
+        u = _unread(raw[src], typed, spec["type"], src)
+        if u is not None:
+            unread[spec["canonical"]] = u
+    out.attrs = {k: v for k, v in raw.attrs.items() if k != "schema_unread"}
+    # typed by the schema: the checks read its typed columns, as R's do
+    out.attrs["canonical"] = True
+    if unread:
+        out.attrs["schema_unread"] = unread
     return out
+
+
+def schema_unread_values(inputs) -> pd.DataFrame:
+    """The values the schema could not type, per file and column (R's
+    schema_unread_values): a date in a format the schema does not know, text
+    in an amount, a number with a thousands separator. The typed column holds
+    a blank there, and every check and calculation after it sees a blank."""
+    rows = []
+    tables = getattr(inputs, "tables", None)
+    if tables is None:
+        tables = dict(inputs) if isinstance(inputs, dict) else {}
+    for key, df in tables.items():
+        un = getattr(df, "attrs", {}).get("schema_unread") if df is not None else None
+        for cn, u in (un or {}).items():
+            rows.append({"file": key, "column": cn, "source": u.get("source", cn),
+                         "type": u.get("type"), "n": int(u["n"]),
+                         "sample": " | ".join(u.get("sample", []))})
+    return pd.DataFrame(rows, columns=["file", "column", "source", "type", "n",
+                                       "sample"])
 
 
 @dataclass

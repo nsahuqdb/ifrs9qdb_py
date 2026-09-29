@@ -111,7 +111,10 @@ def _read_html_table(path: Path) -> pd.DataFrame:
     if text is None:
         text = raw.decode("latin-1", errors="replace")
 
-    tables = pd.read_html(io.StringIO(text), flavor="lxml")
+    # thousands=None: R's reader (rvest) does not read "1,234.5" as a number,
+    # so neither does this -- both engines then report it as a value the
+    # typing could not read (INPUT_values_typed) instead of one pricing it.
+    tables = pd.read_html(io.StringIO(text), flavor="lxml", thousands=None)
     if not tables:
         return pd.DataFrame()
     df = max(tables, key=len)          # the data table, not a heading table

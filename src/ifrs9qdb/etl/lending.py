@@ -412,7 +412,9 @@ def _extend_maturity(maturity, reporting_date, thresholds) -> pd.Series:
     description in staging_thresholds.csv says ``<=``; the R port and the V4
     formula both use ``<``, and this follows them.
     """
-    raw = pd.to_datetime(maturity, errors="coerce", format="mixed")
+    # read as R's schema types MATURITYDATE (see transform._date)
+    from ..dates import schema_parse_dates
+    raw = schema_parse_dates(maturity)
     if reporting_date is None:
         return raw
     ref = pd.Timestamp(reporting_date).normalize()

@@ -65,8 +65,10 @@ def build_lifetime_parameter_other(
 
     ref = pd.to_datetime(reporting_date)
     key = pick(repayment_schedule, "KEY_1", "ContractId", "CONTRACTID")
-    start = pd.to_datetime(pick(repayment_schedule, "START_DAT", "START_DATE",
-                                "StartDate"), errors="coerce", format="mixed")
+    # read as R's schema types START_DATE (see transform._date)
+    from ..dates import schema_parse_dates
+    start = pick(repayment_schedule, "START_DAT", "START_DATE", "StartDate")
+    start = None if start is None else schema_parse_dates(start)
     balance = pd.to_numeric(pick(repayment_schedule, "BALANCE", "BAL"),
                             errors="coerce")
     repayment = pd.to_numeric(pick(repayment_schedule, "REPAYMENT",

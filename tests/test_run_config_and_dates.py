@@ -124,30 +124,33 @@ class TestTheReportingDateIsRs:
     def test_a_clean_extract_has_one_date(self):
         assert resolve_input_extract_date(_am(["6/9/2026"] * 5)) == pd.Timestamp("2026-06-09")
 
-    def test_r_counts_spellings_not_rows(self):
-        """R's resolve_input_extract_date() tables UNIQUE strings: with one
-        spelling per date every date counts once and the earliest wins -- even
-        when a single stray row carries it. Mirrored, and reported by
-        INPUT_extract_date_matches_run_cfg / INPUT_extract_date_plausible."""
+    def test_the_date_most_rows_carry_wins(self):
+        """R's resolve_input_extract_date() counts ROWS per date (each
+        spelling parsed once): one stray row cannot redate the book. A tie
+        goes to the earliest. INPUT_extract_date_matches_run_cfg reports the
+        stray rows, INPUT_extract_date_plausible a wrong date."""
         assert resolve_input_extract_date(
             _am(["2026-06-09"] * 7000 + ["2026-07-01"])) == pd.Timestamp("2026-06-09")
         assert resolve_input_extract_date(
-            _am(["2026-07-01"] * 7000 + ["2026-06-09"])) == pd.Timestamp("2026-06-09")
+            _am(["2026-07-01"] * 7000 + ["2026-06-09"])) == pd.Timestamp("2026-07-01")
+        # two spellings of one date are one date
         assert resolve_input_extract_date(
             _am(["2026-07-01", "7/1/2026", "2026-06-09"])) == pd.Timestamp("2026-07-01")
+        assert resolve_input_extract_date(
+            _am(["6/9/2026", "5/31/2026"])) == pd.Timestamp("2026-05-31")
         assert resolve_input_extract_date({}) is None
 
-    def test_rs_date_parser_faults_included(self):
+    def test_rs_date_parser_reads_each_shape_its_own_way(self):
         assert r_parse_date("09-JUN-26") == pd.Timestamp("2026-06-09")
         assert r_parse_date("45817") == pd.Timestamp("2025-06-09")      # Excel serial
         assert r_parse_date("20260609") == pd.Timestamp("2026-06-09")
         assert r_parse_date("2026-06-09 00:00:00") == pd.Timestamp("2026-06-09")
-        # R's %d-%b-%y matches first and ignores the rest: a known fault, only
-        # reachable with untyped strings (the schema layer types EXTRACTDA)
-        assert r_parse_date("31-DEC-2025") == pd.Timestamp("2020-12-31")
+        # an unanchored %d-%b-%y once read this as 2020-12-31
+        assert r_parse_date("31-DEC-2025") == pd.Timestamp("2025-12-31")
         assert r_parse_date("") is None and r_parse_date(None) is None
 
-    def test_the_transforms_anchor_on_their_own_latest_date(self):
+    def test_the_fallback_anchor_is_the_files_latest_date(self):
+        """Only when the run has no reporting date (R's run_reporting_date)."""
         df = pd.DataFrame({"EXTRACTDA": ["6/9/2026", "7/1/2026", None]})
         assert latest_extract_date(df) == pd.Timestamp("2026-07-01")
         assert latest_extract_date(pd.DataFrame({"X": [1]})) is None
@@ -215,15 +218,20 @@ class TestTheReportingDateIsPlausible:
             "OPENDATE": ["1/1/2020", "5/5/2024", "6/9/2026"]})}
         assert _plausible().fn(inputs=inputs)["passed"]
 
-    def test_a_stray_earlier_row_that_redates_the_book_fails(self):
+    def test_a_file_split_between_two_dates_is_dated_by_the_earlier(self):
         inputs = {"AccountMaster": pd.DataFrame({
-            "EXTRACTDA": ["6/9/2026", "6/9/2026", "5/31/2026"],
-            "OPENDATE": ["1/1/2020", "6/5/2026", "6/9/2026"]})}
+            "EXTRACTDA": ["6/9/2026", "5/31/2026"],
+            "OPENDATE": ["1/1/2020", "6/5/2026"]})}
         r = _plausible().fn(inputs=inputs)
         assert not r["passed"]
         assert r["detail"] == ("reporting date 2026-05-31 is before the OPENDATE of "
-                               "2 contract(s) (latest 2026-06-09) - EXTRACTDA is "
+                               "1 contract(s) (latest 2026-06-05) - EXTRACTDA is "
                                "stale, mistyped or mixed")
+        # one stray row among many no longer redates the book
+        inputs = {"AccountMaster": pd.DataFrame({
+            "EXTRACTDA": ["6/9/2026", "6/9/2026", "5/31/2026"],
+            "OPENDATE": ["1/1/2020", "6/5/2026", "6/9/2026"]})}
+        assert _plausible().fn(inputs=inputs)["passed"]
 
     def test_a_future_date_fails(self):
         inputs = {"AccountMaster": pd.DataFrame({
@@ -250,18 +258,21 @@ class TestCollateralFilesAsRWritesThem:
         assert list(out["CollateralCode"]) == ["", ""]
         assert len(out) == 2
 
-    def test_the_allocation_scale_is_detected(self):
-        """R divides by 100 only when some allocation exceeds 1."""
+    def test_the_allocation_unit_is_configured_not_guessed(self):
+        """R divides by the unit config.yml names (percent by default); the
+        old guess divided only when some allocation exceeded 1."""
         pct = pd.DataFrame({"EXTRACTDA": ["6/9/2026"] * 2,
                             "COLLATERALID": ["C1", "C1"],
                             "CONTRACTID": ["1", "2"],
                             "ALLOCATIONPERCENTAGE": ["57", "43"]})
         frac = pct.assign(ALLOCATIONPERCENTAGE=["0.57", "0.43"])
-        assert list(transform_allocation(pct, "6/9/2026")["AllocationPercentage"]) == \
-            pytest.approx([0.57, 0.43])
-        assert list(transform_allocation(frac, "6/9/2026")["AllocationPercentage"]) == \
-            pytest.approx([0.57, 0.43])
-
+        share = lambda raw, **kw: list(transform_allocation(raw, "6/9/2026", **kw)
+                                       ["AllocationPercentage"])
+        assert share(pct) == pytest.approx([0.57, 0.43])
+        assert share(frac, unit="fraction") == pytest.approx([0.57, 0.43])
+        assert share(frac, unit="auto") == pytest.approx([0.57, 0.43])
+        # a percent file of small shares: the guess read them as fractions
+        assert share(frac) == pytest.approx([0.0057, 0.0043])
 
 # ----------------------------------------------------------- config freeze ----
 class TestTheRunFreezesItsConfigYml:
