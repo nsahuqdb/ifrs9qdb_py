@@ -18,13 +18,13 @@ repositories.
 | Stage | Checks | Runs in | Stops a run |
 |---|---:|---|---|
 | PREFLIGHT (config + static) | 15 | pre-run check | unsuppressed ERROR blocks Start |
-| INPUT | 70 | Validate inputs (preview), pre-run check, every run | pre-run: unsuppressed ERROR blocks Start; in a run: `run.on_validation_error` |
+| INPUT | 69 | Validate inputs (preview), pre-run check, every run | pre-run: unsuppressed ERROR blocks Start; in a run: `run.on_validation_error` |
 | TRANSFORM | 28 | every run | `run.on_validation_error` |
 | DERIVED | 29 | every run | `run.on_validation_error` |
 | READY | 20 | pre-run readiness, every run | pre-run: unsuppressed ERROR blocks Start; in a run: `run.on_validation_error` |
 | REPORT | 2 | every run, after pricing | records only |
 
-164 check ids, the same in both engines (`tests/r_validator_ids.txt` in the
+163 check ids, the same in both engines (`tests/r_validator_ids.txt` in the
 Python repository is the register). A suppression — a reason, an approver, an
 optional expiry, written to the audit log — turns a finding into INFO so it
 stops blocking; the checks marked *not suppressible* below cannot be accepted
@@ -112,17 +112,6 @@ becomes blank, and the run treats it as missing. `INPUT_values_typed` (WARN)
 names each one by file and column; the field checks (ONBALANCE, MATURITYDATE,
 the allocation share...) count the blanks with their own severity.
 
-### The allocation unit
-
-`run.allocation_percentage_unit` in `config.yml` states the unit of
-ALLOCATIONPERCENTAGE: `percent` (the default; 57.25 means 57.25%), `fraction`
-(0.5725) or `auto` (percent when any value is above 1 -- the old guess, which
-read a file of percentages all at most 1% as fractions, 100 times too large).
-`INPUT_ACA_allocation_unit_consistent` (ERROR) refuses a file whose values
-contradict the setting: every value at most 1 under `percent`, any value above
-1 under `fraction`. The range, per-contract and per-collateral allocation
-checks read the configured unit.
-
 ## The row funnel
 
 `reports/readiness_funnel.csv` follows every input file from raw rows, through
@@ -147,28 +136,22 @@ Python app's readiness payload return the same table.
 
 Datasets: the June 2026 extract as delivered; the same with the schedule dates
 repaired; a copy with defects injected into every file; a copy with mixed
-EXTRACTDA dates; a copy with EXTRACTDA written DD-MON-YYYY; and three built for
+EXTRACTDA dates; a copy with EXTRACTDA written DD-MON-YYYY; and two built for
 the decisions below -- three AccountMaster rows dated 31 May and two Collateral
-rows dated 10 June (**stray rows**); every allocation delivered as a fraction
-(**fraction**, run under `percent` and under `fraction`); and unreadable values
-in five files (**garbage**: "31/02/2020" and "2020-13-01" as opening dates,
+rows dated 10 June (**stray rows**), and unreadable values in five files
+(**garbage**: "31/02/2020" and "2020-13-01" as opening dates,
 "1,234.5" as a balance, "2030-02-30" as a maturity, "12,000" as a collateral
 value, "4.46%" as an allocation, "Y" as a watch-list flag). Config variants: a
 different internal model with a null MEV weight; `mev_model_weights:
 auto_p_value`.
 
-- **Pre-run check** (85 checks: config, static, input): identical pass/fail
-  and identical messages, R against Python, on all eight datasets.
-- **Full runs**: all 149 run checks, `readiness.csv`, `readiness_funnel.csv`
+- **Pre-run check** (84 checks: config, static, input): identical pass/fail
+  and identical messages, R against Python, on all seven datasets.
+- **Full runs**: all 148 run checks, `readiness.csv`, `readiness_funnel.csv`
   and all 29 output files identical, R against Python, on every dataset and
   config variant above.
 - **Stray rows** price exactly as the clean book (1,916,701,233.09 in both
   engines): the reporting date stays 9 June. Before, R dated that run 31 May.
-- **Fraction file**: read as `percent` -- what the new
-  `INPUT_ACA_allocation_unit_consistent` ERROR refuses -- the book prices at
-  1,966,405,018.81, 49.7 million above the delivered file, every collateral
-  benefit cut a hundredfold; declared `fraction`, it prices exactly as the
-  delivered file, 1,916,701,233.09. The same in both engines.
 - **Garbage**: `INPUT_values_typed` names the seven injected values and only
   those, in both engines; the delivered June extract has none.
 - **Switched model**: ECL 1,972,982,425 in both; **auto p-value weights**:
@@ -187,7 +170,7 @@ fix R against Python.
 | 2 | The pre-run check did not apply the inputs' EXTRACTDA to `run.extract_date` before the config checks | Python | the shipped `config.yml` (empty `extract_date`, by design) blocked every run | applied first, as R's `pre_run_check()` does; `internal_model` is checked too |
 | 3 | The PD model was hardcoded to `internal_v4_production`; `run.internal_model` and `mev_model_weights.mode` were ignored, a null weight was not derived from the p-values, an unknown model was not refused | Python | a config version switching either priced on the old model, silently | `etl/model_registry.py` mirrors R's `resolve_model()`; the manifest records the resolved model; the run freezes `config.yml` with a `config_used.yml` marker |
 | 4 | Outputs, EAD and PD curves were dated from the latest EXTRACTDA | Python | a mixed-date bundle priced on a different date from R | R's rule: `resolve_input_extract_date()` for the run date; each transform's own latest date for maturity extension |
-| 5 | Collateral files stamped with their own dates; `AllocationPercentage` always divided by 100 | Python | differed from R on a mixed-date or fraction-scaled file | the run's date; R's scale detection |
+| 5 | Collateral files stamped with their own dates; `AllocationPercentage` always divided by 100 | Python | differed from R on a mixed-date file | the run's date; the share as R divides it (always by 100 since R3 below) |
 | 6 | No check caught a wrong reporting date | both | a stale or stray EXTRACTDA re-dated the book silently | `INPUT_extract_date_plausible` |
 | 7 | An overlay moved the provision but the indicative attribution split it over EAD/PD/LGD (or showed all zeros) | both | factors did not sum to the move | an **Overlay** line; the factors explain the model move |
 | 8 | The MEV forecast and weight tables read the default model | both apps | wrong components after a model switch | the run's own model, with R's resolved weights |
@@ -205,7 +188,7 @@ never depends on which one produced it.
 | R1b | `INPUT_extract_date_matches_run_cfg` compared each file's first row | both | a stray row anywhere else passed | every row of every file, with the rows named |
 | R1c | The maturity extension anchored on each file's own latest EXTRACTDA | both | a stray later row moved every lapsed maturity | the run's reporting date, as the stamps, EAD and PD curves (`run_reporting_date()`) |
 | R2 | The date parsers tried an unanchored list of formats | both | "31-DEC-2025" read as 2020-12-31, "31-12-2025" as the year 31, "6/9/26" as the year 26 | each format only on values of its shape; any date outside 1900-2200 is blank, so the checks report it |
-| R3 | `AllocationPercentage` was divided by 100 only if some value exceeded 1 | both | a percent file of shares all at most 1% read 100 times too large | `run.allocation_percentage_unit` (percent, fraction or auto); `INPUT_ACA_allocation_unit_consistent` (ERROR) refuses a file that contradicts it; the range and sum checks read the unit |
+| R3 | `AllocationPercentage` was divided by 100 only if some value exceeded 1 | both | a percent file of shares all at most 1% read 100 times too large | always divided by 100: the extract always writes a percentage (0-100) |
 | D | Python typed dates with the format that fitted most of a column; R value by value | Python | "31/12/2025", "2025/12/31" typed in Python, blank in R | R's schema rules, value for value (`ifrs9qdb.dates`) |
 
 And found on the way, while proving those:
@@ -221,4 +204,4 @@ And found on the way, while proving those:
 | 16 | Cancel at the pause left the partial run folder | R app | a cancelled run listed under Browse runs | removed, and `run_cancelled` logged, as in the Python app |
 | 17 | The R assistant looked for `output/`; runs write `Output/` | R app | no file found on a case-sensitive file system | `Output/`, and the overlaid report when a run carries one |
 | 18 | The Python reader read "1,234.5" in an HTML extract as 1234.5 | Python | R blanked it, Python priced it | read as R reads it, and both report it |
-| 19 | Python wrote `AllocationPercentage` at full precision; R writes four decimals | Python | a share below 0.00005 (a fraction file read as percent) priced differently | four decimals, as R: the file is byte-for-byte R's |
+| 19 | Python wrote `AllocationPercentage` at full precision; R writes four decimals | Python | a share below 0.00005 (a percentage below 0.005%) priced differently | four decimals, as R: the file is byte-for-byte R's |

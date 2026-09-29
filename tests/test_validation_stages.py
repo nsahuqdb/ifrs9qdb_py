@@ -28,14 +28,14 @@ def static():
 
 class TestTheCatalogue:
     def test_the_run_suite_has_the_same_shape_as_the_r_report(self):
-        """R's validation.csv on a phased run: 149 checks -- INPUT 70,
+        """R's validation.csv on a phased run: 148 checks -- INPUT 69,
         TRANSFORM 28, DERIVED 29, READY 20, REPORT 2."""
         from ifrs9qdb.validation.readiness import (READY_STAGE_VALIDATORS,
                                                    REPORT_STAGE_VALIDATORS)
-        assert len(V.INPUT_STAGE) == 70
+        assert len(V.INPUT_STAGE) == 69
         assert len(V.TRANSFORM_STAGE) == 28
         assert len(V.DERIVED_STAGE) == 29
-        assert len(V.STAGE_VALIDATORS) == 127
+        assert len(V.STAGE_VALIDATORS) == 126
         assert len(READY_STAGE_VALIDATORS) == 20
         assert len(REPORT_STAGE_VALIDATORS) == 2
 

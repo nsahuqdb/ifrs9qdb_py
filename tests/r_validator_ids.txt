@@ -37,7 +37,6 @@ DERIVED_STPD_row_count
 DERIVED_STPD_schema
 DERIVED_STPD_zero_ttc_zero_curve
 INPUT_ACA_allocation_in_percent_range
-INPUT_ACA_allocation_unit_consistent
 INPUT_ACA_contract_fk
 INPUT_ACA_pair_unique
 INPUT_ACA_total_allocation_per_contract

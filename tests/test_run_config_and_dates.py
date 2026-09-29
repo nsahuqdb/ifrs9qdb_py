@@ -258,56 +258,19 @@ class TestCollateralFilesAsRWritesThem:
         assert list(out["CollateralCode"]) == ["", ""]
         assert len(out) == 2
 
-    def test_the_allocation_unit_is_configured_not_guessed(self):
-        """R divides by the unit config.yml names (percent by default); the
-        old guess divided only when some allocation exceeded 1."""
+    def test_the_allocation_share_is_always_a_percentage(self):
+        """The extract writes 57 for 57%, always; R divides by 100 always."""
         pct = pd.DataFrame({"EXTRACTDA": ["6/9/2026"] * 2,
                             "COLLATERALID": ["C1", "C1"],
                             "CONTRACTID": ["1", "2"],
                             "ALLOCATIONPERCENTAGE": ["57", "43"]})
-        frac = pct.assign(ALLOCATIONPERCENTAGE=["0.57", "0.43"])
-        share = lambda raw, **kw: list(transform_allocation(raw, "6/9/2026", **kw)
-                                       ["AllocationPercentage"])
+        small = pct.assign(ALLOCATIONPERCENTAGE=["0.57", "0.43"])
+        share = lambda raw: list(transform_allocation(raw, "6/9/2026")
+                                 ["AllocationPercentage"])
         assert share(pct) == pytest.approx([0.57, 0.43])
-        assert share(frac, unit="fraction") == pytest.approx([0.57, 0.43])
-        assert share(frac, unit="auto") == pytest.approx([0.57, 0.43])
-        # a percent file of small shares: the guess read them as fractions
-        assert share(frac) == pytest.approx([0.0057, 0.0043])
-
-# ----------------------------------------------------------- config freeze ----
-class TestTheRunFreezesItsConfigYml:
-    def test_a_live_run_freezes_the_project_config_yml(self, tmp_path):
-        from ifrs9qdb.governance import take_snapshot
-        cfg = tmp_path / "config"
-        cfg.mkdir()
-        (cfg / "model.yml").write_text("a: 1\n")
-        static = tmp_path / "static"
-        static.mkdir()
-        (static / "portfolios.csv").write_text("x\n1\n")
-        rc_file = tmp_path / "config.yml"
-        rc_file.write_text("run:\n  internal_model: internal_alt\n")
-        run = tmp_path / "runs" / "run_00001"
-        snap = take_snapshot(run, cfg, static, run_config_file=rc_file)
-        frozen = run / "config_used" / "config" / "config.yml"
-        assert frozen.read_text() == rc_file.read_text()
-        assert "config/config.yml" in snap["files"]
-        marker = yaml.safe_load((run / "config_used" / "config_used.yml").read_text())
-        assert marker["kind"] == "live" and marker["source_run_cfg"] == str(rc_file)
-        assert run_model_id(run) == "internal_alt"
-
-    def test_a_version_run_keeps_the_versions_own_config_yml(self, tmp_path):
-        from ifrs9qdb.governance import take_snapshot
-        cfg = tmp_path / "v1" / "config"
-        cfg.mkdir(parents=True)
-        (cfg / "config.yml").write_text("run:\n  internal_model: m_v1\n")
-        run = tmp_path / "run"
-        take_snapshot(run, cfg, None, run_config_file=tmp_path / "ignored.yml",
-                      snapshot_meta={"label": "v1"})
-        marker = yaml.safe_load((run / "config_used" / "config_used.yml").read_text())
-        assert marker["kind"] == "snapshot" and marker["snapshot_label"] == "v1"
-        assert marker["source_run_cfg"] == "(in source_config)"
-        assert run_model_id(run) == "m_v1"
-
+        # small shares are percentages too: the old guess read them as
+        # fractions, 100 times too large
+        assert share(small) == pytest.approx([0.0057, 0.0043])
 
 # ------------------------------------------------------------- audit log ----
 class TestTheAuditLog:

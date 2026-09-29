@@ -41,8 +41,6 @@ CONFIG_FILE_FOR = {
     "CONFIG_portfolio_referential": "portfolios.csv",
     "CONFIG_collateral_type_coverage": "collateral_types.csv",
     "CONFIG_industry_sector_coverage": "industry_sector_mapping.csv",
-    # run.allocation_percentage_unit: the likely fix for a file in the other unit
-    "INPUT_ACA_allocation_unit_consistent": "config.yml",
 }
 
 

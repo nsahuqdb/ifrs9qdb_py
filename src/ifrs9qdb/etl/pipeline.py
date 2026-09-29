@@ -399,10 +399,8 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
         st.say("collateral", "Collateral and allocations…")
         tables["Collateral.csv"] = transform_collateral(src["Collateral"],
                                                         extract_date)
-        from ..runconfig import allocation_percentage_unit
         tables["AccountCollateralAllocation.csv"] = transform_allocation(
-            src["AccountCollateralAllocation"], extract_date,
-            unit=allocation_percentage_unit(st.run_config))
+            src["AccountCollateralAllocation"], extract_date)
         result.steps.append({
             "step": "Collateral", "ok": True,
             "detail": (f"{len(tables['Collateral.csv']):,} items, "

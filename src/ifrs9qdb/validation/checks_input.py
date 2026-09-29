@@ -433,73 +433,22 @@ def _v_account_customer_fk(inputs):
                 examples=orphans[:10])
 
 
-def _v_aca_percent_range(inputs, run_config=None):
-    """R: every blank counts as non-numeric; out of range beyond 100.0001 --
-    or 1.000001 when run.allocation_percentage_unit is fraction."""
+def _v_aca_percent_range(inputs):
+    """R: every blank counts as non-numeric; out of range beyond 100.0001."""
     if not has(inputs, "AccountCollateralAllocation"):
         return ok()
     c = col(inputs["AccountCollateralAllocation"], "allocation_percentage",
             "ALLOCATIONPERCENTAGE")
     if c is None:
         return fail(0, "AllocationPercentage column not found")
-    from ..runconfig import allocation_divisor, allocation_percentage_unit
     x = pd.to_numeric(text(c), errors="coerce")
-    top = allocation_divisor(x, allocation_percentage_unit(run_config))
-    n_bad = int((x.notna() & ((x < 0) | (x > top * 1.000001))).sum())
+    n_bad = int((x.notna() & ((x < 0) | (x > 100.0001))).sum())
     n_na = int(x.isna().sum())
     if n_bad == 0 and n_na == 0:
         return ok()
-    return fail(n_bad + n_na, f"{n_bad} outside [0,{top:g}], {n_na} non-numeric")
+    return fail(n_bad + n_na, f"{n_bad} outside [0,100], {n_na} non-numeric")
 
 
-def _v_aca_unit_consistent(inputs, run_config=None):
-    """R: the file's values contradict run.allocation_percentage_unit -- every
-    value at most 1 under percent, any value above 1 under fraction."""
-    from ..runconfig import ALLOCATION_UNITS, allocation_percentage_unit
-    unit = allocation_percentage_unit(run_config)
-    if unit not in ALLOCATION_UNITS:
-        return fail(1, f"run.allocation_percentage_unit is '{unit}'; use percent, "
-                       "fraction or auto (the run guesses as auto meanwhile)")
-    if unit == "auto" or not has(inputs, "AccountCollateralAllocation"):
-        return ok()
-    c = col(inputs["AccountCollateralAllocation"], "allocation_percentage",
-            "ALLOCATIONPERCENTAGE")
-    if c is None:
-        return ok()
-    x = pd.to_numeric(text(c), errors="coerce").dropna()
-    if x.empty:
-        return ok()
-    if unit == "percent" and x.max() <= 1 and bool((x > 0).any()):
-        return fail(len(x), f"every AllocationPercentage is at most 1 ({len(x)} "
-                            f"value(s), max {_r_num(x.max())}): the file looks like "
-                            "fractions, but run.allocation_percentage_unit is "
-                            "percent, so each share would count a hundredth of itself")
-    if unit == "fraction" and bool((x > 1).any()):
-        n = int((x > 1).sum())
-        return fail(n, f"{n} AllocationPercentage value(s) above 1 (max "
-                       f"{_r_num(x.max())}): the file looks like percentages, but "
-                       "run.allocation_percentage_unit is fraction, so those "
-                       "shares would count up to a hundred times")
-    return ok()
-
-
-def _r_num(v) -> str:
-    """A number as R's format() writes it: up to 7 significant digits, no
-    trailing zeros, and scientific notation only when it is narrower than the
-    fixed form (R's scipen = 0): 0.6, 60, 111892, but 1e-04."""
-    import math
-    x = float(v)
-    if x == 0 or not math.isfinite(x):
-        return "0" if x == 0 else str(x)
-    e = math.floor(math.log10(abs(x)))
-    fixed = f"{x:.{max(0, 6 - e)}f}"
-    if "." in fixed:
-        fixed = fixed.rstrip("0").rstrip(".")
-    mant, _, exp = f"{x:.6e}".partition("e")
-    if "." in mant:
-        mant = mant.rstrip("0").rstrip(".")
-    sci = f"{mant}e{exp}"
-    return fixed if len(fixed) <= len(sci) else sci
 
 
 def _v_aca_contract_fk(inputs, static=None):
@@ -541,7 +490,7 @@ def _v_aca_contract_fk(inputs, static=None):
                 examples=orphans[:10])
 
 
-def _v_aca_total_per_contract(inputs, run_config=None):
+def _v_aca_total_per_contract(inputs):
     """Shares summed per contract -- expected above 100% for a contract
     secured by several items, since each share is a fraction of ITS
     collateral. Informational: double allocation of one item is what
@@ -550,14 +499,11 @@ def _v_aca_total_per_contract(inputs, run_config=None):
         return ok()
     df = inputs["AccountCollateralAllocation"]
     cid = col(df, "contract_id", "CONTRACTID")
-    pc = col(df, "allocation_percentage", "ALLOCATIONPERCENTAGE")
+    pct = pd.to_numeric(col(df, "allocation_percentage", "ALLOCATIONPERCENTAGE"),
+                        errors="coerce")
     coll = col(df, "collateral_id", "COLLATERALID")
-    if cid is None or pc is None:
+    if cid is None or pct is None:
         return fail(0, "ContractId or AllocationPercentage column missing")
-    from ..runconfig import allocation_divisor, allocation_percentage_unit
-    pct = pd.to_numeric(pc, errors="coerce")
-    # in percent: a fraction file is scaled up to compare against 100
-    pct = pct * (100 / allocation_divisor(pct, allocation_percentage_unit(run_config)))
     d = pd.DataFrame({"c": as_id(cid), "p": pct,
                       "k": as_id(coll) if coll is not None else ""})
     d = d[d["c"] != ""]
@@ -826,26 +772,12 @@ INPUT_STAGE_VALIDATORS: list[Validator] = _presence_validators() + [
        "wins is an accident of ordering.",
        "De-duplicate at source."),
     _v("INPUT_ACA_allocation_in_percent_range", Severity.WARN,
-       "AllocationPercentage in [0, 100] ([0, 1] when "
-       "run.allocation_percentage_unit is fraction)",
+       "AllocationPercentage (raw, in % units) in [0, 100]",
        _v_aca_percent_range, "AccountCollateralAllocation",
        "The source writes 10.09 for ten per cent. A value outside the range "
        "usually means the column has already been converted, which would "
        "divide the collateral by a hundred again.",
        "Check the extract's units before changing anything downstream."),
-    _v("INPUT_ACA_allocation_unit_consistent", Severity.ERROR,
-       "AllocationPercentage values are in the unit config.yml "
-       "run.allocation_percentage_unit names",
-       _v_aca_unit_consistent, "AccountCollateralAllocation",
-       "The run divides each AllocationPercentage by 100 when the unit is "
-       "percent and by 1 when it is fraction, and the share decides how much "
-       "of the collateral's value reduces each contract's loss. A file in the "
-       "other unit moves every collateral benefit by a factor of 100: "
-       "fractions read as percentages lose almost all of it, percentages read "
-       "as fractions overstate it a hundredfold.",
-       "Set run.allocation_percentage_unit in config.yml to the unit the "
-       "extract uses (percent: 57.25 for 57.25%; fraction: 0.5725), or have "
-       "the extract re-delivered in the configured unit."),
     _v("INPUT_ACA_contract_fk", Severity.WARN,
        "Every ContractId in AccountCollateralAllocation exists in AccountMaster",
        _v_aca_contract_fk, "AccountCollateralAllocation",

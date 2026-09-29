@@ -23,14 +23,13 @@ print(reconciliation_report("out/", "runs/run_00001/Output"))
 ## From raw extracts to every file, R against Python — and the run itself
 
 The ETL now reproduces the R engine from the raw extracts: every one of the 29
-files a run writes, all 149 run checks, the pricing-readiness report and its
+files a run writes, all 148 run checks, the pricing-readiness report and its
 row funnel, identical R against Python on the June 2026 book as delivered, with
 its dates repaired, with defects injected into every file, with mixed and
-stray EXTRACTDA rows, with allocations delivered as fractions, with unreadable
-values in five files, and under two model configurations (a switched internal
-model with a null weight; `mev_model_weights: auto_p_value`). The pre-run
-check -- 85 config, static and input checks -- gives identical results and
-messages on all of them. Details, and what was found and fixed on the way, in
+stray EXTRACTDA rows, with unreadable values in five files, and under two model
+configurations (a switched internal model with a null weight;
+`mev_model_weights: auto_p_value`). The pre-run check -- 84 config, static and
+input checks -- gives identical results and messages on all of them. Details, and what was found and fixed on the way, in
 `PRICING_READINESS.md`.
 
 What the Python engine now does as R does, that it did not:
@@ -50,8 +49,8 @@ What the Python engine now does as R does, that it did not:
 * **Dates and typing** — `ifrs9qdb.dates` reads a date exactly as R's schema,
   checks and transforms do, value for value; the schema records what it could
   not read (`INPUT_values_typed`).
-* **The allocation unit** — `run.allocation_percentage_unit`, with the check
-  that refuses a file in the other unit (`runconfig.py`).
+* **The allocation share** — always a percentage (0-100) divided by 100, as
+  the extract always delivers it, and written with R's four decimals.
 * **The config checks** — R's path and `run:` block rules, with the inputs'
   EXTRACTDA applied first.
 

@@ -230,8 +230,7 @@ def transform_collateral(raw: pd.DataFrame,
 
 
 def transform_allocation(raw: pd.DataFrame,
-                         extract_date: str | None = None,
-                         unit: str = "percent") -> pd.DataFrame:
+                         extract_date: str | None = None) -> pd.DataFrame:
     """Which collateral is allocated to which contract.
 
     An allocation pointing at a collateral record that does not exist makes LIC
@@ -239,22 +238,18 @@ def transform_allocation(raw: pd.DataFrame,
     does not drop those rows -- the validators report them, so a silent
     correction here cannot hide a source-data problem.
 
-    ``unit`` is config.yml's run.allocation_percentage_unit (see
-    ifrs9qdb.runconfig): the source writes 10.09 for ten per cent and LIC
-    wants the fraction, so a percent file is divided by 100. The unit is
-    configured, not guessed from the values -- a guess read a file whose
-    percentages were all at most 1 as fractions, 100 times too large -- and
-    INPUT_ACA_allocation_unit_consistent reports a file that contradicts it.
-    As R's write_account_collateral_allocation().
+    The source writes 10.09 for ten per cent, always; LIC wants the fraction,
+    so the share is always divided by 100, as R's
+    write_account_collateral_allocation() does. (Both engines used to divide
+    only when some value exceeded 1, which would read a file of shares all at
+    most 1% as fractions, 100 times too large.)
     """
     # The export repeats its headings every page. R strips them before this
     # point; left in, one arrives as an allocation of collateral "COLLATERALID"
     # to contract "CONTRACTID".
     from .lending import drop_repeated_headers
-    from ..runconfig import allocation_divisor
     raw = drop_repeated_headers(raw)
-    pct = _num(at(raw, 3, "ALLOCATIONPERCENTAGE"))
-    pct = pct / allocation_divisor(pct, unit)
+    pct = _num(at(raw, 3, "ALLOCATIONPERCENTAGE")) / 100.0
     return pd.DataFrame({
         "ExtractDate": _stamp(extract_date, at(raw, 0, "EXTRACTDA"), raw.index),
         "CollateralId": at(raw, 1, "COLLATERALID"),
