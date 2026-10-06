@@ -162,6 +162,8 @@ EVENT_LABELS = {
     "snapshot_edit": "Config edited",
     "snapshot_promote": "Status changed",
     "suppression_add": "Suppression added",
+    "suppression_remove": "Suppression removed",
+    "finding_accepted": "Finding accepted",
     "overlay_saved": "Overlay saved",
     "overlay_status": "Overlay status changed",
     "overlay_applied": "Overlay applied to run",
@@ -270,6 +272,17 @@ def event_summary(row: dict) -> str:
     if ev == "suppression_add":
         return (f"Check '{s('validator_id')}' suppressed until "
                 f"{or_(s('valid_until'), '?')}")
+    if ev == "suppression_remove":
+        return (f"Suppression of '{s('validator_id')}' removed by "
+                f"{or_(s('removed_by'), '?')}: {or_(s('reason'), '?')}")
+    if ev == "finding_accepted":
+        sev = f" [{s('severity')}]" if s("severity") else ""
+        if s("source") == "standing":
+            return (f"Check '{s('validator_id')}'{sev} accepted by a standing "
+                    f"suppression approved by {or_(s('accepted_by'), '?')}: "
+                    f"{or_(s('reason'), '?')}")
+        return (f"Check '{s('validator_id')}'{sev} accepted for this run by "
+                f"{or_(s('accepted_by'), '?')}: {or_(s('reason'), '?')}")
     if ev in ("run_approved", "run_rejected"):
         return (f"Run {'approved' if ev == 'run_approved' else 'rejected'}"
                 + (f" \u2014 {s('reason')}" if s("reason") else ""))

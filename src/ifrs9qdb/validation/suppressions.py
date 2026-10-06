@@ -26,6 +26,23 @@ snapshot:
 Suppressions do NOT carry forward to a new config snapshot. A new snapshot
 starts clean, so an exception accepted for one quarter has to be accepted again
 rather than quietly becoming permanent.
+
+A suppression is ended, not deleted: ``remove_suppression`` sets its
+``valid_until`` to yesterday and records who ended it, when and why, so the
+entry stays in the file as the record of what applied until then.
+
+FINDINGS ACCEPTED FOR ONE RUN are the other kind of exception: the pipeline
+page's "accept for this run". They have the same effect on that run -- the
+finding is recorded, its effective severity is INFO -- but nothing is written
+to this file, so the next run asks again.
+
+Either way the run says what was accepted and why. Its
+``reports/accepted_findings.csv`` lists every finding accepted in it: those
+accepted for the run, and the standing suppressions that took effect (the
+check failed and was recorded as suppressed), each with its reason, who
+accepted or approved it and when. validation.md ends with the same list, the
+manifest carries it, and the audit log has a ``finding_accepted`` event for
+each, with the run id.
 """
 from __future__ import annotations
 
@@ -37,7 +54,10 @@ import pandas as pd
 import yaml
 
 __all__ = ["EMPTY_SUPPRESSIONS", "load_suppressions", "active_suppression_ids",
-           "add_suppression", "suppression_reasons"]
+           "add_suppression", "remove_suppression", "suppression_reasons",
+           "ACCEPTED_FIELDS", "RECORD_FIELDS", "normalise_accepted_findings",
+           "accepted_reasons", "accepted_findings_record",
+           "accepted_findings_markdown"]
 
 _FIELDS = ("validator_id", "reason", "approved_by", "approved_at", "valid_until")
 
@@ -195,3 +215,181 @@ def add_suppression(path, validator_id: str, reason: str,
                  "reason": reason, "approved_by": approved_by,
                  "valid_until": valid_until or None})
     return p
+
+
+def _now() -> str:
+    return _dt.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def remove_suppression(path, validator_id: str, reason: str,
+                       removed_by: str | None = None, as_of=None) -> int:
+    """End the suppressions in force for ``validator_id`` -- never delete.
+
+    Each active entry for the id gets ``valid_until`` set to the day before
+    ``as_of`` (today), so it no longer applies from today in either engine,
+    and ``removed_by``, ``removed_at`` and ``removal_reason`` saying who
+    ended it and why. The file stays the record of what applied until then.
+    Returns the number of entries ended; 0 when none was in force.
+    """
+    validator_id = str(validator_id or "").strip()
+    reason = str(reason or "").strip()
+    removed_by = _who() if removed_by is None else str(removed_by).strip()
+    if not validator_id:
+        raise ValueError("validator_id is required")
+    if not reason:
+        raise ValueError("reason is required - it is the audit trail")
+    if not removed_by:
+        raise ValueError("removed_by is required - it is the audit trail")
+    p = Path(path)
+    if not p.is_file():
+        return 0
+    try:
+        existing = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        raise ValueError(f"cannot read {p}: {exc}") from exc
+    entries = existing.get("suppressions")
+    if not isinstance(entries, list):
+        return 0
+    as_of = as_of or _dt.date.today()
+    if isinstance(as_of, _dt.datetime):
+        as_of = as_of.date()
+    yesterday = (as_of - _dt.timedelta(days=1)).isoformat()
+    ended = 0
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        if str(e.get("validator_id") or "").strip() != validator_id:
+            continue
+        one = pd.DataFrame([{c: ("" if e.get(c) is None else str(e.get(c)))
+                             for c in _FIELDS}])
+        if not active_suppression_ids(one, as_of):
+            continue
+        e["valid_until"] = yesterday
+        e["removed_by"] = removed_by
+        e["removed_at"] = _now()
+        e["removal_reason"] = reason
+        ended += 1
+    if not ended:
+        return 0
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(yaml.safe_dump(existing, sort_keys=False, allow_unicode=True),
+                   encoding="utf-8")
+    tmp.replace(p)
+    from ..audit_log import audit_event
+    audit_event({"event": "suppression_remove", "validator_id": validator_id,
+                 "reason": reason, "removed_by": removed_by,
+                 "n_entries": ended})
+    return ended
+
+
+# ------------------------------------------------- accepted for one run ----
+ACCEPTED_FIELDS = ("validator_id", "reason", "accepted_by", "accepted_at")
+
+
+def normalise_accepted_findings(accepted, user: str | None = None) -> pd.DataFrame:
+    """Findings accepted for one run, as one frame.
+
+    ``accepted`` is a list of dicts, a DataFrame, or ``{validator_id:
+    reason}``. Every entry needs a reason (ValueError otherwise -- it is the
+    audit trail); ``accepted_by`` falls back to ``user``, then the acting
+    user, and ``accepted_at`` to now. A repeated id keeps its first entry.
+    """
+    empty = pd.DataFrame({c: pd.Series(dtype="object") for c in ACCEPTED_FIELDS})
+    if accepted is None:
+        return empty
+    if isinstance(accepted, pd.DataFrame):
+        rows = accepted.to_dict(orient="records")
+    elif isinstance(accepted, dict):
+        rows = [{"validator_id": k, "reason": v} for k, v in accepted.items()]
+    else:
+        rows = list(accepted)
+    out, seen = [], set()
+    for r in rows:
+        r = dict(r or {})
+        vid = str(r.get("validator_id") or "").strip()
+        if not vid or vid in seen:
+            continue
+        reason = str(r.get("reason") or "").strip()
+        if not reason:
+            raise ValueError(f"{vid}: a reason is required - it is the audit trail")
+        by = str(r.get("accepted_by") or "").strip() or (user or _who())
+        at = str(r.get("accepted_at") or "").strip() or _now()
+        seen.add(vid)
+        out.append({"validator_id": vid, "reason": reason, "accepted_by": by,
+                    "accepted_at": at})
+    if not out:
+        return empty
+    return pd.DataFrame(out, columns=list(ACCEPTED_FIELDS))
+
+
+def accepted_reasons(accepted) -> dict[str, str]:
+    """``{validator_id: reason}`` for findings accepted for one run -- merged
+    into the suppressions the runner applies to that run only."""
+    a = normalise_accepted_findings(accepted)
+    return {r["validator_id"]: f"Accepted for this run by {r['accepted_by']}: "
+                               f"{r['reason']}"
+            for r in a.to_dict(orient="records")}
+
+
+RECORD_FIELDS = ("validator_id", "severity", "source", "reason", "accepted_by",
+                 "accepted_at", "valid_until", "in_effect")
+
+
+def accepted_findings_record(accepted, issues, standing=None,
+                             as_of=None) -> pd.DataFrame:
+    """reports/accepted_findings.csv: every finding accepted in a run, and why.
+
+    One row per finding accepted for the run (``source`` "run"), whether or
+    not its check failed, and one per standing suppression that took effect
+    -- its check failed and was recorded as suppressed -- (``source``
+    "standing", with the approver, the date and the expiry from
+    validation_suppressions.yml). ``in_effect``: the acceptance changed the
+    run, i.e. the check failed and its effective severity became INFO.
+    """
+    issues = list(issues or [])
+    sev = {i.id: str(i.severity) for i in issues}
+    hit = {i.id for i in issues if not i.passed and i.suppressed}
+    rows = []
+    for r in normalise_accepted_findings(accepted).to_dict(orient="records"):
+        vid = r["validator_id"]
+        rows.append({"validator_id": vid, "severity": sev.get(vid, ""),
+                     "source": "run", "reason": r["reason"],
+                     "accepted_by": r["accepted_by"],
+                     "accepted_at": r["accepted_at"], "valid_until": "",
+                     "in_effect": vid in hit})
+    if standing is not None and len(standing):
+        active, seen = set(active_suppression_ids(standing, as_of)), set()
+        for r in pd.DataFrame(standing).to_dict(orient="records"):
+            vid = str(r.get("validator_id") or "").strip()
+            if vid not in active or vid not in hit or vid in seen:
+                continue
+            seen.add(vid)
+            rows.append({"validator_id": vid, "severity": sev.get(vid, ""),
+                         "source": "standing",
+                         "reason": str(r.get("reason") or ""),
+                         "accepted_by": str(r.get("approved_by") or ""),
+                         "accepted_at": str(r.get("approved_at") or ""),
+                         "valid_until": str(r.get("valid_until") or ""),
+                         "in_effect": True})
+    if not rows:
+        return pd.DataFrame({c: pd.Series(dtype="object") for c in RECORD_FIELDS})
+    return pd.DataFrame(rows, columns=list(RECORD_FIELDS))
+
+
+def accepted_findings_markdown(record: pd.DataFrame) -> str:
+    """The section validation.md ends with when anything was accepted."""
+    if record is None or len(record) == 0:
+        return ""
+    lines = [f"\n## Accepted findings ({len(record)})\n"]
+    for r in record.to_dict(orient="records"):
+        sev = f" [{r['severity']}]" if r["severity"] else ""
+        if r["source"] == "run":
+            who = f"accepted for this run by {r['accepted_by']} at {r['accepted_at']}"
+        else:
+            who = (f"standing suppression approved by {r['accepted_by']} at "
+                   f"{r['accepted_at']}"
+                   + (f", valid until {r['valid_until']}" if r["valid_until"] else ""))
+        note = "" if r["in_effect"] else " (not in effect: the check did not fail)"
+        lines.append(f"- `{r['validator_id']}`{sev} {who}{note}")
+        lines.append(f"  - _Reason:_ {r['reason']}")
+    return "\n".join(lines) + "\n"

@@ -30,6 +30,31 @@ optional expiry, written to the audit log — turns a finding into INFO so it
 stops blocking; the checks marked *not suppressible* below cannot be accepted
 that way.
 
+**Accepting a finding.** A blocking finding can be accepted in two ways, each
+with a reason, and neither for a check marked *not suppressible*:
+
+* **For this run only** -- on the pipeline page (*Accept for this run...*). The
+  acceptance is passed to the pre-run check and to the run
+  (`accepted_findings =` on `pre_run_check()`, `pre_run_readiness()`,
+  `run_etl()` and `run_etl_phase1()`); nothing is written to
+  `validation_suppressions.yml`, so the next run asks again. Changing the
+  inputs, the config version or the run type clears it.
+* **Standing** -- a suppression in `validation_suppressions.yml` (*Validation
+  suppressions* page), which applies to every run until it expires or is
+  removed. Removing one (`remove_suppression()`) ends it -- `valid_until` set to
+  yesterday, with who removed it, when and why -- rather than deleting it, so
+  the history stays.
+
+Every run records what was accepted in it: `reports/accepted_findings.csv`
+(check, severity, *run* or *standing*, reason, who, when, expiry, and whether
+it took effect -- a standing suppression is listed only when its check
+failed), an *Accepted findings* section at the end of `validation.md`,
+`accepted_findings` in `manifest.json`, and one `finding_accepted` event per
+finding in the audit log. `read_run_accepted_findings()` in R and
+`ifrs9qdb.runs.read_run_accepted_findings()` in Python read it back; for a run
+made before the record existed they rebuild it from `validation.csv` and the
+run's copy of the suppressions file (`recorded = FALSE`).
+
 **Pre-run readiness** (`pre_run_readiness()` in both engines) runs the
 pipeline — load, validate, transform, EAD and PD curves, write the LIC files —
 into a temporary folder, assesses every contract, and stops before pricing.
@@ -127,6 +152,7 @@ LIC never sees; `READY_rows_carried` fails on any.
 | After a run | **Browse runs → Readiness** tab; **Validation** page | **Browse runs → Readiness** tab |
 | Audit log | "Pricing readiness: N contracts, n with no ECL, n blank in LIC, n priced with a gap" | the same sentence |
 | Files | `reports/readiness.csv`, `readiness_funnel.csv`, `readiness.md` | the same |
+| Accepted findings | **Run the pipeline → 3. Pre-run findings**: *Accept for this run...* and *Remove...* for a standing suppression; listed on the paused and the finished run, the **Validation → Accepted findings** tab, **Browse runs**, the **Approval queue**, and the **Audit log** ("Finding accepted", "Suppression removed") | the same: **Runs → Run pipeline** card 3, the paused and finished run, **Browse runs**, the **Approval queue**, the **Audit log**; **Config → Validation suppressions** to remove a standing one |
 
 Helpers: `readiness_reasons()`, `readiness_table_summary()` and
 `read_run_readiness()` in R; `ifrs9qdb.runs.read_run_readiness()` and the

@@ -83,7 +83,8 @@ def apply_input_extract_date(run_config, extract_date) -> dict | None:
 def pre_run_check(input_dir, static_dir=None, config_dir=None,
                   run_config: dict | None = None, base_dir=None,
                   suppressions_path=None, reporting_date=None,
-                  record: bool = True, include_preflight: bool = True) -> dict:
+                  record: bool = True, include_preflight: bool = True,
+                  accepted_findings=None) -> dict:
     """R's pre_run_check(): config + static + INPUT validators, suppressed.
 
     Returns ``results`` (validation.csv's columns plus ``where``),
@@ -91,19 +92,23 @@ def pre_run_check(input_dir, static_dir=None, config_dir=None,
     date with it), ``strip_log`` (junk rows removed per file) and a count
     summary. ``record`` writes the pre_run_check audit event.
     ``include_preflight=False`` runs the INPUT validators alone -- the R app's
-    data-quality preview on "Validate inputs".
+    data-quality preview on "Validate inputs". ``accepted_findings`` are the
+    findings accepted for the run being prepared (see
+    ``normalise_accepted_findings``): suppressed for this check, as they will
+    be in the run, without touching the suppressions file.
     """
     from .etl.read_inputs import read_all_inputs
     from .etl.static_ref import load_static_reference
-    from .validation import (PREFLIGHT_VALIDATORS, combine, load_suppressions,
-                             run_suite, suppression_reasons, validate_stages,
-                             validation_frame)
+    from .validation import (PREFLIGHT_VALIDATORS, accepted_reasons, combine,
+                             load_suppressions, run_suite, suppression_reasons,
+                             validate_stages, validation_frame)
     from .validation.schema import canonicalise
     src = read_all_inputs(input_dir)
     static = load_static_reference(static_dir)
     sp = Path(suppressions_path) if suppressions_path else (
         Path(config_dir) / "validation_suppressions.yml" if config_dir else None)
     supp = suppression_reasons(load_suppressions(sp)) if sp else {}
+    supp = {**supp, **accepted_reasons(accepted_findings)}
     ext = _extract_date(src)
     rd = reporting_date or ext
     rep_date = None
@@ -146,14 +151,15 @@ def pre_run_check(input_dir, static_dir=None, config_dir=None,
 
 def pre_run_readiness(input_dir, static_dir=None, config_dir=None,
                       reporting_date=None, work_dir=None, keep: bool = False,
-                      progress=None) -> dict:
+                      progress=None, accepted_findings=None) -> dict:
     """R's pre_run_readiness(): build the LIC files, assess, stop before pricing.
 
     Every gate records rather than stops (policy ``warn``), so the answer
     covers the whole book. Returns ``summary`` (contracts and exposure by
     predicted outcome), ``contracts`` (one row per contract, with its outcome
     and the reasons), ``funnel`` (rows in, rows out, per file), ``validation``
-    (every check up to READY), ``steps`` and ``error``.
+    (every check up to READY), ``steps`` and ``error``. ``accepted_findings``
+    are suppressed for the dry run as they will be in the run.
     """
     from .etl.pipeline import run_etl
     from .runs import read_run_readiness, read_run_validation
@@ -164,7 +170,8 @@ def pre_run_readiness(input_dir, static_dir=None, config_dir=None,
             r = run_etl(input_dir, work, reporting_date=reporting_date,
                         run_id="pre_run_readiness", static_dir=static_dir,
                         config_dir=config_dir, progress=progress,
-                        on_validation_error="warn", stop_before_pricing=True)
+                        on_validation_error="warn", stop_before_pricing=True,
+                        accepted_findings=accepted_findings)
         run = work / "pre_run_readiness"
         rd = read_run_readiness(run) or {}
         v = read_run_validation(run)

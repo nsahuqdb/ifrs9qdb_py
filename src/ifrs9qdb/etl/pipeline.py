@@ -140,6 +140,11 @@ class PhaseState:
     src: object = None
     static: dict | None = None
     supp: dict | None = None
+    # findings accepted for this run only (validation.suppressions'
+    # normalise_accepted_findings), and the standing suppressions file as the
+    # run read it: together, reports/accepted_findings.csv
+    accepted: pd.DataFrame | None = None
+    standing: pd.DataFrame | None = None
     stage_results: list = field(default_factory=list)
     view: pd.DataFrame | None = None
     inv: pd.DataFrame | None = None
@@ -170,7 +175,8 @@ def run_etl(input_dir, runs_dir, reporting_date=None, run_id=None,
             user: str | None = None,
             on_validation_error: str = "warn",
             stop_before_pricing: bool = False,
-            overrides: dict | None = None, **meta) -> RunResult:
+            overrides: dict | None = None,
+            accepted_findings=None, **meta) -> RunResult:
     """Build a run from the source extracts: phase 1, then phase 2.
 
     ``progress`` is called with (step, message) so a caller can show what is
@@ -203,16 +209,20 @@ def run_etl(input_dir, runs_dir, reporting_date=None, run_id=None,
     number?" before a run is committed to.
 
     ``overrides`` are applied between the phases, as the app's pause step
-    does (see ``run_etl_phase2``). ``meta`` carries the run metadata phase 1
-    records: run_purpose, portfolio_date, snapshot_meta, calculator_version,
-    input_source, run_config, project_root.
+    does (see ``run_etl_phase2``). ``accepted_findings`` are findings
+    accepted for this run only: suppressed in it, recorded in it, and not
+    written to the suppressions file, so the next run asks again. ``meta``
+    carries the run metadata phase 1 records: run_purpose, portfolio_date,
+    snapshot_meta, calculator_version, input_source, run_config,
+    project_root.
     """
     state = run_etl_phase1(input_dir, runs_dir, reporting_date=reporting_date,
                            run_id=run_id, static_dir=static_dir,
                            config_dir=config_dir, progress=progress,
                            run_type=run_type, ecl_scenario=ecl_scenario,
                            user=user, on_validation_error=on_validation_error,
-                           stop_before_pricing=stop_before_pricing, **meta)
+                           stop_before_pricing=stop_before_pricing,
+                           accepted_findings=accepted_findings, **meta)
     if state.done:
         return state.result
     return run_etl_phase2(state, overrides=overrides)
@@ -229,7 +239,7 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
                    calculator_version: str | None = None,
                    input_source: dict | None = None,
                    run_config: dict | None = None,
-                   project_root=None) -> PhaseState:
+                   project_root=None, accepted_findings=None) -> PhaseState:
     """Phase 1: read, validate INPUT, transform, validate TRANSFORM -- then stop.
 
     R's run_etl_phase1(). What comes back carries the customer-level view
@@ -260,6 +270,13 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
         on_validation_error=on_validation_error,
         stop_before_pricing=stop_before_pricing, progress=progress)
 
+    try:
+        from ..validation import normalise_accepted_findings
+        st.accepted = normalise_accepted_findings(accepted_findings, user=user)
+    except ValueError as exc:
+        result.error = f"Accepted findings: {exc}"
+        st.done = True
+        return st
     if run_dir.exists():
         result.error = (f"{run_dir} already exists. A run is never overwritten, "
                         "so that a past quarter can always be reproduced.")
@@ -275,6 +292,15 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
                  "ecl_scenario": ecl_scenario, "code_sha": _code_sha(),
                  "config_path": str(config_dir) if config_dir else None,
                  "started_at": st.started_at.strftime("%Y-%m-%dT%H:%M:%S%z")})
+    # Each finding accepted for this run, against the run it was accepted
+    # for -- logged as the run starts, so the decision is on record even if
+    # the run then fails. The standing suppressions that take effect are
+    # logged when the run's findings are final (_audit_standing).
+    for a in st.accepted.to_dict(orient="records"):
+        audit_event({"event": "finding_accepted", "run_id": run_id,
+                     "validator_id": a["validator_id"], "source": "run",
+                     "reason": a["reason"], "accepted_by": a["accepted_by"],
+                     "accepted_at": a["accepted_at"]})
     try:
         # R resolves the model before it reads anything and stops when
         # config.yml names one the registry does not hold, or a component
@@ -306,12 +332,14 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
             st.done = True
             return st
 
-        from ..validation import (load_suppressions, suppression_reasons,
-                                  validate_stages)
+        from ..validation import (accepted_reasons, load_suppressions,
+                                  suppression_reasons, validate_stages)
         st.cfg_src = Path(config_dir) if config_dir else \
             Path(__file__).parent.parent / "config"
-        st.supp = suppression_reasons(load_suppressions(
-            st.cfg_src / "validation_suppressions.yml"))
+        st.standing = load_suppressions(
+            st.cfg_src / "validation_suppressions.yml")
+        st.supp = suppression_reasons(st.standing)
+        st.supp.update(accepted_reasons(st.accepted))
         gate = _Gate(on_validation_error, result, st.stage_results, run_id)
 
         am, am2 = src["AccountMaster"], src["AccountMasterInvestments"]
@@ -478,7 +506,8 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
 
         # A paused run is legible on disk: what was found so far.
         try:
-            _write_validation(result, run_dir, st.stage_results, quiet=True)
+            _write_validation(result, run_dir, st.stage_results, quiet=True,
+                              state=st)
         except Exception:
             pass
         audit_event({"event": "run_phase1_complete", "run_id": run_id,
@@ -821,7 +850,8 @@ def run_etl_phase2(state: PhaseState, overrides: dict | None = None) -> RunResul
                              model_cfg, model_inputs, extract_date,
                              model_id=state.model_id)
 
-        _write_validation(result, run_dir, state.stage_results)
+        _write_validation(result, run_dir, state.stage_results, state=state)
+        _audit_standing(state)
 
         _write_manifest(run_dir, run_id, input_dir, extract_date, result,
                         user=user, state=state, model_cfg=model_cfg)
@@ -1003,12 +1033,13 @@ class _Gate:
 
 
 def _write_validation(result: RunResult, run_dir: Path, stage_results: list,
-                      quiet: bool = False):
+                      quiet: bool = False, state=None):
     from ..validation import combine, write_validation_reports
     if not stage_results:
         return
     findings = combine(*stage_results)
     write_validation_reports(findings, run_dir / "reports")
+    _write_accepted(run_dir / "reports", _accepted_record(state))
     summary = findings.summary()
     result.validation = summary
     if quiet:
@@ -1020,11 +1051,56 @@ def _write_validation(result: RunResult, run_dir: Path, stage_results: list,
                    f"{summary['suppressed']} suppressed")})
 
 
+def _accepted_record(state) -> pd.DataFrame | None:
+    """Every finding accepted in the run so far: those accepted for it, and
+    the standing suppressions that took effect (accepted_findings_record)."""
+    from ..validation import accepted_findings_record, combine
+    if state is None:
+        return None
+    issues = combine(*state.stage_results).issues if state.stage_results else []
+    return accepted_findings_record(state.accepted, issues, state.standing)
+
+
+def _write_accepted(reports: Path, record) -> None:
+    """reports/accepted_findings.csv, and the same list at the end of
+    validation.md -- only when something was accepted, so a run without any
+    looks as it always has."""
+    from ..validation import accepted_findings_markdown
+    if record is None or len(record) == 0:
+        return
+    reports.mkdir(parents=True, exist_ok=True)
+    out = record.copy()
+    out["in_effect"] = out["in_effect"].map({True: "TRUE", False: "FALSE"})
+    out.to_csv(reports / "accepted_findings.csv", index=False)
+    md = reports / "validation.md"
+    if md.is_file():
+        md.write_text(md.read_text(encoding="utf-8")
+                      + accepted_findings_markdown(record), encoding="utf-8")
+
+
+def _audit_standing(state) -> None:
+    """A finding_accepted event for each standing suppression that took
+    effect, once the run's findings are final. (Those accepted for the run
+    were logged when it started.)"""
+    rec = _accepted_record(state)
+    if rec is None or len(rec) == 0:
+        return
+    for r in rec[rec["source"] == "standing"].to_dict(orient="records"):
+        audit_event({"event": "finding_accepted", "run_id": state.run_id,
+                     "validator_id": r["validator_id"], "source": "standing",
+                     "severity": r["severity"], "reason": r["reason"],
+                     "accepted_by": r["accepted_by"],
+                     "accepted_at": r["accepted_at"],
+                     "valid_until": r["valid_until"] or None})
+
+
 def _halt(result: RunResult, run_dir: Path, run_id: str, input_dir,
           extract_date: str, stage_results: list, user, started: float,
           keep_ok: bool = False, state=None, applied=None) -> RunResult:
     """Stop at a gate: write what was found, then return without pricing."""
-    _write_validation(result, run_dir, stage_results)
+    _write_validation(result, run_dir, stage_results, state=state)
+    if state is not None:
+        _audit_standing(state)
     try:
         _write_manifest(run_dir, run_id, input_dir, extract_date, result,
                         user=user, state=state)
@@ -1272,6 +1348,8 @@ def _write_manifest(run_dir: Path, run_id: str, input_dir: Path,
                    or {}},
         "inputs": _manifest_inputs(input_dir),
         "overrides": result.overrides_applied or {},
+        # every finding accepted in the run (reports/accepted_findings.csv)
+        "accepted_findings": _manifest_accepted(state),
         "outputs": _manifest_outputs(run_dir / "Output"),
         "messages": [f"{st.get('step')}: {st.get('detail', '')}"
                      for st in result.steps],
@@ -1298,6 +1376,11 @@ def _write_manifest(run_dir: Path, run_id: str, input_dir: Path,
     reports.mkdir(parents=True, exist_ok=True)
     (reports / "manifest.json").write_text(json.dumps(manifest, indent=2,
                                                       default=_json_default))
+
+
+def _manifest_accepted(state) -> list[dict]:
+    rec = _accepted_record(state)
+    return [] if rec is None else rec.to_dict(orient="records")
 
 
 def _json_default(v):

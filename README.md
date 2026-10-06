@@ -86,7 +86,10 @@ src/ifrs9qdb/
                   transform, derived, pricing readiness (READY) and report
                   -- plus 15 pre-flight checks on the config and static
                   reference, and the suppressions file (reason, approver,
-                  expiry). See PRICING_READINESS.md
+                  expiry; ended, never deleted). Findings can also be
+                  accepted for one run only (accepted_findings=): the run
+                  records every finding accepted in it, and why, in
+                  reports/accepted_findings.csv. See PRICING_READINESS.md
   prerun.py       the pre-run check and the pricing-readiness dry run: which
                   contracts would get no ECL, or a blank in LIC, before a run
   runs.py         the runs folder: list, manifest, validation, readiness,

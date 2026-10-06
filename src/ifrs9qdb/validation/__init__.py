@@ -29,8 +29,11 @@ from .runner import validate_run  # noqa: F401
 from .stages import (DERIVED_STAGE, INPUT_STAGE, STAGE_SUITES,  # noqa: F401
                      TRANSFORM_STAGE, effective_severity, validate_stages,
                      validation_frame, write_validation_reports)
-from .suppressions import (active_suppression_ids,  # noqa: F401
+from .suppressions import (ACCEPTED_FIELDS, RECORD_FIELDS,  # noqa: F401
+                           accepted_findings_markdown, accepted_findings_record,
+                           accepted_reasons, active_suppression_ids,
                            add_suppression, load_suppressions,
+                           normalise_accepted_findings, remove_suppression,
                            suppression_reasons)
 
 STAGE_VALIDATORS = INPUT_STAGE + TRANSFORM_STAGE + DERIVED_STAGE
@@ -57,7 +60,9 @@ __all__ = [
     "DERIVED_STAGE", "PREFLIGHT_VALIDATORS", "STATIC_VALIDATORS",
     "CONFIG_PATH_VALIDATORS", "validate_preflight",
     "load_suppressions", "active_suppression_ids", "add_suppression",
-    "suppression_reasons",
+    "remove_suppression", "suppression_reasons", "ACCEPTED_FIELDS",
+    "RECORD_FIELDS", "normalise_accepted_findings", "accepted_reasons",
+    "accepted_findings_record", "accepted_findings_markdown",
     "ALL_VALIDATORS", "INPUT_VALIDATORS", "TRANSFORM_VALIDATORS",
     "DERIVED_VALIDATORS", "CROSS_FILE_VALIDATORS",
 ]

@@ -21,6 +21,7 @@ import yaml
 __all__ = ["runs_dir_default", "read_run_manifest", "manifest_summary",
            "read_run_validation", "read_run_reconciliation", "list_run_outputs",
            "read_run_overrides", "read_run_readiness", "read_input_source",
+           "read_run_accepted_findings",
            "list_runs", "RUN_COLUMNS", "output_dir", "manifest_inputs",
            "augment_manifest_run_metadata", "archived_code_for"]
 
@@ -205,6 +206,68 @@ def read_run_validation(run_path) -> pd.DataFrame | None:
             except Exception:
                 return None
     return None
+
+
+def read_run_accepted_findings(run_path) -> pd.DataFrame:
+    """Every finding accepted in a run, and why.
+
+    reports/accepted_findings.csv as the run wrote it: the findings accepted
+    for the run and the standing suppressions that took effect, each with its
+    reason, who and when (validation.suppressions.RECORD_FIELDS). A run made
+    before that file existed is rebuilt from what it kept -- its failed
+    checks recorded as suppressed (validation.csv) and the suppressions file
+    it froze (config_used/config/validation_suppressions.yml), standing
+    suppressions being the only kind there was then. ``recorded`` says which:
+    "TRUE" read from the run's own record, "FALSE" rebuilt.
+    """
+    from .validation.suppressions import (RECORD_FIELDS, active_suppression_ids,
+                                          load_suppressions)
+    cols = list(RECORD_FIELDS) + ["recorded"]
+    empty = pd.DataFrame({c: pd.Series(dtype="object") for c in cols})
+    run = Path(run_path)
+    rec = run / "reports" / "accepted_findings.csv"
+    if rec.is_file():
+        try:
+            df = pd.read_csv(rec, dtype=str, keep_default_na=False)
+        except Exception:
+            return empty
+        for c in RECORD_FIELDS:
+            if c not in df.columns:
+                df[c] = ""
+        df = df[list(RECORD_FIELDS)].copy()
+        df["recorded"] = "TRUE"
+        return df
+    v = read_run_validation(run)
+    if v is None or len(v) == 0 or "suppressed" not in v.columns:
+        return empty
+    hit = v[(v["passed"].astype(str).str.upper() != "TRUE")
+            & (v["suppressed"].astype(str).str.upper() == "TRUE")]
+    if hit.empty:
+        return empty
+    as_of = None
+    try:
+        m = json.loads((run / "reports" / "manifest.json").read_text(encoding="utf-8"))
+        as_of = pd.to_datetime(str((m.get("run") or {}).get("started_at"))[:10]).date()
+    except Exception:
+        pass
+    tbl = load_suppressions(run / "config_used" / "config" / "validation_suppressions.yml")
+    rows = []
+    for f in hit.to_dict(orient="records"):
+        vid = f["id"]
+        entries = [e for e in tbl.to_dict(orient="records")
+                   if e["validator_id"] == vid] if len(tbl) else []
+        # the entry in force when the run ran, else the first for the id
+        e = next((x for x in entries
+                  if active_suppression_ids(pd.DataFrame([x]), as_of)),
+                 entries[0] if entries else None)
+        rows.append({"validator_id": vid, "severity": f.get("severity", ""),
+                     "source": "standing" if e else "",
+                     "reason": e["reason"] if e else "",
+                     "accepted_by": e["approved_by"] if e else "",
+                     "accepted_at": e["approved_at"] if e else "",
+                     "valid_until": e["valid_until"] if e else "",
+                     "in_effect": "TRUE", "recorded": "FALSE"})
+    return pd.DataFrame(rows, columns=cols)
 
 
 def read_run_reconciliation(run_path) -> dict:
