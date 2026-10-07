@@ -10,6 +10,7 @@ quarter means using the reference THAT run used, not today's.
 """
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -89,8 +90,59 @@ class StaticReference(dict):
         return out[pd_col.notna() & (pd_col >= 0) & (pd_col < 1)].reset_index(drop=True)
 
 
+# A number as a spreadsheet writes a percentage-formatted cell: "9.0620506%".
+_NUMBER = r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?"
+_PERCENT = re.compile(rf"^\s*{_NUMBER}\s*%\s*$")
+_PLAIN = re.compile(rf"^\s*{_NUMBER}\s*$")
+_PP_UNITS = {"percentage_points", "percent", "percentage", "pct"}
+
+
+def _declared_units(path: Path) -> str:
+    """The ``# units:`` a file's comment header declares, or ""."""
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if not s.startswith("#"):
+            break
+        m = re.match(r"#\s*units\s*:\s*(\S+)", s, re.IGNORECASE)
+        if m:
+            return m.group(1).lower()
+    return ""
+
+
+def _read_percent_signs(df: pd.DataFrame, units: str) -> pd.DataFrame:
+    """Columns written with percent signs, read as the numbers they are.
+
+    A spreadsheet saving a percentage-formatted column writes "9.06%", which
+    stays text and fails the first sum. In a file whose header declares
+    percentage points (the GDP growth series) "9.06%" is 9.06; anywhere else a
+    value is a fraction (a PD, a haircut), so "1.3%" is 0.013. A column is
+    converted only when every value in it is a number, with the sign or
+    without; anything else is left as it is, for the checks to name.
+    """
+    in_points = units in _PP_UNITS
+    for c in df.columns:
+        # text: object in pandas 2, the string dtype in pandas 3
+        if not (df[c].dtype == object or pd.api.types.is_string_dtype(df[c])):
+            continue
+        text = df[c].astype(str).where(df[c].notna(), "")
+        filled = text[text.str.strip() != ""]
+        signed = filled.str.match(_PERCENT)
+        if filled.empty or not signed.any() \
+                or not (signed | filled.str.match(_PLAIN)).all():
+            continue
+        values = pd.to_numeric(text.str.replace("%", "", regex=False).str.strip(),
+                               errors="coerce")
+        if not in_points:
+            values = values.where(~text.str.contains("%", regex=False),
+                                  values / 100)
+        df[c] = values
+    return df
+
+
 @lru_cache(maxsize=8)
-def _read_dir(directory: str) -> tuple:
+def _read_dir(directory: str, stamp: tuple = ()) -> tuple:
     d = Path(directory)
     items = []
     for name, filename in _FILES.items():
@@ -101,11 +153,23 @@ def _read_dir(directory: str) -> tuple:
         # comment lines is safer than a fixed skiprows, which would break the
         # moment someone adds or removes a line of explanation.
         try:
-            items.append((name, pd.read_csv(p, comment="#",
-                                            skip_blank_lines=True)))
+            frame = pd.read_csv(p, comment="#", skip_blank_lines=True)
+            items.append((name, _read_percent_signs(frame, _declared_units(p))))
         except Exception as exc:
             raise ValueError(f"could not read {p.name}: {exc}") from exc
     return tuple(items)
+
+
+def _stamp(d: Path) -> tuple:
+    """What the cache is keyed on besides the folder: each file's size and
+    modification time, so a file edited or replaced is read again."""
+    out = []
+    for filename in _FILES.values():
+        p = d / filename
+        if p.is_file():
+            s = p.stat()
+            out.append((filename, s.st_size, s.st_mtime_ns))
+    return tuple(out)
 
 
 def load_static_reference(directory=None) -> StaticReference:
@@ -113,4 +177,4 @@ def load_static_reference(directory=None) -> StaticReference:
     d = Path(directory) if directory else PACKAGED_STATIC
     if not d.is_dir():
         d = PACKAGED_STATIC
-    return StaticReference(dict(_read_dir(str(d))))
+    return StaticReference(dict(_read_dir(str(d), _stamp(d))))
