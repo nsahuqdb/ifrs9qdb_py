@@ -80,7 +80,12 @@ src/ifrs9qdb/
                   run_etl_phase2 pause for customer overrides between
     reconcile     compare a produced run against a reference, and
                   write out the rows that differ
-  analytics/      walk, staging, concentration, data quality, profiles
+  analytics/      walk, staging, concentration, data quality, profiles;
+                  bridge.py: why the provision moved between two runs,
+                  contract by contract -- exposure, stage, rating, macro
+                  variables, model, LGD and collateral, overlay -- for the
+                  book or any customers, facilities, account types,
+                  segments, stages or ratings
   stress.py       what-if, packages, reverse stress, roll-forward
   validation/     148 run checks with the R engine's ids -- input,
                   transform, derived, pricing readiness (READY) and report
@@ -118,7 +123,7 @@ The fixtures under `tests/fixtures/` ship with the repository, so the suite
 means something on a fresh clone with nothing configured:
 
 ```bash
-pytest             # 677 passed, 11 skipped with reference runs configured
+pytest             # 722 passed, 11 skipped with reference runs configured
                    #   (below); without them the data tests skip
 ```
 

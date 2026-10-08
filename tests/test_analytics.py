@@ -16,7 +16,7 @@ import pytest
 
 from ifrs9qdb.analytics import (
     classify_stage, concentration, customer_view, data_quality, ecl_walk,
-    ecl_walk_detail, hhi, hhi_band, hhi_equivalent_n, lorenz_curve,
+    ecl_walk_detail, flow_profile, hhi, hhi_band, hhi_equivalent_n, lorenz_curve,
     movement_by, normalise, run_profile, stage2_triggers, stage_transitions,
     staging_distribution,
 )
@@ -182,6 +182,30 @@ class TestWalk:
         curr = curr[curr.contract != "C6"]
         w = ecl_walk(prev, curr)
         assert abs(w["residual"]) < 1e-9
+
+
+    def test_a_contract_listed_twice_is_two_positions(self):
+        """The walk keeps both, matched in order as the ECL bridge does, so
+        its opening and closing are the reports' totals."""
+        prev = synthetic()
+        extra = prev[prev["contract"] == "C3"].assign(exposure=100.0, ecl=7.0,
+                                                      coverage=0.07)
+        prev = pd.concat([prev, extra], ignore_index=True)
+        curr = prev.iloc[:-1].copy()            # the second C3 position left
+        curr["ecl"] = curr["ecl"] * 1.2
+        curr["coverage"] = np.where(curr["exposure"] > 0,
+                                    curr["ecl"] / curr["exposure"], 0.0)
+        w = ecl_walk(prev, curr)
+        assert w["opening"] == pytest.approx(prev["ecl"].sum())
+        assert w["closing"] == pytest.approx(curr["ecl"].sum())
+        steps = dict(zip(w["steps"]["label"], w["steps"]["amount"]))
+        assert steps["Derecognised"] == pytest.approx(-7.0)
+        assert w["counts"]["left"] == 1
+        det = ecl_walk_detail(prev, curr)
+        assert list(det["Derecognised"]["contract"]) == ["C3"]
+        fl = flow_profile(prev, curr).set_index("flow")
+        assert fl.loc["Derecognised", "contracts"] == 1
+        assert fl.loc["Derecognised", "ecl"] == pytest.approx(7.0)
 
 
 class TestConcentration:

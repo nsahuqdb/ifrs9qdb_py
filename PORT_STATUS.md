@@ -640,6 +640,12 @@ places assumed the id was a key, and each failed differently:
 None of them errored in a way anybody would have noticed on a book without a
 repeated id, which is most books.
 
+The walk was a fourth: it kept the first position and dropped the second, so
+its opening fell short of the report by that position's ECL and the security
+counted as continuing when one position had left. Positions are now keyed by contract and occurrence, matched in order --
+the same key the ECL bridge uses -- in the walk, its drill-down, the flows and
+the stage transitions, in both engines.
+
 ## The analytics layer — ported
 
 The R package's analytics are now matched function for function, in six
@@ -649,6 +655,7 @@ modules under `ifrs9qdb.analytics` plus the stress additions.
 | --- | --- |
 | `profile` | where the provision sits: segments, concentration, staging, data quality |
 | `walk` | how it moved, reconciling exactly |
+| `bridge` | why it moved, contract by contract and cause by cause, at any level (below) |
 | `attribution` | *why* it moved — the indicative split, the coverage bridge, and an exact engine-level decomposition |
 | `staging` | why names sit where they sit, and who migrated |
 | `risk` | the parameters themselves: PD curves, LGD floor, collateral, EAD run-off |
@@ -692,6 +699,42 @@ This is the same class of finding as the external-scale sign above: the port
 reproduces it rather than correcting it, and it needs a decision from Risk.
 The `weight_mode` switch exists precisely so the two effects can be shown
 apart in a review.
+
+## The ECL bridge — why it moved, at any level
+
+`analytics.bridge` reprices every contract from the previous run to the
+current one, one ingredient at a time, on each run's own frozen config and
+the report's own pricing path:
+
+| Step | What changes |
+| --- | --- |
+| Exposure | balance, EAD curve and remaining term, at the old stage, rating, curves and LGD |
+| Stage migration | the stage: 12-month or lifetime, or Stage 3 at the balance |
+| Rating migration | the rating, on the previous run's PD curves |
+| Macro variables | PD curves from the current macro inputs on the previous model |
+| Model | the model's own change: model.yml, the model chosen, the TTC table, how the MEV models combine |
+| LGD & collateral | collateral, so LGD, and the EIR |
+| Overlay | the post-model overlay |
+
+plus Derecognised and New business, and Moved out / Moved in when a level is
+chosen and a contract changed group. Every contract's steps sum exactly to its
+change, so any customer, facility, account type, segment, stage or rating is a
+sum of contracts and closes on its own figures (`bridge_view`, `bridge_by`,
+`bridge_members`).
+
+What it was checked against:
+
+* **September to December 2025, as priced:** Other is 0 on all 4,794
+  continuing contracts, so the repricing reproduces both reports.
+* **A copy of a run with only its MEV forecasts changed** moves only Macro
+  variables; **only a coefficient changed** moves only Model; **both** split
+  with Macro equal to the macro-only copy's, because Macro is measured on the
+  old model.
+* **R and Python agree to 3e-8 per contract** in all of those cases, and to
+  5e-6 on group totals in the billions, at every level.
+
+`bridge_by` is one pass over the contracts, so a level of 8,393 facilities is
+0.14 s rather than a bridge per facility.
 
 ## The surface is complete
 

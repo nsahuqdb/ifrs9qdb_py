@@ -30,7 +30,17 @@ __all__ = ["ecl_walk", "ecl_walk_detail", "stage_transitions", "movement_by",
 
 
 def _dedup(d: pd.DataFrame) -> pd.DataFrame:
-    return d.drop_duplicates(subset="contract").set_index("contract")
+    """One row per position, indexed by contract and occurrence.
+
+    A contract the report lists twice is two positions, matched across runs
+    in the order they appear -- as the ECL bridge does -- rather than one with
+    the second dropped, which left the opening and closing short of the
+    reports' totals.
+    """
+    d = d.copy()
+    occ = d.groupby("contract", dropna=False, sort=False).cumcount()
+    d.index = (d["contract"].astype(str) + "#" + occ.astype(str)).to_numpy()
+    return d
 
 
 def ecl_walk(prev: pd.DataFrame, curr: pd.DataFrame) -> dict:
@@ -110,7 +120,7 @@ def ecl_walk_detail(prev: pd.DataFrame, curr: pd.DataFrame,
         if len(idx) == 0:
             return pd.DataFrame()
         out = pd.DataFrame({
-            "contract": idx,
+            "contract": src.loc[idx, "contract"].to_numpy(),
             "customer": src.loc[idx, "customer"].to_numpy(),
             "portfolio": src.loc[idx, "portfolio"].to_numpy(),
             "amount": np.asarray(amount, dtype=float),

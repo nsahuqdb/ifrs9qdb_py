@@ -3,6 +3,10 @@ from .attribution import (  # noqa: F401
     coverage_bridge, ecl_factor_attribution, factor_attribution_diagnosis,
     factor_attribution_exact,
 )
+from .bridge import (  # noqa: F401
+    BRIDGE_COMPONENTS, BRIDGE_LEVELS, bridge_by, bridge_members, bridge_view,
+    config_changes, ecl_bridge, load_bridge_run,
+)
 from .model_view import (  # noqa: F401
     config_used, mev_forecast_table, mev_weights_table,
     read_scenario_stpd, scenario_severity, scenario_weights,
