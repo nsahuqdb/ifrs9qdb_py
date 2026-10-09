@@ -53,9 +53,9 @@ ecl:
       - portfolio: Business Finance
         payment_type: "3"
         shape: bullet
-      - portfolio: Al Dhameen
-        payment_type: "4"
-        shape: bullet
+      - portfolio: Al Dhameen          # annual payments, counted back from
+        payment_type: "4"              # maturity (LIC runs 324 and 330)
+        shape: linear
       - portfolio: Tasdeer
         payment_type: "3"
         shape: bullet

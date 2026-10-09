@@ -299,6 +299,31 @@ class TestEditing:
         assert "static/fx_rates.csv" not in present
 
 
+class TestIndustryCodesStayCodes:
+    """Industry codes are 4-digit strings with leading zeros. Read as numbers,
+    "0113" became 113.0 after a grid edit, and the R engine -- which compares
+    the text -- stopped finding every Agriculture / Fisheries / Livestock code
+    (Q3 2026, snapshot 26Q3)."""
+
+    def test_a_float_written_file_reads_back_padded(self, tmp_path):
+        p = tmp_path / "industry_sector_mapping.csv"
+        p.write_text("industry_code,industry_description,sector\n"
+                     "2822.0,x,Industry\n113.0,y,Agriculture\n0.0,z,No Sector\n",
+                     encoding="utf-8")
+        got = S.read_static_csv_with_header(p)["data"]["industry_code"].tolist()
+        assert got == ["2822", "0113", "0000"]
+
+    def test_saving_numbers_writes_padded_strings(self, tmp_path):
+        p = tmp_path / "industry_sector_mapping.csv"
+        df = pd.DataFrame({"industry_code": [113.0, 311.0, 2822.0],
+                           "industry_description": ["a", "b", "c"],
+                           "sector": ["Agriculture", "Fisheries", "Industry"]})
+        S.write_static_csv_with_header(p, df, ["# provenance"])
+        lines = p.read_text(encoding="utf-8").splitlines()
+        assert lines[0] == "# provenance"
+        assert [l.split(",")[0] for l in lines[2:]] == ["0113", "0311", "2822"]
+
+
 class TestDiff:
     def test_an_unchanged_copy_shows_no_modifications(self, project):
         _make(project, label="v1")

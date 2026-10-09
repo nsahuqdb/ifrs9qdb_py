@@ -105,7 +105,10 @@ def _declared_units(path: Path) -> str:
             continue
         if not s.startswith("#"):
             break
-        m = re.match(r"#\s*units\s*:\s*(\S+)", s, re.IGNORECASE)
+        # The word only: a header a spreadsheet saved reads
+        # "# units: percentage_points," and \S+ took the comma with it, so
+        # "9.06%" was read as 0.0906 (snapshot 26Q3, Oct 2026).
+        m = re.match(r"#\s*units\s*:\s*([A-Za-z_]+)", s, re.IGNORECASE)
         if m:
             return m.group(1).lower()
     return ""

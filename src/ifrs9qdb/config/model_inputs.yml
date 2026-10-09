@@ -3,12 +3,16 @@
 internal_scenario_weights:
   mode: auto_non_oil_gdp_cdf
   n_forecast_years: 2
+  # Rounded snapshot of the auto (V2) weights for the forecasts below, with
+  # Base Case taking the residual so they sum to exactly 1; used only when
+  # mode is explicit. The 2025 V1 method gave the mirror image
+  # (0.1508 / 0.1792 / 0.4799 / 0.1197 / 0.0707, summing to 1.0003).
   explicit_weights:
-    Significant Downturn: 0.1508
-    Slight Downturn: 0.1792
-    Base Case: 0.4799
-    Slight Uptrend: 0.1197
-    Significant Uptrend: 0.0707
+    Significant Downturn: 0.0707
+    Slight Downturn: 0.1194
+    Base Case: 0.4798
+    Slight Uptrend: 0.1792
+    Significant Uptrend: 0.1509
 external_scenario_weights:
   mode: auto_gcc_cdf
   explicit_weights:

@@ -589,10 +589,37 @@ def read_static_csv_with_header(path) -> dict:
         i += 1
     header = lines[:i]
     try:
-        data = pd.read_csv(p, comment="#", skip_blank_lines=True)
+        data = pd.read_csv(p, comment="#", skip_blank_lines=True,
+                           dtype={c: str for c in _CODE_COLUMNS})
     except Exception:
         data = pd.DataFrame()
-    return {"comment_header": header, "data": data}
+    return {"comment_header": header, "data": _normalise_code_columns(data)}
+
+
+# Columns that hold CODES, not numbers, and the width they are zero-padded to.
+# Read as numbers, "0113" becomes 113 -- and 113.0 once the grid round-trips a
+# column with a blank in it -- and every 0xxx industry code (all of
+# Agriculture, Fisheries and Livestock) stops matching the extract. The R
+# engine compared the raw text and lost the collective rating for those
+# customers. Keep them as padded strings both ways.
+_CODE_COLUMNS = {"industry_code": 4}
+
+
+def _normalise_code_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df
+    for col, width in _CODE_COLUMNS.items():
+        if col not in out.columns:
+            continue
+        if out is df:
+            out = df.copy()
+        s = out[col].astype("string").str.strip()
+        s = s.str.replace(r"\.0+$", "", regex=True)
+        digits = s.str.fullmatch(r"[0-9]{1,%d}" % width).fillna(False)
+        s = s.where(~digits, s.str.zfill(width))
+        out[col] = s.fillna("").astype(object)
+    return out
 
 
 def write_static_csv_with_header(path, df: pd.DataFrame,
@@ -601,7 +628,7 @@ def write_static_csv_with_header(path, df: pd.DataFrame,
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
-    body = df.to_csv(index=False, na_rep="")
+    body = _normalise_code_columns(df).to_csv(index=False, na_rep="")
     text = ("\n".join(comment_header) + "\n" + body) if comment_header else body
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(p)

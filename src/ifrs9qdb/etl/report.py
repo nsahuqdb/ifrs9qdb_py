@@ -382,10 +382,14 @@ class _Ctx:
 
 
 def _months_to_maturity(d_mat, d_ext, min_months: int = 3) -> int:
+    """R's months_to_maturity(): LIC's count (a part month is a whole one;
+    ``min_months`` only for a facility at or past maturity)."""
     if pd.isna(d_mat) or pd.isna(d_ext):
         return min_months
     m = (d_mat.year - d_ext.year) * 12 + (d_mat.month - d_ext.month)
-    return min_months if m < min_months else int(m)
+    if d_mat.day > d_ext.day:
+        m += 1
+    return min_months if m <= 0 else int(m)
 
 
 def _pd_lifetime_at(cum, stage: int, months: int) -> float:
@@ -421,9 +425,10 @@ def _ead_curve(ctx: _Ctx, cid, stage, on_bal, months, payment_type, portfolio,
     n_amort = max(1, N - D)
     f = int(pay_freq) if pay_freq is not None and np.isfinite(pay_freq) and pay_freq >= 1 else 1
     t = np.arange(H)
-    te = np.maximum(0, t - D)
-    n_pay = max(1, n_amort // f)
-    paid = np.minimum(te // f, n_pay)
+    # payment dates counted back from maturity (R's build_ead_fallback_curve)
+    n_pay = max(1, -(-n_amort // f))
+    p1 = N - (n_pay - 1) * f
+    paid = np.where(t < p1, 0, np.minimum(n_pay, (t - p1) // f + 1))
     prog = paid / n_pay
     if shape == "linear":
         coef = np.maximum(0.0, 1 - prog)

@@ -272,7 +272,7 @@ class TestX3TheRuleSetsAgree:
         assert set(EAD_FALLBACK_RULES) == {
             ("Business Finance", "4", "linear"),
             ("Business Finance", "3", "bullet"),
-            ("Al Dhameen", "4", "bullet"),
+            ("Al Dhameen", "4", "linear"),
             ("Tasdeer", "3", "bullet"),
             ("Off BS", "3", "bullet"),
         }
@@ -301,7 +301,7 @@ class TestX3TheRuleSetsAgree:
     def test_linear_is_about_half_of_bullet(self):
         """The size of the divergence the extra rule would have caused."""
         for n in (12, 36, 60):
-            b = fallback_ead_curve(1000, n, "4", portfolio="Al Dhameen")
+            b = fallback_ead_curve(1000, n, "4", portfolio="Off BS")
             l = fallback_ead_curve(1000, n, "4", portfolio="Business Finance")
             assert 0.45 < l.sum() / b.sum() < 0.60
 

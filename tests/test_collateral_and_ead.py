@@ -31,10 +31,12 @@ needs_run = pytest.mark.skipif(
 
 class TestTheShapeRules:
     def test_the_portfolio_wins_over_the_payment_type(self):
-        """Al Dhameen type 4 is a bullet in LIC; resolving on the payment type
-        alone made it amortise."""
+        """A portfolio rule is matched before a portfolio-free one. Al Dhameen
+        type 4 amortises (annually, back from maturity -- LIC runs 324 and
+        330); Off BS type 4 has no rule and falls to the bullet default."""
         assert resolve_ead_shape(4, "Business Finance") == "linear"
-        assert resolve_ead_shape(4, "Al Dhameen") == "bullet"
+        assert resolve_ead_shape(4, "Al Dhameen") == "linear"
+        assert resolve_ead_shape(4, "Off BS") == "bullet"
 
     def test_an_unknown_combination_is_a_bullet(self):
         """The conservative reading, and the one LIC takes."""

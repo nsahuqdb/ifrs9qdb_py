@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ifrs9qdb"
-version = "0.28.0"
+version = "0.29.0"
 description = "IFRS 9 expected credit loss engine, ETL, analytics and stress testing (QDB)"
 readme = "README.md"
 requires-python = ">=3.10"

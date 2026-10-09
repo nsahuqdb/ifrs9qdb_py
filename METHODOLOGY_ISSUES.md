@@ -4,7 +4,8 @@ This is a register of MODEL and CALCULATION problems, not software defects.
 Everything here runs without error and produces plausible-looking numbers. That
 is what makes the list worth having: none of it announces itself.
 
-Nothing in this document has been changed in the code. Each item states what
+Except where an item is marked FIXED, nothing in this document has been
+changed in the code. Each item states what
 the engine does now, the evidence, the size of it, and what a correct treatment
 would look like — so Risk can decide, rather than find a number has moved.
 
@@ -28,14 +29,14 @@ or a naming and documentation problem that keeps producing wrong readings.
 
 | | Issue | Severity |
 | --- | --- | --- |
-| M1 | Scenario weights move the wrong way with the forecast | **A** |
+| M1 | Scenario weights move the wrong way with the forecast — **fixed (V2, Oct 2026)** | **A** |
 | M2 | The two scales' macro factors are opposite by design and share a name | **C** |
 | M3 | Monthly PD accumulates by summing, so curves reach certain default | **A** |
-| M4 | The amortisation step count floors, ending the curve before maturity | **A** |
+| M4 | The amortisation step count floors, ending the curve before maturity — **fixed (Oct 2026)** | **A** |
 | M5 | The EAD fallback does not reproduce the schedules it stands in for | **A** |
 | M6 | Month 1's loss is not discounted | **B** |
 | M7 | Annual PD is split evenly across months rather than as a hazard | **B** |
-| M8 | Scenario weights do not sum to one | **B** |
+| M8 | Scenario weights do not sum to one — **restated (Oct 2026)** | **B** |
 | M9 | No quantitative SICR test exists | **C** |
 | M10 | LGD is a single static number, not forward-looking | **C** |
 | M11 | Collateral above ~50% coverage is worth nothing | **C** |
@@ -48,7 +49,21 @@ or a naming and documentation problem that keeps producing wrong readings.
 
 ---
 
-## M1 — Scenario weights move the wrong way with the forecast · **A**
+## M1 — Scenario weights move the wrong way with the forecast · **A** · FIXED
+
+**Fixed in 0.29.0 (Oct 2026)**, in both engines, to the 2026 V2 method of
+`IFRS_9_Scenarios_Probabilities_2026Q3.xlsx`: the band edges are fixed on the
+history (`mu + sigma * z`, the 10/25/75/90th percentiles) and growth is
+centred on the forecast, `norm.cdf(mu + sigma * z, loc=f, scale=sigma)`. At a
+forecast equal to the historical mean the weights are exactly 10/15/50/15/10;
+a lower forecast puts more weight on the downturns. On the Q3 2026 inputs
+(history 2015–2025, forecasts −0.19% and 2.92%) the engine now reproduces the
+workbook's 22.11 / 19.40 / 43.02 / 9.73 / 5.74 to 1e-9; the old code gave the
+mirror, 5.74 / 9.73 / 43.02 / 19.40 / 22.11. The tests in
+`TestM1ScenarioWeightsFollowTheForecast` pin the corrected direction. The
+external (GCC) weights still use the V1 band construction — see the note at
+the end of this section. The text below is the original finding.
+
 
 *You raised this one. It is worse than "weird": the weights are an exact mirror
 image of what they should be.*
@@ -194,7 +209,18 @@ comment.
 
 ---
 
-## M4 — The amortisation step count floors, ending the curve before maturity · **A**
+## M4 — The amortisation step count floors, ending the curve before maturity · **A** · FIXED
+
+**Fixed in 0.29.0 (Oct 2026)**, in both engines. Payment dates are now
+counted back from maturity — `N, N − f, N − 2f, …` — so there are
+`ceil((N − D) / f)` of them and the last one falls at maturity. This is what
+LIC does in its own fallback: on the Al Dhameen book (annual payments, no
+schedule) it matches 122 of 128 contracts in run 324 and all 32 Stage 1/2
+contracts in run 330, where counting forward from the start matches 81 of 128.
+When `N − D` is a multiple of `f` the two give the same curve, which is why
+the forward count matched every monthly and quarterly Business Finance case.
+The original finding follows.
+
 
 `fallback_ead_curve` in `engine.py`: `n_steps = max(1, amortising // f)`.
 
@@ -380,6 +406,9 @@ sum to 1, or the normalisation should be applied and the change approved.
 Note this only bites when the mode is `explicit`. The production config runs
 `auto_non_oil_gdp_cdf`, where the weights are computed — and the computed
 weights are M1.
+
+**Restated (Oct 2026).** The shipped explicit weights are now the rounded V2
+weights with Base Case taking the residual, so they sum to exactly 1.
 
 ---
 

@@ -291,7 +291,8 @@ def build_stpd(term_structure: pd.DataFrame, weights, portfolios,
 __all__ += ["build_term_structure", "build_stpd_from_static", "stress_mevs", "compute_logit_pds", "compute_pds_from_logits",
             "compute_per_mev_sf", "combine_sf", "combined_sf_for_scenario",
             "external_combined_sf", "percentrank_exc", "truncate_significant",
-            "compute_internal_scenario_weights", "gcc_weighted_history",
+            "compute_internal_scenario_weights", "check_gdp_units",
+            "gcc_weighted_history",
             "build_term_structure_external", "external_gcc_forecast",
             "apply_scenario_weights_per_year",
             "compute_external_scenario_weights",
@@ -678,12 +679,22 @@ def _matching_type(column, rating_type: int):
 
 def compute_internal_scenario_weights(historical_series, forecasts,
                                       scenarios: pd.DataFrame) -> dict:
-    """Scenario weights from where each forecast sits on the historical CDF.
+    """Scenario weights: the chance growth lands in each scenario's band.
 
-    Each scenario owns a band of the distribution. The band edges are the
-    forecast shifted by each severity, read through the historical normal, and
-    a scenario's weight is the probability mass between its edge and its
-    neighbour's.
+    The 2026 V2 method (IFRS_9_Scenarios_Probabilities_2026Q3.xlsx,
+    Calculations sheet). Each scenario owns a FIXED band of the historical
+    growth distribution, cut by percentile -- 0-10%, 10-25%, 25-75%, 75-90%,
+    90-100% -- so a band edge is ``mu + sigma * z``. Growth for a forecast
+    year is assumed to land around that year's forecast with the historical
+    sigma, so a scenario's weight is the probability mass of ``N(f, sigma)``
+    inside its band. At ``f == mu`` the weights are exactly 10/15/50/15/10,
+    and a lower forecast puts more weight on the downturns.
+
+    The 2025 V1 workbook had the two arguments the other way round (edges at
+    ``f + sigma * z`` under ``N(mu, sigma)``), which is the exact mirror image:
+    a falling forecast moved weight onto the UPTRENDS (METHODOLOGY_ISSUES.md,
+    M1). On the Q3 2026 inputs V1 gives 5.7/9.7/43.0/19.4/22.1 and V2
+    22.1/19.4/43.0/9.7/5.7.
 
     Two details that are easy to lose:
 
@@ -700,6 +711,7 @@ def compute_internal_scenario_weights(historical_series, forecasts,
     h = np.asarray(historical_series, dtype=float)
     h = h[np.isfinite(h)]
     mu, sigma = h.mean(), h.std(ddof=1)
+    check_gdp_units(h, forecasts)
 
     z = pd.to_numeric(scenarios["severity_z"], errors="coerce").to_numpy()
     order = np.argsort(z)
@@ -709,7 +721,8 @@ def compute_internal_scenario_weights(historical_series, forecasts,
 
     per_year = []
     for f in np.atleast_1d(np.asarray(forecasts, dtype=float)):
-        cdf = norm.cdf(f + sigma * z_sorted, loc=mu, scale=sigma)
+        # fixed edges on the history, growth centred on the forecast (V2)
+        cdf = norm.cdf(mu + sigma * z_sorted, loc=f, scale=sigma)
         p = np.zeros(n)
         for i in range(n):
             if i == central:
@@ -727,6 +740,44 @@ def compute_internal_scenario_weights(historical_series, forecasts,
     weights = np.zeros(n)
     weights[order] = weights_sorted
     return dict(zip(scenarios["scenario"], weights))
+
+
+def check_gdp_units(historical_series, forecasts) -> None:
+    """Stop when the GDP history and forecasts are on different scales.
+
+    The weights only mean something if both are in the same units. A history
+    read as fractions (0.029) against forecasts in percentage points (2.9) puts
+    every forecast tens of standard deviations from the mean, and the weights
+    collapse to 50% Significant Downturn / 50% Significant Uptrend -- what the
+    26Q3 runs priced with, from a header the units parser misread. A forecast
+    entered as a fraction against a history in points is the reverse slip (LIC
+    run 330's PD curves): no error, but the PD model then reads 2.9% growth as
+    0.029%. The first is impossible under the model and raises; the second is
+    only implausible and warns. Same as R's .check_gdp_units().
+    """
+    h = np.asarray(historical_series, dtype=float)
+    h = h[np.isfinite(h)]
+    f = np.atleast_1d(np.asarray(forecasts, dtype=float))
+    f = f[np.isfinite(f)]
+    if h.size < 2 or f.size == 0:
+        return
+    mu, sigma = h.mean(), h.std(ddof=1)
+    if not np.isfinite(sigma) or sigma <= 0:
+        return
+    z = np.abs(f - mu) / sigma
+    if (z > 8).any():
+        raise ValueError(
+            f"Non-oil GDP forecasts ({', '.join(f'{v:.4g}' for v in f)}) sit "
+            f"{z.max():.0f} standard deviations from the history (mean "
+            f"{mu:.4g}, sd {sigma:.4g}): the two are in different units. Check "
+            "non_oil_gdp_history.csv (its '# units:' header) and "
+            "model_inputs.yml mev_forecasts -- both should be percentage points.")
+    if sigma > 1 and f.size >= 2 and (np.abs(f) < 0.2).all() and (f != 0).any():
+        warnings.warn(
+            f"Non-oil GDP forecasts ({', '.join(f'{v:.4g}' for v in f)}) look "
+            f"like fractions while the history is in percentage points (sd "
+            f"{sigma:.3g}): 2.9% growth is entered as 2.9, not 0.029.",
+            RuntimeWarning, stacklevel=2)
 
 
 def compute_external_scenario_weights(weighted_gcc_year: float,

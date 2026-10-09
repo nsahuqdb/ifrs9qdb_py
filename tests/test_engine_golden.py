@@ -271,3 +271,17 @@ class TestMonthsToMaturity:
         import datetime as dt
         assert months_to_maturity(dt.date(2026, 6, 30), dt.date(2026, 6, 30)) == 3
         assert months_to_maturity(dt.date(2025, 1, 1), dt.date(2026, 6, 30)) == 3
+
+    def test_counted_as_lic_counts(self):
+        """LIC runs 324 and 330: a part month is a whole one, and only a
+        facility at or past maturity gets the 3-month horizon."""
+        import datetime as dt
+        from ifrs9qdb.etl.report import _months_to_maturity
+        ext = dt.date(2026, 9, 30)
+        cases = {dt.date(2026, 10, 12): 1, dt.date(2026, 11, 30): 2,
+                 dt.date(2026, 10, 31): 2, dt.date(2027, 3, 31): 7,
+                 dt.date(2026, 12, 30): 3, dt.date(2027, 2, 28): 5,
+                 dt.date(2026, 9, 30): 3}
+        for mat, want in cases.items():
+            assert months_to_maturity(mat, ext) == want, mat
+            assert _months_to_maturity(pd.Timestamp(mat), pd.Timestamp(ext)) == want, mat

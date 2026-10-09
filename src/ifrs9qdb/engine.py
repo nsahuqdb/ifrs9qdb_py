@@ -66,10 +66,15 @@ def compute_lgd(
 
 # --------------------------------------------------------------------- EAD --
 def months_to_maturity(maturity, extract, min_months: int = 3) -> int:
-    """Whole months from the extract date to maturity, floored at ``min_months``.
+    """Months from the extract date to maturity, as LIC counts them.
 
-    Counted on calendar months, matching the R engine. A matured facility still
-    gets the floor rather than zero, because a run-off still carries loss.
+    Calendar months, plus one when the maturity's day of month is later than
+    the extract's: LIC counts a part month as a whole one, so with a 30
+    September extract a facility maturing on 31 March has 7 months, not 6
+    (runs 324 and 330, every such no-schedule contract). ``min_months`` is the
+    horizon for a facility AT OR PAST maturity only -- a run-off still carries
+    loss -- and is not a floor on short ones: LIC prices a facility maturing
+    next month over one month. Matches the R engine.
     """
     if maturity is None or extract is None:
         return min_months
@@ -82,9 +87,11 @@ def months_to_maturity(maturity, extract, min_months: int = 3) -> int:
         m = (maturity.year - extract.year) * 12 + (maturity.month - extract.month)
         if m != m:
             return min_months
+        if maturity.day > extract.day:      # a part month counts as whole
+            m += 1
     except (AttributeError, TypeError, ValueError):
         return min_months
-    return max(min_months, int(m))
+    return int(m) if m > 0 else min_months
 
 
 MIN_HORIZON_MONTHS = 3
@@ -100,7 +107,10 @@ EAD_FALLBACK_DEFAULT = "bullet"
 EAD_FALLBACK_RULES: tuple[tuple[str | None, str, str], ...] = (
     ("Business Finance", "4", "linear"),
     ("Business Finance", "3", "bullet"),
-    ("Al Dhameen", "4", "bullet"),
+    # Annual payments counted back from maturity: 122 of 128 in LIC run 324 and
+    # every Stage 1/2 contract in run 330. The bullet this replaced only ever
+    # matched the facilities with 12 months or less to run, where the two agree.
+    ("Al Dhameen", "4", "linear"),
     ("Tasdeer", "3", "bullet"),
     ("Off BS", "3", "bullet"),
 )
@@ -248,9 +258,13 @@ def fallback_ead_curve(
     f = max(1, _int(payment_frequency, 1))
     d = max(0, min(_int(deferral, 0), N - 1))
     amortising = max(1, N - d)
-    n_steps = max(1, amortising // f)
+    # Payment dates counted back from maturity: N, N - f, ..., the last AT
+    # maturity, so n = ceil(amortising / f) and the balance never reaches zero
+    # early (METHODOLOGY_ISSUES.md M4; LIC's own fallback on Al Dhameen).
+    n_steps = max(1, -(-amortising // f))
+    p1 = N - (n_steps - 1) * f
     t = np.arange(H)
-    paid = np.minimum(np.maximum(0, t - d) // f, n_steps)
+    paid = np.where(t < p1, 0, np.minimum(n_steps, (t - p1) // f + 1))
     try:
         r = float(nir) / 12.0
     except (TypeError, ValueError):

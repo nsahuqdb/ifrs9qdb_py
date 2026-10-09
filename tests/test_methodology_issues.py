@@ -49,8 +49,14 @@ def inputs():
 
 
 # ----------------------------------------------------------------- M1 ------
-class TestM1ScenarioWeightsPointTheWrongWay:
-    """M1: a worse forecast moves weight ONTO the uptrend scenarios."""
+class TestM1ScenarioWeightsFollowTheForecast:
+    """M1 (FIXED, 2026 V2): a worse forecast moves weight onto the DOWNTURNS.
+
+    The weights were the exact mirror image of the intended ones -- the band
+    edges were the forecast shifted by sigma*z and read under the historical
+    normal. V2 fixes the edges on history (mu + sigma*z) and centres growth on
+    the forecast, which is the Q3 2026 workbook's construction.
+    """
 
     @staticmethod
     def weights(static, forecast):
@@ -58,52 +64,46 @@ class TestM1ScenarioWeightsPointTheWrongWay:
             static["non_oil_gdp_history"]["value"].to_numpy(),
             [forecast], static["scenario_severity"])
 
-    def test_a_collapsing_forecast_favours_the_uptrend(self, static):
+    def test_a_collapsing_forecast_favours_the_downturn(self, static):
         w = self.weights(static, -10.0)
-        assert w["Significant Uptrend"] > 0.9, (
-            "M1 appears to be FIXED: a -10% growth forecast no longer puts "
-            "almost all the weight on Significant Uptrend. Confirm the new "
-            "direction is intended and update METHODOLOGY_ISSUES.md.")
-        assert w["Significant Downturn"] < 0.001
+        assert w["Significant Downturn"] > 0.9
+        assert w["Significant Uptrend"] < 0.001
 
-    def test_the_downturn_weight_falls_as_growth_falls(self, static):
-        """The defining symptom, across the whole plausible range."""
+    def test_the_downturn_weight_rises_as_growth_falls(self, static):
         series = [self.weights(static, f)["Significant Downturn"]
                   for f in (6.0, 4.44, 2.81, 1.0, 0.0, -2.0, -5.0)]
-        assert all(b < a for a, b in zip(series, series[1:])), (
-            f"M1 direction has changed: {series}")
+        assert all(b > a for a, b in zip(series, series[1:])), series
 
-    def test_the_current_weights_are_the_mirror_of_the_correct_ones(self, static):
-        """The two differ only in which term carries the forecast, so the
-        output at any forecast is the correct output read backwards. That
-        symmetry is the evidence it is a swapped pair rather than a choice."""
+    def test_a_forecast_at_the_mean_gives_the_band_widths(self, static):
+        """At f = mu each scenario gets exactly its percentile band."""
         h = static["non_oil_gdp_history"]["value"].to_numpy()
-        scen = static["scenario_severity"]
-        mu, sd = h.mean(), h.std(ddof=1)
-        z = pd.to_numeric(scen["severity_z"], errors="coerce").to_numpy()
-        order = np.argsort(z)
-        zs, n = z[order], z.size
-        central = int(np.argmin(np.abs(zs)))
+        w = self.weights(static, float(h.mean()))
+        want = {"Significant Downturn": 0.10, "Slight Downturn": 0.15,
+                "Base Case": 0.50, "Slight Uptrend": 0.15,
+                "Significant Uptrend": 0.10}
+        for k, v in want.items():
+            assert w[k] == pytest.approx(v, abs=1e-6)
 
-        def bands(cdf):
-            p = np.zeros(n)
-            for i in range(n):
-                if i == central:
-                    continue
-                if i < central:
-                    p[i] = cdf[i] - (0.0 if i == 0 else cdf[i - 1])
-                else:
-                    p[i] = (1.0 if i == n - 1 else cdf[i + 1]) - cdf[i]
-            p[central] = 1.0 - p.sum()
-            return p
-
-        for f in (6.0, 0.0, -5.0):
-            now = np.array([self.weights(static, f)[s]
-                            for s in scen["scenario"]])[order]
-            fixed = bands(norm.cdf(mu + sd * zs, loc=f, scale=sd))
-            assert np.allclose(now, fixed[::-1], atol=1e-9), (
-                f"M1 is no longer an exact mirror at forecast {f}. The cause "
-                "may have changed; re-derive before assuming it is fixed.")
+    def test_q3_2026_workbook_weights(self):
+        """IFRS_9_Scenarios_Probabilities_2026Q3.xlsx, Calculations!N6:N10:
+        history 2015-2025, forecasts 2026 and 2027 (war-adjusted)."""
+        # As the workbook holds them (fractions); the weights depend only on
+        # z-distances, so the units cancel as long as history and forecast
+        # share them.
+        hist = [0.0906205063589058, 0.0583659225963335, -0.00988412572110603,
+                0.0224920577118676, 0.0218867665010402, -0.044910251603165,
+                0.0283214257852313, 0.0568277205527861, 0.0209868424099555,
+                0.034, 0.0444019746106418]
+        scen = pd.DataFrame({
+            "scenario": ["Significant Downturn", "Slight Downturn", "Base Case",
+                         "Slight Uptrend", "Significant Uptrend"],
+            "severity_z": [-1.2815515655446006, -0.6744897501960819, 0.0,
+                           0.6744897501960819, 1.2815515655446006]})
+        w = compute_internal_scenario_weights(
+            hist, [-0.00188757780974214, 0.029192865516638], scen)
+        want = [0.22113559428411, 0.19397843488081212, 0.4302413817492065,
+                0.09728383034359578, 0.057360758742275586]
+        assert [w[s] for s in scen["scenario"]] == pytest.approx(want, abs=1e-9)
 
 
 # ----------------------------------------------------------------- M2 ------
@@ -235,16 +235,25 @@ class TestM3MonthlyPdAccumulatesBySumming:
 
 
 # ----------------------------------------------------------------- M4 ------
-class TestM4TheStepCountFloors:
-    @pytest.mark.parametrize("term,freq,zero_at", [(14, 3, 13), (23, 12, 13)])
-    def test_the_balance_reaches_zero_before_maturity(self, term, freq, zero_at):
+class TestM4TheCurveRunsToMaturity:
+    """M4, FIXED: payment dates are counted back from maturity, so there are
+    ceil(term / f) of them and the last falls AT maturity -- LIC's own
+    fallback on the Al Dhameen book."""
+
+    @pytest.mark.parametrize("term,freq,last", [(14, 3, 200.0), (23, 12, 500.0)])
+    def test_the_balance_is_still_outstanding_in_the_last_month(
+            self, term, freq, last):
         c = fallback_ead_curve(1000, term, 4, payment_frequency=freq,
                                portfolio="Business Finance")
-        hit = int(np.argmax(c <= 1e-9)) + 1
-        assert hit == zero_at, (
-            f"M4: a {term}-month facility paying every {freq} months now "
-            f"reaches zero at month {hit}, not {zero_at}.")
-        assert hit < term, "M4 may be FIXED — the curve now runs to maturity."
+        assert len(c) == term
+        assert c[-1] == pytest.approx(last)
+        assert (c > 0).all()
+
+    def test_a_23_month_annual_facility_pays_half_at_month_11(self):
+        c = fallback_ead_curve(1000, 23, 4, payment_frequency=12,
+                               portfolio="Al Dhameen")
+        assert c[:11].tolist() == [1000.0] * 11
+        assert c[11:].tolist() == [500.0] * 12
 
 
 # ----------------------------------------------------------------- M5 ------
@@ -420,8 +429,9 @@ class TestM7AnnualPdIsSplitEvenly:
 
 
 # ----------------------------------------------------------------- M8 ------
-class TestM8WeightsDoNotSumToOne:
-    def test_the_published_weights_sum_to_more_than_one(self):
+class TestM8WeightsSumToOne:
+    def test_the_published_weights_sum_to_one(self):
+        """Restated with the V2 fix (M1): Base Case takes the residual."""
         import yaml
         from pathlib import Path
 
@@ -430,7 +440,7 @@ class TestM8WeightsDoNotSumToOne:
         block = yaml.safe_load(cfg.read_text(encoding="utf-8"))
         w = (block.get("internal_scenario_weights") or {}).get("explicit_weights")
         assert w, "explicit_weights is gone from the config"
-        assert sum(w.values()) == pytest.approx(1.0003, abs=1e-6), (
+        assert sum(w.values()) == pytest.approx(1.0, abs=1e-9), (
             f"M8: the weights now sum to {sum(w.values())}.")
 
 

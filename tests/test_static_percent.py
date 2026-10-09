@@ -78,3 +78,31 @@ def test_an_edited_file_is_read_again(percent_static):
     p.write_text(p.read_text().replace("9.062050635890580%", "9.5%"))
     assert load_static_reference(percent_static)["non_oil_gdp_history"]["value"].iloc[0] \
         == pytest.approx(9.5)
+
+
+def test_a_header_saved_with_trailing_commas_still_declares_its_units(percent_static):
+    """Excel saving the CSV writes "# units: percentage_points," -- the 26Q3
+    snapshot. The comma was read as part of the unit, the file stopped being
+    percentage points, and "9.06%" became 0.0906: against forecasts in points
+    the scenario weights collapsed to 50% Significant Downturn / 50%
+    Significant Uptrend."""
+    p = percent_static / "non_oil_gdp_history.csv"
+    lines = p.read_text().splitlines()
+    p.write_text("\n".join(ln + "," if ln.startswith("#") else ln
+                           for ln in lines) + "\n")
+    assert "# units: percentage_points," in p.read_text()
+    v = load_static_reference(percent_static)["non_oil_gdp_history"]["value"]
+    assert v.iloc[0] == pytest.approx(9.062050635890580)
+
+
+def test_history_and_forecasts_in_different_units_stop_the_weights():
+    from ifrs9qdb.etl.macro import compute_internal_scenario_weights
+    st = load_static_reference(PACKAGED_STATIC)
+    frac = st["non_oil_gdp_history"]["value"].to_numpy(float) / 100
+    with pytest.raises(ValueError, match="different units"):
+        compute_internal_scenario_weights(frac, [-0.19, 2.92],
+                                          st["scenario_severity"])
+    with pytest.warns(RuntimeWarning, match="look like fractions"):
+        compute_internal_scenario_weights(
+            st["non_oil_gdp_history"]["value"].to_numpy(float),
+            [-0.0019, 0.0292], st["scenario_severity"])
