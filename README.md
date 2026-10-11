@@ -138,6 +138,12 @@ export IFRS9_REF_RUN_PREV=/path/to/runs/run_00002   # optional, the run before
 pytest -q                                        # the data tests now run too
 ```
 
+The reference runs must have been priced by the current version of the
+calculation: the tests that reproduce a run's report or PD curves compare
+against them exactly, so a run priced before a change of method fails them by
+design. Re-price a copy with the R engine (its PD curves with `build_stpd()`
+from the run's frozen config, then `build_final_ecl_report()`).
+
 Without them those tests skip and name the variable that was missing, rather
 than failing or — worse — passing silently on absent data.
 

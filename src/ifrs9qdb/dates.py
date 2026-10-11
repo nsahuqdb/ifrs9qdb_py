@@ -168,10 +168,12 @@ def years_between(start, end) -> pd.Series:
 
 
 def calendar_months(start, end) -> pd.Series:
-    """Whole calendar months from start to end, NaN where either is missing.
+    """Whole calendar months from start to end, NaN where either is missing:
+    (year difference) * 12 + (month difference).
 
-    The count the engine prices on: (year difference) * 12 + (month
-    difference), before any floor is applied.
+    Not the count the engine prices on: that adds one when the maturity's day
+    of month is later than the extract's, as LIC counts a part month
+    (engine.months_to_maturity).
     """
     a, b = pd.to_datetime(pd.Series(start)), pd.to_datetime(pd.Series(end))
     return ((b.dt.year - a.dt.year) * 12 + (b.dt.month - a.dt.month)).astype(float)

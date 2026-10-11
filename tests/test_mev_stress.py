@@ -41,6 +41,52 @@ class TestTheRebuildIsFaithful:
         assert unchanged["ok"], unchanged.get("reason")
         assert unchanged["delta"] == pytest.approx(0.0, abs=1e-6)
         assert unchanged["before"] == pytest.approx(unchanged["after"])
+        # a run priced by this version of the calculation: the rebuild IS its
+        # own provision (one priced by an earlier version fails here)
+        assert unchanged["note"] is None
+        assert unchanged["before"] == pytest.approx(unchanged["provision"], abs=1e-3)
+
+    @needs_frozen
+    def test_a_run_from_an_earlier_calculation_is_measured_from_the_rebuild(
+            self, tmp_path, book):
+        """Its own PD curves are not what this engine builds from its config
+        (here: built on other scenario weights than the config gives). The
+        stress is measured from the rebuild, so no edit is still no change,
+        and the note says how far the rebuild is from its own provision."""
+        import shutil
+        from ifrs9qdb.etl.macro import build_stpd_from_static
+        from ifrs9qdb.etl.pipeline import load_model_config
+        from ifrs9qdb.etl.report import build_final_ecl_report
+        from ifrs9qdb.etl.static_ref import load_static_reference
+        from ifrs9qdb.etl.transform import write_outputs
+        from ifrs9qdb.inputs import load_engine_inputs
+        run = OUT.parent
+        d = tmp_path / "older"
+        shutil.copytree(OUT, d / "Output",
+                        ignore=shutil.ignore_patterns("FinalEclReport_*", "StPD_*"))
+        shutil.copytree(run / "config_used", d / "config_used")
+        cfg = d / "config_used" / "config"
+        model_cfg, inputs = load_model_config(cfg)
+        inputs = dict(inputs)
+        inputs["internal_scenario_weights"] = {"mode": "explicit", "explicit_weights": {
+            "Significant Downturn": 0.4, "Slight Downturn": 0.1, "Base Case": 0.3,
+            "Slight Uptrend": 0.1, "Significant Uptrend": 0.1}}
+        static = load_static_reference(d / "config_used" / "static")
+        _, rep0 = book
+        ext = str(rep0["extract_date"].dropna().iloc[0])
+        write_outputs(d / "Output", {"StPD.csv": build_stpd_from_static(
+            static, model_cfg, inputs, ext)})
+        build_final_ecl_report(d, static=static, model_cfg=model_cfg)
+        rep = normalise(pd.read_csv(d / "Output" / "FinalEclReport.csv", low_memory=False))
+        older = (load_engine_inputs(d / "Output"), rep)
+        r = mev_stress(*older, d / "Output")
+        assert r["ok"], r.get("reason")
+        assert r["delta"] == pytest.approx(0.0, abs=1e-6)
+        assert r["note"] and "another version of the calculation" in r["note"]
+        assert r["provision"] == pytest.approx(rep["ecl"].sum(), abs=1e-3)
+        assert abs(r["before"] - r["provision"]) > 1_000
+        # and the rebuild is what this engine prices the unedited book at
+        assert r["before"] == pytest.approx(mev_stress(*book, OUT)["before"], abs=1e-3)
 
     @needs_frozen
     def test_every_contract_is_priced(self, unchanged, book):

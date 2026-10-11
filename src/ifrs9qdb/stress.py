@@ -718,6 +718,14 @@ def customer_rows(rows: pd.DataFrame, n: int | None = 100) -> pd.DataFrame:
 MEV_WEIGHT_MODES = ("auto", "hold", "custom")
 
 
+def _same_pd_curves(x: dict, y: dict, tol: float = 1e-9) -> bool:
+    """Two sets of PD curves are the same calculation (see the ECL bridge)."""
+    if x.keys() != y.keys():
+        return False
+    return all(x[k].shape == y[k].shape
+               and np.allclose(x[k], y[k], rtol=0.0, atol=tol) for k in x)
+
+
 def stpd_to_curves(stpd: pd.DataFrame) -> dict[str, np.ndarray]:
     """An StPD table as the zero-prepended curves the engine prices with."""
     key = ("PortfolioCode", "PDBucketDim1", "MonthLifetime", "PDLifetime")
@@ -756,8 +764,16 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
     very matrix, so editing non-oil GDP moves the weights AND the curves:
 
         auto    leave the config alone; the weights follow the new path
-        hold    pin them to what this run used, isolating the PD effect
+        hold    pin the internal weights to what the unedited config gives,
+                isolating the PD effect
         custom  use the weights supplied
+
+    ``before`` is the run rebuilt from its own config with no edit, so the
+    change is the edit's alone. For a run priced by this version of the
+    calculation that is the run's own provision; for one priced by an earlier
+    version (scenario weights before 0.29, say) it is not, and ``provision``
+    and ``note`` say by how much -- measured from the run's own curves, that
+    change of method would have been counted as stress.
 
     Returns before, after and the split, or ``{"ok": False, "reason": ...}``
     naming what was missing -- a macro screen that goes blank explains nothing.
@@ -786,6 +802,8 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
     except Exception as exc:
         return {"ok": False, "reason": f"The frozen config could not be read: {exc}"}
 
+    import copy
+    raw0 = copy.deepcopy(raw)          # the run's config, unedited
     fc = ((raw or {}).get("mev_forecasts") or {}).get("forecasts")
     if not fc:
         return {"ok": False,
@@ -812,11 +830,25 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
                 fc[y][i] += delta
     raw["mev_forecasts"]["forecasts"] = fc
 
-    base_internal = (raw.get("internal_scenario_weights") or {}).get("explicit_weights")
+    # "This run's" weights: what the unedited config gives on this engine --
+    # the baseline's. The config's explicit_weights are a rounded snapshot,
+    # and in a run from before 0.29 the earlier method's.
+    from .etl.macro import resolve_internal_scenario_weights
+    try:
+        held = {k: float(v) for k, v in
+                resolve_internal_scenario_weights(raw0, static).items()}
+    except Exception:
+        held = None
+    base_internal = held or (raw.get("internal_scenario_weights") or {}).get("explicit_weights")
     if weight_mode == "hold":
-        for node in ("internal_scenario_weights", "external_scenario_weights"):
-            if node in raw:
-                raw[node]["mode"] = "explicit"
+        # Pin exactly those, so only the PD effect of the edit moves. The
+        # external weights follow GCC growth, which this screen does not edit.
+        if held is None:
+            return {"ok": False,
+                    "reason": "The run's scenario weights could not be resolved."}
+        raw["internal_scenario_weights"] = {
+            **(raw.get("internal_scenario_weights") or {}),
+            "mode": "explicit", "explicit_weights": held}
     elif weight_mode == "custom" and weights:
         for node in ("internal_scenario_weights", "external_scenario_weights"):
             raw.setdefault(node, {})
@@ -837,7 +869,22 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
         return {"ok": False, "reason": "The rebuilt StPD had no usable curves."}
 
     base_cfg = cfg or EclConfig()
-    before = reprice(inputs, report, cfg=base_cfg)
+    # The baseline: the run rebuilt on THIS engine with no edit. When that is
+    # not the run's own curves (it was priced by another version of the
+    # calculation), the stress is measured from the rebuild and the gap to the
+    # run's own provision is reported, not counted as stress.
+    base_curves = None
+    try:
+        stpd_base = build_stpd_from_static(static, model, raw0, extract,
+                                           model_id=run_model_id(run_path))
+        bc = stpd_to_curves(stpd_base)
+        if bc and not _same_pd_curves(bc, inputs.pd_curves):
+            base_curves = bc
+    except Exception:
+        base_curves = None
+    own = reprice(inputs, report, cfg=base_cfg)
+    before = own if base_curves is None else \
+        reprice(inputs, report, pd_curves=base_curves, cfg=base_cfg)
     after = reprice(inputs, report, pd_curves=curves, cfg=base_cfg)
 
     d = before[["contract", "customer", "portfolio", "rating", "stage",
@@ -860,11 +907,27 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
                                              for i, v in enumerate(vals)}}
                          for y, vals in sorted(fc.items(), key=lambda kv: int(kv[0]))])
 
+    # the run's own provision, as its report has it, over the contracts priced
+    rep_ecl = pd.to_numeric(report["ecl"], errors="coerce") \
+        if "ecl" in report.columns and len(report) == len(own) else own["ecl"]
+    provision = float(pd.to_numeric(rep_ecl, errors="coerce").fillna(0.0)
+                      .to_numpy()[ok.to_numpy()].sum())
+    note = None
+    if base_curves is not None:
+        gap = float(priced["ecl_before"].sum()) - provision
+        note = (f"This run was priced by another version of the calculation: "
+                f"rebuilt on this engine with no edit it is {gap:+,.0f} from its "
+                f"own provision ({provision:,.0f}). The change shown is "
+                "measured from the rebuild, so it is the edit's alone.")
+
     return {
         "ok": True,
         "before": float(priced["ecl_before"].sum()),
         "after": float(priced["ecl_after"].sum()),
         "delta": float(priced["change"].sum()),
+        "provision": provision,
+        "rebuilt_baseline": base_curves is not None,
+        "note": note,
         "priced": int(ok.sum()),
         "weight_mode": weight_mode,
         "weights_base": base_internal,

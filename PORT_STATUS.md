@@ -676,7 +676,12 @@ rather than about the book:
   matched contracts priced; nothing fell into `uncovered`.
 * **`mev_stress` rebuilds the whole PD chain from the run's frozen config and,
   with no edit, reproduces the run's own provision to 1e-6.** The rebuild is
-  therefore measuring the macro path and not itself.
+  therefore measuring the macro path and not itself. A run priced by an
+  earlier version of the calculation (before 0.29) is not reproduced -- its
+  curves were built on the earlier scenario weighting -- so the stress is
+  measured from the rebuild (no edit, no change) and the gap to the run's own
+  provision is reported, rather than counted as stress; *hold* pins the
+  weights the rebuild uses, exactly, not the config's rounded snapshot.
 * **A domestic MEV shock leaves Investments and Banks and FIs untouched**, as
   it must: those price off GCC growth. The two rating scales stay separate all
   the way through the rebuilt chain.
@@ -708,11 +713,12 @@ the report's own pricing path:
 
 | Step | What changes |
 | --- | --- |
+| Method change | the previous run repriced on this version of the calculation, with its own data, config and PD curves rebuilt from that config -- zero when both runs were priced the same way |
 | Exposure | balance, EAD curve and remaining term, at the old stage, rating, curves and LGD |
 | Stage migration | the stage: 12-month or lifetime, or Stage 3 at the balance |
 | Rating migration | the rating, on the previous run's PD curves |
 | Macro variables | PD curves from the current macro inputs on the previous model |
-| Model | the model's own change: model.yml, the model chosen, the TTC table, how the MEV models combine |
+| Model | the model's own change: model.yml, the model chosen, the TTC table, how the MEV models combine, and the ECL settings (EAD fallback rules, Stage 3 method, exposure cap) |
 | LGD & collateral | collateral, so LGD, and the EIR |
 | Overlay | the post-model overlay |
 
@@ -735,6 +741,39 @@ What it was checked against:
 
 `bridge_by` is one pass over the contracts, so a level of 8,393 facilities is
 0.14 s rather than a bridge per facility.
+
+**Across a change in the calculation (0.29.x).** Comparing a run priced before
+0.29.0 with one priced after, the change of method would otherwise land in the
+steps it touches: the month count and EAD payment dates in Other, the V2
+scenario weighting in Macro variables, and the Al Dhameen rule (a model.yml
+setting) in Exposure. The bridge now restates the previous run on this engine
+first -- its PD curves rebuilt from its frozen config, when the current run's
+curves are exactly what this engine builds from its own -- and shows that as
+Method change, and prices every step before Model on the previous run's ECL
+settings. On the June 2026 sample priced by 0.28.0 and by 0.29.0: Method
+change -40,701,157, Model -4,808,485 (Al Dhameen amortising), nothing else;
+between two runs of the same engine, no Method change at all.
+
+## 0.29.0 on our own data (Oct 2026)
+
+0.29.0 was matched to LIC run 330 on the Q3 2026 book. Checked here on what
+this repository can see:
+
+* **Every contract that moved from 0.28.0 to 0.29.0 has a cause.** The June
+  2026 sample priced by both: -45,509,642 in all, of which the V2 scenario
+  weights -40,158,663 (6,759 Stage 1/2 contracts), Al Dhameen type 4
+  amortising -5,178,519 (41 contracts, all Al Dhameen type 4 with no
+  schedule), and the month count and EAD payment dates -172,460 (727
+  contracts, every one with a changed month count or payment dates). No
+  Stage 3 contract moved.
+* **The report, the stress repricer and the ECL bridge price alike** on runs
+  priced by 0.29.0: the repricer to the cent, the bridge with Other 0 on
+  every contract.
+* **R 1.0.2 and Python 0.29.0 agree to the cent on every contract** of the
+  September and December 2025 runs re-priced by R 1.0.2 (PD curves and
+  reports), once both read the same EAD fallback rules: R's model config did
+  not carry model.yml's ecl section, so R priced on its built-in rules
+  whatever a run's config said (fixed in R 1.0.3).
 
 ## The surface is complete
 

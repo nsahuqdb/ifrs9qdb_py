@@ -324,7 +324,9 @@ def _customer_sector(customer_id: pd.Series, industry: pd.DataFrame | None,
         return none
     by_customer = dict(zip(as_id(cid), desc.astype(str)))
     code = pick(mapping, "industry_code", "IndustryCode").astype(str).str.strip()
-    code = code.str.replace(r"\.0$", "", regex=True).str.zfill(4)
+    # "113.0" or "113.00" (a mapping saved by a spreadsheet) is "0113", as
+    # R's normalise_industry_code() reads it
+    code = code.str.replace(r"\.0+$", "", regex=True).str.zfill(4)
     sector_of = dict(zip(code, pick(mapping, "sector", "Sector").astype(str)))
     prefix = customer_id.map(by_customer).astype(str).str[:4]
     return prefix.map(sector_of)

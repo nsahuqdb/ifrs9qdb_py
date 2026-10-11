@@ -5,22 +5,32 @@ Why the provision moved -- contract by contract, at any level.
 pricing it the way each run's own report priced it (etl/report.py: the same
 engine frame, the same pricing context) and changing one ingredient at a time:
 
-    f0  the previous run, as it was
+    f0  the previous run, repriced on this engine                -> Method change
     f1  + the current balance, EAD curve and remaining term   -> Exposure
     f2  + the current stage                                    -> Stage migration
     f3  + the current rating, on the previous run's PD curves  -> Rating migration
     f4  + the current macro inputs, on the previous model      -> Macro variables
-    f5  + the current model                                    -> Model
+    f5  + the current model and ECL settings                   -> Model
     f6  + the current collateral, LGD and EIR                  -> LGD & collateral
 
-f0 is the previous run's model ECL and f6 the current run's, so the steps
+Method change is the previous run's model ECL against f0: the previous run on
+this version of the calculation, with its own data, config and -- rebuilt from
+its frozen config -- PD curves. It is zero when the previous run was priced by
+the same calculation, and otherwise holds a change in the method itself (the
+month count, the EAD payment dates, the scenario weighting) rather than leaving
+it to the steps it touches. f6 is the current run's model ECL, so the steps
 telescope to the move in the model ECL. The change in the post-model overlay is
-its own step, and "Other" is what the report holds that the repricing does not
--- zero when the engine reproduces the report -- together with the whole move
-of a contract that cannot be repriced in both runs. A contract that left is
+its own step, and "Other" is what the current report holds that the repricing
+does not -- zero when this engine priced it -- together with the whole move of
+a contract that cannot be repriced in both runs. A contract that left is
 Derecognised, one that arrived New business. Every contract's components
 therefore sum EXACTLY to its change in the reports, and a customer, a facility,
 an account type, a segment or a stage is a sum of contracts.
+
+The ECL settings in model.yml (the EAD fallback rules for a contract with no
+repayment schedule, the Stage 3 method, the exposure cap) are part of the model:
+the steps before Model are priced on the previous run's, and Model switches to
+the current run's.
 
 Macro and model are told apart by pricing once more on PD curves built from the
 current run's macro inputs and the previous run's model, both read from the
@@ -54,6 +64,7 @@ __all__ = ["BRIDGE_COMPONENTS", "BRIDGE_LEVELS", "BridgeRun", "load_bridge_run",
 
 # component -> label, in waterfall order
 BRIDGE_COMPONENTS = {
+    "method": "Method change",
     "derecognised": "Derecognised",
     "moved_out": "Moved out",
     "moved_in": "Moved in",
@@ -69,8 +80,8 @@ BRIDGE_COMPONENTS = {
     "other": "Other",
 }
 # what a contract carries (moving between groups is a group's, not a contract's)
-CONTRACT_COMPONENTS = ("derecognised", "new_business", "exposure", "stage",
-                       "rating", "macro", "model", "pd_curves", "lgd",
+CONTRACT_COMPONENTS = ("method", "derecognised", "new_business", "exposure",
+                       "stage", "rating", "macro", "model", "pd_curves", "lgd",
                        "overlay", "other")
 
 # level -> the contract attribute that places a contract in a group
@@ -276,6 +287,41 @@ def _hybrid_ctx(a: BridgeRun, b: BridgeRun):
     return ctx
 
 
+def _rebuilt_ctx(r: BridgeRun):
+    """A run's pricing context on PD curves rebuilt by THIS engine from the
+    run's own frozen config: what it would have priced with on the current
+    calculation."""
+    from ..etl.macro import build_stpd_from_static
+    from ..etl.report import _Ctx
+
+    stpd = build_stpd_from_static(r.static, r.model_cfg, r.model_inputs,
+                                  r.extract_date or "", model_id=r.model_id)
+    ctx = copy.copy(r.ctx)
+    ctx.stpd = _Ctx._stpd(stpd)
+    return ctx
+
+
+def _same_curves(x: dict, y: dict, tol: float = 1e-9) -> bool:
+    """Whether two runs' PD curves are the same calculation: equal to well
+    inside what any change in method moves them by (and R and Python build
+    them to 1e-12 of each other)."""
+    if x.keys() != y.keys():
+        return False
+    for k, v in x.items():
+        w = y[k]
+        if v.shape != w.shape or not np.allclose(v, w, rtol=0.0, atol=tol):
+            return False
+    return True
+
+
+def _with_settings(ctx, of):
+    """``ctx`` (the current run's data) on the ECL settings of ``of``: its EAD
+    fallback rules, Stage 3 method and exposure cap."""
+    out = copy.copy(ctx)
+    out.rules, out.stage3, out.cap = of.rules, of.stage3, of.cap
+    return out
+
+
 # ------------------------------------------------------------ the bridge ----
 def _price(ctx, stage: int, ht, bal: float, lgd: float, cum, eir) -> float:
     """One contract, as the report prices it (etl/report.py _segment)."""
@@ -316,6 +362,28 @@ def ecl_bridge(a: BridgeRun, b: BridgeRun) -> dict:
         return {"ok": False, "reason": a.reason or b.reason}
     changes = config_changes(a, b)
     notes = []
+    # The previous run on THIS engine: its PD curves rebuilt from its own
+    # frozen config, so that a change in how the curves are calculated (the
+    # scenario weighting, say) is Method change rather than Macro or Model.
+    # Only when the current run's curves are this engine's: had both runs come
+    # from an earlier version, restating one of them would only show the same
+    # change twice, once each way.
+    ca_m = a.ctx
+    if a.has_config and b.has_config:
+        try:
+            if _same_curves(_rebuilt_ctx(b).stpd, b.ctx.stpd):
+                rebuilt = _rebuilt_ctx(a)
+                if not _same_curves(rebuilt.stpd, a.ctx.stpd):
+                    ca_m = rebuilt
+            else:
+                notes.append("The current run's PD curves are not what this "
+                             "engine builds from its config: it was priced by "
+                             "another version of the calculation, and repricing "
+                             "does not reproduce it (Other).")
+        except Exception as exc:
+            notes.append(f"The PD curves could not be rebuilt on this engine "
+                         f"({exc}); a change in how they are calculated is in "
+                         "the PD-curve steps.")
     split = changes["known"]
     if not split:
         notes.append("A run has no frozen config (config_used), so the move in "
@@ -332,7 +400,7 @@ def ecl_bridge(a: BridgeRun, b: BridgeRun) -> dict:
     elif changes["macro_changed"]:
         ctx_h = b.ctx          # the model did not change: macro takes it all
     elif changes["model_changed"]:
-        ctx_h = a.ctx          # the macro inputs did not: the model takes it
+        ctx_h = ca_m           # the macro inputs did not: the model takes it
     else:
         ctx_h = None           # neither changed: any curve difference is Other
 
@@ -365,9 +433,13 @@ def ecl_bridge(a: BridgeRun, b: BridgeRun) -> dict:
 
     fa, fb = a.frame, b.frame
     ca, cb = a.ctx, b.ctx
-    eff = {k: np.zeros(len(both)) for k in ("exposure", "stage", "rating",
-                                           "macro", "model", "pd_curves", "lgd",
-                                           "other")}
+    # the current run's data on the previous run's ECL settings, up to Model
+    cb_a = _with_settings(cb, ca)
+    same_settings = (ca.rules == cb.rules and ca.stage3 == cb.stage3
+                     and ca.cap == cb.cap)
+    eff = {k: np.zeros(len(both)) for k in ("method", "exposure", "stage",
+                                           "rating", "macro", "model",
+                                           "pd_curves", "lgd", "other")}
     ok = np.zeros(len(both), dtype=bool)
     not_split_rating = 0
     for i, key in enumerate(both):
@@ -386,8 +458,8 @@ def ecl_bridge(a: BridgeRun, b: BridgeRun) -> dict:
         rta = "External" if str(ea["rating_type"]) == "External" else "Internal"
         rtb = "External" if str(eb["rating_type"]) == "External" else "Internal"
         pfa, pfb = ea["portfolio"], eb["portfolio"]
-        cum_a = ca.pd_curve(pfa, ra_, rta)
-        cum_r = ca.pd_curve(pfb, rb_, rtb)
+        cum_a = ca_m.pd_curve(pfa, ra_, rta)
+        cum_r = ca_m.pd_curve(pfb, rb_, rtb)
         cum_b = cb.pd_curve(pfb, rb_, rtb)
         cum_h = ctx_h.pd_curve(pfb, rb_, rtb) if ctx_h is not None else None
 
@@ -397,23 +469,28 @@ def ecl_bridge(a: BridgeRun, b: BridgeRun) -> dict:
                               e["deferral"], e["pay_freq"])
 
         h_a = ht(ca, ea, sa, ba)
-        h_ba = ht(cb, eb, sa, bb)
-        h_bb = h_ba if sb == sa else ht(cb, eb, sb, bb)
+        h_ba = ht(cb_a, eb, sa, bb)
+        h_bb = h_ba if sb == sa else ht(cb_a, eb, sb, bb)
+        h_bc = h_bb if same_settings else ht(cb, eb, sb, bb)
         eir_a, eir_b = ea["eir"], eb["eir"]
 
         f0 = _price(ca, sa, h_a, ba, la, cum_a, eir_a)
-        f1 = _price(cb, sa, h_ba, bb, la, cum_a, eir_a)
-        f2 = _price(cb, sb, h_bb, bb, la, cum_a, eir_a)
+        f1 = _price(cb_a, sa, h_ba, bb, la, cum_a, eir_a)
+        f2 = _price(cb_a, sb, h_bb, bb, la, cum_a, eir_a)
         if cum_r is None and cum_a is not None and sb != 3:
             # the previous run had no curve for the current rating: the rating
             # move cannot be priced on its own and travels with the next step
             f3 = f2
             not_split_rating += 1
         else:
-            f3 = _price(cb, sb, h_bb, bb, la, cum_r, eir_a)
-        f5 = _price(cb, sb, h_bb, bb, la, cum_b, eir_a)
-        f4 = _price(cb, sb, h_bb, bb, la, cum_h, eir_a) if ctx_h is not None else f5
-        f6 = _price(cb, sb, h_bb, bb, lb, cum_b, eir_b)
+            f3 = _price(cb_a, sb, h_bb, bb, la, cum_r, eir_a)
+        f5 = _price(cb, sb, h_bc, bb, la, cum_b, eir_a)
+        if ctx_h is not None:
+            f4 = _price(cb_a, sb, h_bb, bb, la, cum_h, eir_a)
+        else:
+            # no macro step: the settings still switch at Model, not here
+            f4 = f5 if same_settings else _price(cb_a, sb, h_bb, bb, la, cum_b, eir_a)
+        f6 = _price(cb, sb, h_bc, bb, lb, cum_b, eir_b)
         f = [f0, f1, f2, f3, f4, f5, f6]
         if not all(np.isfinite(x) for x in f):
             continue
@@ -425,13 +502,16 @@ def ecl_bridge(a: BridgeRun, b: BridgeRun) -> dict:
             eff["macro"][i] = f4 - f3
             eff["model"][i] = f5 - f4
         elif split:
-            eff["other"][i] += f5 - f3           # neither changed
+            eff["other"][i] += f4 - f3           # neither changed
+            eff["model"][i] = f5 - f4            # the ECL settings, if any
         else:
-            eff["pd_curves"][i] = f5 - f3
+            eff["pd_curves"][i] = f4 - f3
+            eff["model"][i] = f5 - f4            # the ECL settings, if any
         eff["lgd"][i] = f6 - f5
         model_a = rows.at[key, "ecl_a"] - rows.at[key, "overlay_a"]
         model_b = rows.at[key, "ecl_b"] - rows.at[key, "overlay_b"]
-        eff["other"][i] += (model_b - f6) - (model_a - f0)
+        eff["method"][i] = f0 - model_a
+        eff["other"][i] += model_b - f6
 
     cont = rows.loc[both]
     move = (cont["ecl_b"] - cont["ecl_a"]).to_numpy()
@@ -446,6 +526,12 @@ def ecl_bridge(a: BridgeRun, b: BridgeRun) -> dict:
         notes.append(f"{n_not:,} contract(s) in both runs could not be repriced "
                      "in both (no PD curve, EAD curve or EIR); their whole move "
                      "is under Other.")
+    meth = float(np.where(ok, eff["method"], 0.0).sum())
+    if abs(meth) >= 0.5:
+        notes.append(f"Repricing the previous run on this engine, with its own "
+                     f"data and config, moves it by {meth:,.0f}: it was priced "
+                     "by another version of the calculation. That is shown as "
+                     "Method change.")
     if not_split_rating:
         notes.append(f"{not_split_rating:,} contract(s) moved to a rating the "
                      "previous run had no PD curve for; their rating move is "
@@ -548,8 +634,8 @@ def bridge_view(rows: pd.DataFrame, level: str = "book", members=None,
     steps["moved_out"] = -float(rows.loc[in_a & cont & ~in_b, "ecl_a"].sum())
     steps["moved_in"] = float(rows.loc[~in_a & cont & in_b, "ecl_a"].sum())
     stay = in_b & cont
-    for k in ("exposure", "stage", "rating", "macro", "model", "pd_curves",
-              "lgd", "overlay", "other"):
+    for k in ("method", "exposure", "stage", "rating", "macro", "model",
+              "pd_curves", "lgd", "overlay", "other"):
         steps[k] = float(rows.loc[stay, k].sum())
     opening = float(rows.loc[in_a, "ecl_a"].sum())
     closing = float(rows.loc[in_b, "ecl_b"].sum())
@@ -627,8 +713,8 @@ def bridge_by(rows: pd.DataFrame, level: str) -> pd.DataFrame:
     out["moved_out"] = 0.0 - total(rows["ecl_a"], ga, moved)
     out["moved_in"] = total(rows["ecl_a"], gb, moved)
     out["new_business"] = total(rows["new_business"], gb, status == "new")
-    for k in ("exposure", "stage", "rating", "macro", "model", "pd_curves",
-              "lgd", "overlay", "other"):
+    for k in ("method", "exposure", "stage", "rating", "macro", "model",
+              "pd_curves", "lgd", "overlay", "other"):
         out[k] = total(rows[k], gb, cont)
     out["closing"] = total(rows["ecl_b"], gb)
     out["change"] = out["closing"] - out["opening"]

@@ -40,11 +40,14 @@ class TestTwoQuarters:
                                    rtol=0, atol=1e-6)
 
     def test_the_engine_reproduces_both_reports(self, quarters):
-        """Other holds what the report has that the repricing does not; on
-        runs the engine priced, nothing."""
+        """Other holds what the current report has that the repricing does
+        not, and Method change what the previous one has; on runs priced by
+        this version of the calculation, nothing. (Reference runs priced by an
+        earlier version fail here: re-price them with the current engine.)"""
         c = quarters["rows"][quarters["rows"]["status"] == "continuing"]
         assert c["repriced"].all()
         assert c["other"].abs().max() < 1e-4
+        assert c["method"].abs().max() < 1e-4
 
     def test_an_unchanged_config_moves_neither_macro_nor_model(self, quarters):
         ch = quarters["changes"]
@@ -120,9 +123,13 @@ class TestTwoQuarters:
 
 
 # -------------------------------------------------- macro and model ------
-def _variant(tmp_path, base, name, macro=False, model=False):
+def _variant(tmp_path, base, name, macro=False, model=False, rule=False,
+             weights=None):
     """A copy of ``base`` with its frozen macro inputs and/or model changed,
-    and its PD curves and report rebuilt from them."""
+    and its PD curves and report rebuilt from them. ``rule`` flips the EAD
+    fallback shape of Al Dhameen payment type 4 in its model.yml; ``weights``
+    builds its PD curves on those scenario weights while its config still
+    says otherwise -- a run priced by another version of the calculation."""
     from ifrs9qdb.etl.macro import build_stpd_from_static
     from ifrs9qdb.etl.pipeline import load_model_config
     from ifrs9qdb.etl.report import build_final_ecl_report
@@ -143,7 +150,18 @@ def _variant(tmp_path, base, name, macro=False, model=False):
         m = yaml.safe_load((cfg / "model.yml").read_text())
         m["models"]["internal_v4_production"]["mev_components"][0]["coefficient"] = -0.06
         (cfg / "model.yml").write_text(yaml.safe_dump(m, sort_keys=False))
+    if rule:
+        m = yaml.safe_load((cfg / "model.yml").read_text())
+        for r in m["ecl"]["ead_fallback"]["rules"]:
+            if r["portfolio"] == "Al Dhameen" and str(r["payment_type"]) == "4":
+                r["shape"] = "bullet" if r["shape"] == "linear" else "linear"
+        (cfg / "model.yml").write_text(yaml.safe_dump(m, sort_keys=False))
     model_cfg, inputs = load_model_config(cfg)
+    if weights is not None:
+        import copy
+        inputs = copy.deepcopy(inputs)
+        inputs["internal_scenario_weights"] = {"mode": "explicit",
+                                               "explicit_weights": weights}
     static = load_static_reference(d / "config_used" / "static")
     rc = yaml.safe_load((cfg / "config.yml").read_text()) or {}
     mid = (rc.get("run") or {}).get("internal_model")
@@ -158,9 +176,14 @@ def _variant(tmp_path, base, name, macro=False, model=False):
 @pytest.fixture(scope="module")
 def variants(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("bridge")
-    return {n: _variant(tmp, CURR, n, macro=n in ("macro", "both"),
-                        model=n in ("model", "both"))
-            for n in ("base", "macro", "model", "both")}
+    out = {n: _variant(tmp, CURR, n, macro=n in ("macro", "both"),
+                       model=n in ("model", "both"))
+           for n in ("base", "macro", "model", "both")}
+    out["rule"] = _variant(tmp, CURR, "rule", rule=True)
+    out["oldcalc"] = _variant(tmp, CURR, "oldcalc", weights={
+        "Significant Downturn": 0.4, "Slight Downturn": 0.1, "Base Case": 0.3,
+        "Slight Uptrend": 0.1, "Significant Uptrend": 0.1})
+    return out
 
 
 def _totals(a, b):
@@ -178,7 +201,7 @@ class TestMacroAndModel:
         assert any("mev_forecasts" in c["item"] for c in br["changes"]["macro"])
         assert abs(move) > 1_000
         assert t["macro"] == pytest.approx(move, abs=1e-3)
-        for k in ("exposure", "stage", "rating", "model", "lgd", "other"):
+        for k in ("method", "exposure", "stage", "rating", "model", "lgd", "other"):
             assert abs(t[k]) < 1e-3, k
 
     def test_a_model_change_is_all_model(self, variants):
@@ -187,7 +210,7 @@ class TestMacroAndModel:
         assert br["changes"]["model"][0]["after"] == -0.06
         assert abs(move) > 1_000
         assert t["model"] == pytest.approx(move, abs=1e-3)
-        for k in ("exposure", "stage", "rating", "macro", "lgd", "other"):
+        for k in ("method", "exposure", "stage", "rating", "macro", "lgd", "other"):
             assert abs(t[k]) < 1e-3, k
 
     def test_both_split_with_the_macro_measured_on_the_old_model(self, variants):
@@ -214,3 +237,26 @@ def test_a_customer_or_facility_is_labelled_with_its_name():
     assert m["C1"] == "C1 — Acme" and m["C2"] == "C2"
     f = bridge_members(rows, "facility").set_index("value")["label"]
     assert f["F1"] == "F1 — Acme" and f["F3"] == "F3"
+
+    def test_an_ead_rule_change_is_the_model_not_exposure(self, variants):
+        """The EAD fallback rules are model.yml's: the steps before Model are
+        priced on the previous run's, so a change to them is Model."""
+        br, t, move = _totals(variants["base"], variants["rule"])
+        assert br["changes"]["model_changed"] and not br["changes"]["macro_changed"]
+        assert any("ead_fallback" in c["item"] for c in br["changes"]["model"])
+        assert abs(move) > 1_000
+        assert t["model"] == pytest.approx(move, abs=1e-3)
+        for k in ("method", "exposure", "stage", "rating", "macro", "lgd", "other"):
+            assert abs(t[k]) < 1e-3, k
+
+    def test_an_earlier_calculation_is_method_change(self, variants):
+        """A previous run whose PD curves are not what this engine builds from
+        its config -- priced by another version of the calculation -- is
+        restated before anything else moves: the whole move is Method change."""
+        br, t, move = _totals(variants["oldcalc"], variants["base"])
+        assert not br["changes"]["model_changed"] and not br["changes"]["macro_changed"]
+        assert abs(move) > 1_000
+        assert t["method"] == pytest.approx(move, abs=1e-3)
+        for k in ("exposure", "stage", "rating", "macro", "model", "lgd", "other"):
+            assert abs(t[k]) < 1e-3, k
+        assert any("Method change" in n for n in br["notes"])

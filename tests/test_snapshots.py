@@ -374,3 +374,19 @@ class TestAgainstTheRSnapshot:
         back = S.read_static_csv_with_header(dst)
         assert back["comment_header"] == r["comment_header"]
         pd.testing.assert_frame_equal(back["data"], r["data"])
+
+
+def test_the_sector_lookup_reads_codes_saved_as_numbers():
+    """A mapping saved by a spreadsheet holds "113.0" or "113.00"; the
+    customer's description carries "0113". Both are the same code -- as R's
+    normalise_industry_code() reads them -- so Agriculture still matches."""
+    from ifrs9qdb.etl.lending import _customer_sector
+    customers = pd.Series(["C1", "C2", "C3"])
+    industry = pd.DataFrame({"CUSTOMERID": ["C1", "C2", "C3"],
+                             "DESCRIPTION": ["0113 Growing of vegetables",
+                                             "0311 Marine fishing",
+                                             "2822 Machine tools"]})
+    mapping = pd.DataFrame({"industry_code": ["113.0", "311.00", "2822"],
+                            "sector": ["Agriculture", "Fisheries", "Industry"]})
+    assert _customer_sector(customers, industry, mapping).tolist() == \
+        ["Agriculture", "Fisheries", "Industry"]
