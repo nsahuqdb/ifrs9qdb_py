@@ -71,8 +71,6 @@ __all__ = ["BRIDGE_COMPONENTS", "BRIDGE_LEVELS", "BridgeRun", "load_bridge_run",
 BRIDGE_COMPONENTS = {
     "method": "Method change",
     "derecognised": "Derecognised",
-    "moved_out": "Moved out",
-    "moved_in": "Moved in",
     "new_business": "New business",
     "exposure": "Exposure",
     "stage": "Stage migration",
@@ -85,7 +83,7 @@ BRIDGE_COMPONENTS = {
     "overlay": "Overlay",
     "other": "Other",
 }
-# what a contract carries (moving between groups is a group's, not a contract's)
+# what a contract carries
 CONTRACT_COMPONENTS = ("method", "derecognised", "new_business", "exposure",
                        "stage", "rating", "macro", "settings", "model",
                        "pd_curves", "lgd", "overlay", "other")
@@ -578,13 +576,24 @@ def _attr(rows: pd.DataFrame, level: str, side: str) -> pd.Series:
     return s.astype("string")
 
 
+def _group(rows: pd.DataFrame, level: str) -> pd.Series:
+    """The ONE group a contract is counted in at a level: its group in the
+    current run, or -- for a contract that left -- in the previous run. A
+    contract is never in two groups, so a group's movement is just the sum of
+    its contracts' causes; there is no transfer between groups."""
+    ga, gb = _attr(rows, level, "a"), _attr(rows, level, "b")
+    return gb.where(rows["status"] != "derecognised", ga)
+
+
 def _masks(rows, level, members):
+    """The selection's contracts, as they stood in each run."""
     if level == "book" or BRIDGE_LEVELS.get(level) is None:
-        return (rows["status"] != "new"), (rows["status"] != "derecognised")
-    want = {str(m) for m in (members or [])}
-    in_a = _attr(rows, level, "a").isin(want).fillna(False) & (rows["status"] != "new")
-    in_b = _attr(rows, level, "b").isin(want).fillna(False) & \
-        (rows["status"] != "derecognised")
+        member = pd.Series(True, index=rows.index)
+    else:
+        want = {str(m) for m in (members or [])}
+        member = _group(rows, level).isin(want).fillna(False).astype(bool)
+    in_a = member & (rows["status"] != "new")
+    in_b = member & (rows["status"] != "derecognised")
     return in_a.astype(bool), in_b.astype(bool)
 
 
@@ -631,12 +640,13 @@ def bridge_view(rows: pd.DataFrame, level: str = "book", members=None,
 
     ``level`` is one of BRIDGE_LEVELS and ``members`` the values chosen (one
     or more customers, facilities, account types, segments, stages or
-    ratings). A contract belongs to the group in a run when its attribute in
-    THAT run is one of them, so the opening and closing are each run's own
-    figures for the group. A contract that left the group for another is
-    "Moved out" at its previous ECL; one that joined is "Moved in" at its
-    previous ECL, and its own causes then follow, so the steps still sum
-    exactly to the closing.
+    ratings). A contract is counted in the group it is in NOW (a contract
+    that left: the group it was in), so the opening is the previous ECL of
+    these contracts and the closing their current ECL. For customers,
+    facilities, segments and account types that is each run's own figure for
+    the group; for a stage or a rating the opening is the previous ECL of the
+    contracts in that stage or rating now -- a loan that moved from Stage 1 to
+    Stage 2 is in the Stage 2 view, its whole move under Stage migration.
     """
     if level not in BRIDGE_LEVELS:
         raise ValueError(f"level must be one of {list(BRIDGE_LEVELS)}")
@@ -649,8 +659,6 @@ def bridge_view(rows: pd.DataFrame, level: str = "book", members=None,
                                            "derecognised"].sum())
     steps["new_business"] = float(rows.loc[in_b & (rows["status"] == "new"),
                                            "new_business"].sum())
-    steps["moved_out"] = -float(rows.loc[in_a & cont & ~in_b, "ecl_a"].sum())
-    steps["moved_in"] = float(rows.loc[~in_a & cont & in_b, "ecl_a"].sum())
     stay = in_b & cont
     for k in ("method", "exposure", "stage", "rating", "macro", "settings",
               "model", "pd_curves", "lgd", "overlay", "other"):
@@ -682,9 +690,7 @@ def bridge_view(rows: pd.DataFrame, level: str = "book", members=None,
         "after": _profile(rows, in_b, "b"),
         "counts": {"in_previous": int(in_a.sum()), "in_current": int(in_b.sum()),
                    "derecognised": int((in_a & (rows["status"] == "derecognised")).sum()),
-                   "new": int((in_b & (rows["status"] == "new")).sum()),
-                   "moved_out": int((in_a & cont & ~in_b).sum()),
-                   "moved_in": int((~in_a & cont & in_b).sum())},
+                   "new": int((in_b & (rows["status"] == "new")).sum())},
         "contracts": sel[keep].head(top).reset_index(drop=True),
     }
 
@@ -711,13 +717,13 @@ def bridge_by(rows: pd.DataFrame, level: str) -> pd.DataFrame:
         raise ValueError("bridge_by needs a level other than the whole book")
     status = rows["status"]
     cont = status == "continuing"
-    # each contract's group in each run, and none in a run it is not in
-    ga = _attr(rows, level, "a").where(status != "new")
-    gb = _attr(rows, level, "b").where(status != "derecognised")
-    groups = sorted(set(ga.dropna()) | set(gb.dropna()), key=str)
+    # each contract in one group (see _group); none in a run it is not in
+    g = _group(rows, level)
+    ga = g.where(status != "new")
+    gb = g.where(status != "derecognised")
+    groups = sorted(set(g.dropna()), key=str)
     if not groups:
         return pd.DataFrame()
-    moved = cont & ~(ga == gb).fillna(False).astype(bool)
 
     def total(values, keys, mask=None):
         m = keys.notna() if mask is None else (mask & keys.notna())
@@ -728,8 +734,6 @@ def bridge_by(rows: pd.DataFrame, level: str) -> pd.DataFrame:
 
     out = pd.DataFrame({"group": groups, "opening": total(rows["ecl_a"], ga)})
     out["derecognised"] = total(rows["derecognised"], ga, status == "derecognised")
-    out["moved_out"] = 0.0 - total(rows["ecl_a"], ga, moved)
-    out["moved_in"] = total(rows["ecl_a"], gb, moved)
     out["new_business"] = total(rows["new_business"], gb, status == "new")
     for k in ("method", "exposure", "stage", "rating", "macro", "settings",
               "model", "pd_curves", "lgd", "overlay", "other"):
@@ -749,9 +753,9 @@ def bridge_members(rows: pd.DataFrame, level: str, query: str | None = None,
     so many; all of them by default."""
     if level not in BRIDGE_LEVELS or BRIDGE_LEVELS[level] is None:
         return pd.DataFrame()
-    ga, gb = _attr(rows, level, "a"), _attr(rows, level, "b")
-    a = pd.DataFrame({"value": ga, "ecl": rows["ecl_a"]})[rows["status"] != "new"]
-    b = pd.DataFrame({"value": gb, "ecl": rows["ecl_b"]})[rows["status"] != "derecognised"]
+    g = _group(rows, level)
+    a = pd.DataFrame({"value": g, "ecl": rows["ecl_a"]})[rows["status"] != "new"]
+    b = pd.DataFrame({"value": g, "ecl": rows["ecl_b"]})[rows["status"] != "derecognised"]
     sa = a.groupby("value")["ecl"].sum()
     sb = b.groupby("value")["ecl"].sum()
     idx = sa.index.union(sb.index)

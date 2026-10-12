@@ -62,8 +62,7 @@ class TestTwoQuarters:
         assert v["closing"] == pytest.approx(
             rows.loc[rows["status"] != "derecognised", "ecl_b"].sum())
         assert abs(v["residual"]) < 1e-4
-        steps = v["steps"].set_index("key")["amount"]
-        assert steps["moved_in"] == 0 and steps["moved_out"] == 0
+        assert not {"moved_in", "moved_out"} & set(v["steps"]["key"])
 
     @pytest.mark.parametrize("level", LEVELS)
     def test_every_group_closes_on_its_own_figures(self, quarters, level):
@@ -77,8 +76,11 @@ class TestTwoQuarters:
             rows.loc[rows["status"] != "new", "ecl_a"].sum())
         assert by["closing"].sum() == pytest.approx(
             rows.loc[rows["status"] != "derecognised", "ecl_b"].sum())
-        # what moves out of one group moves into another
-        assert by["moved_out"].sum() == pytest.approx(-by["moved_in"].sum())
+        # every contract is in one group: the groups' causes add up to the book's
+        book = bridge_view(rows, "book")["steps"].set_index("key")["amount"]
+        for k in book.index:
+            if k in by.columns:
+                assert by[k].sum() == pytest.approx(book[k], abs=1e-3), k
 
     @pytest.mark.parametrize("level", LEVELS)
     def test_every_group_is_its_own_view(self, quarters, level):
@@ -96,8 +98,8 @@ class TestTwoQuarters:
 
     def test_every_customer_and_facility_can_be_chosen(self, quarters):
         rows = quarters["rows"]
-        customers = set(rows["customer_a"].dropna()) | set(rows["customer_b"].dropna())
-        assert len(bridge_members(rows, "customer")) == len(customers)
+        cur = rows["customer_b"].where(rows["status"] != "derecognised", rows["customer_a"])
+        assert len(bridge_members(rows, "customer")) == cur.dropna().nunique()
         assert len(bridge_members(rows, "facility")) == rows["contract"].nunique()
         assert len(bridge_members(rows, "facility", limit=10)) == 10
 
@@ -105,22 +107,32 @@ class TestTwoQuarters:
         rows = quarters["rows"]
         cust = str(bridge_members(rows, "customer")["value"].iloc[0])
         v = bridge_view(rows, "customer", [cust])
-        mine_a = (rows["customer_a"] == cust) & (rows["status"] != "new")
-        mine_b = (rows["customer_b"] == cust) & (rows["status"] != "derecognised")
+        cur = rows["customer_b"].where(rows["status"] != "derecognised", rows["customer_a"])
+        mine_a = (cur == cust) & (rows["status"] != "new")
+        mine_b = (cur == cust) & (rows["status"] != "derecognised")
         assert v["before"]["ecl"] == pytest.approx(rows.loc[mine_a, "ecl_a"].sum())
         assert v["after"]["ecl"] == pytest.approx(rows.loc[mine_b, "ecl_b"].sum())
         assert v["before"]["exposure"] == pytest.approx(rows.loc[mine_a, "exposure_a"].sum())
         assert set(v["contracts"]["contract"]) == set(rows.loc[mine_a | mine_b, "contract"])
         assert abs(v["residual"]) < 1e-4
 
-    def test_a_stage_group_counts_who_moved_in_and_out(self, quarters):
+    def test_a_contract_is_counted_in_its_current_stage(self, quarters):
+        """No transfers between groups: a loan now in Stage 2 is in the Stage 2
+        view whatever its stage was, opening at its previous ECL, with its
+        whole move under its own causes; a loan that left is in the stage it
+        left from."""
         rows = quarters["rows"]
         v = bridge_view(rows, "stage", ["2"])
-        cont = rows["status"] == "continuing"
-        into = cont & (rows["stage_b"] == 2) & (rows["stage_a"] != 2)
-        assert v["counts"]["moved_in"] == int(into.sum())
-        assert v["steps"].set_index("key").loc["moved_in", "amount"] == \
-            pytest.approx(rows.loc[into, "ecl_a"].sum())
+        cur = rows["stage_b"].where(rows["status"] != "derecognised", rows["stage_a"])
+        mine = cur == 2
+        assert v["opening"] == pytest.approx(
+            rows.loc[mine & (rows["status"] != "new"), "ecl_a"].sum())
+        assert v["closing"] == pytest.approx(
+            rows.loc[mine & (rows["status"] != "derecognised"), "ecl_b"].sum())
+        stay = mine & (rows["status"] == "continuing")
+        assert v["steps"].set_index("key").loc["stage", "amount"] == \
+            pytest.approx(rows.loc[stay, "stage"].sum())
+        assert abs(v["residual"]) < 1e-4
 
 
 # -------------------------------------------------- macro and model ------

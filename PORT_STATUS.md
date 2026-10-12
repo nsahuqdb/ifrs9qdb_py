@@ -718,13 +718,16 @@ the report's own pricing path:
 | Stage migration | the stage: 12-month or lifetime, or Stage 3 at the balance |
 | Rating migration | the rating, on the previous run's PD curves |
 | Macro variables | PD curves from the current macro inputs on the previous model |
-| Model | the model's own change: model.yml, the model chosen, the TTC table, how the MEV models combine, and the ECL settings (EAD fallback rules, Stage 3 method, exposure cap) |
+| Model | the PD model's own change: model.yml (outside its `ecl` block), the model chosen, the TTC table, how the MEV models combine |
+| ECL settings | the `ecl` block of model.yml: EAD fallback rules, Stage 3 method, exposure cap |
 | LGD & collateral | collateral, so LGD, and the EIR |
 | Overlay | the post-model overlay |
 
-plus Derecognised and New business, and Moved out / Moved in when a level is
-chosen and a contract changed group. Every contract's steps sum exactly to its
-change, so any customer, facility, account type, segment, stage or rating is a
+plus Derecognised, New business and Method (a previous run priced by an earlier
+engine version). At a level, a contract counts in one group: the one it is in
+now, or, if derecognised, the one it left -- no transfers between groups, so
+the groups' steps add up to the book's. Every contract's steps sum exactly to
+its change, so any customer, facility, account type, segment, stage or rating is a
 sum of contracts and closes on its own figures (`bridge_view`, `bridge_by`,
 `bridge_members`).
 
