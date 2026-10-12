@@ -266,12 +266,23 @@ def _pv_restructured(cm_view=None):
 
 
 def _pv_customer_count(trans_l=None, cm_view=None):
+    """Every contract's customer is in the customer view. A customer in
+    CustomerMaster with no lending contract (closed, or limits only) is not a
+    problem: it carries no exposure, and the exposure check still reconciles."""
     if trans_l is None or cm_view is None:
         return _ok()
-    n_cm = len(cm_view)
-    n_trans = int(pd.Series(trans_l["customer_id"]).nunique(dropna=False))
-    return _ok() if n_cm == n_trans else _bad(
-        f"cm_view={n_cm}, distinct trans customers={n_trans}")
+    have = _c(cm_view, "customer_id")
+    if have is None:
+        return _ok()
+    have = set(pd.Series(have).dropna().astype(str))
+    ids = pd.Series(trans_l["customer_id"])
+    miss = ids[~ids.astype(str).isin(have) | ids.isna()]
+    if len(miss) == 0:
+        return _ok()
+    eg = ", ".join(sorted(set(miss.dropna().astype(str)))[:5])
+    return _bad(f"{len(miss)} contract(s) of {miss.nunique(dropna=False)} "
+                f"customer(s) not in the customer view"
+                + (f" (e.g. {eg})" if eg else ""), len(miss))
 
 
 def _pv_exposure_reconciles(trans_l=None, cm_view=None):
@@ -434,7 +445,7 @@ TRANSFORM_STAGE_VALIDATORS: list[Validator] = [
        "restructuring_final='Restructured' implies stage in {Stage 2, Stage 3}",
        _pv_restructured, "lending_portfolio_view"),
     _v("TRANS_LENDPV_customer_count_matches_trans", Severity.ERROR,
-       "cm_view row count == distinct customer_id in trans_lending",
+       "Every trans_lending customer_id is in cm_view",
        _pv_customer_count, "lending_portfolio_view",
        "The customer view is keyed on CustomerMaster; a contract whose customer "
        "is not there is missing from it, and so from staging."),

@@ -12,10 +12,11 @@ extract clean on two coverage checks R failed (three unmapped collateral types,
 35 unmapped industry codes) and failed three others R passed. Canonicalising
 first gives every check the columns R's checks see.
 
-Repeated SQL*Plus header rows, the "N rows selected." trailer and blank rows are
-stripped at the same point, and counted per file, as ``.strip_duplicate_header_row``
-does -- left in, a header row reaches the cross-file checks as an allocation of
-collateral "COLLATERALID".
+Repeated SQL*Plus header rows, the "N rows selected." trailer, blank rows, total
+lines at the end of a file and exact duplicate rows are removed when the file is
+read (``read_all_inputs`` -> ``clean_rows``), and counted per file, as R's
+``.strip_duplicate_header_row`` does -- left in, a header row reaches the
+cross-file checks as an allocation of collateral "COLLATERALID".
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ import pandas as pd
 from ..ids import as_id
 
 __all__ = ["INPUT_SCHEMAS", "canonicalise", "CanonicalInputs", "strip_junk_rows",
+           "clean_rows", "describe_clean_log", "CLEAN_KINDS", "NO_DEDUPE",
            "schema_unread_values"]
 
 
@@ -167,34 +169,102 @@ def _original_header(name) -> str:
     return re.sub(r"\.\d+$", "", str(name)).strip().lower()
 
 
-def strip_junk_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    """Remove repeated headers, the row-count trailer and blank rows.
+# What the reader removes from an extract before anything reads it, by kind.
+CLEAN_KINDS = ("header", "trailer", "blank", "total", "duplicate")
+CLEAN_LABELS = {"header": "repeated header", "trailer": "row-count trailer",
+                "blank": "blank", "total": "total line",
+                "duplicate": "exact duplicate"}
+# Files whose identical rows can be real: a repayment schedule may carry two
+# equal instalments on one date, so its rows are never de-duplicated.
+NO_DEDUPE = frozenset({"RepaymentSchedule"})
+# The label of a total line: "Total", "Totals", "Grand total", "Sub-total",
+# "Sum", with or without a colon -- the whole cell, nothing else in it.
+_TOTAL_LABEL = re.compile(r"^(?:(?:grand|sub)[\s-]*)?totals?\s*:?$|^sum\s*:?$",
+                          re.IGNORECASE)
 
-    Mirrors ``.strip_duplicate_header_row``: a header repeat is a row whose
-    every non-blank cell equals its column's ORIGINAL heading, with at least two
-    non-blank cells.
+
+def clean_rows(df: pd.DataFrame, dedupe: bool = False
+               ) -> tuple[pd.DataFrame, dict]:
+    """Remove the rows an export adds that are not data, and count them.
+
+    header     every non-blank cell equals its column's ORIGINAL heading, with
+               at least two non-blank cells (SQL*Plus repeats its headings each
+               page).
+    trailer    one non-blank cell, in the first column, reading "7250 rows
+               selected."
+    blank      no non-blank cell.
+    total      at the END of the file only: a row whose first non-blank cell is
+               a total label ("Total", "Grand total", "Sum" ...). A row like
+               that above the last data row is left alone.
+    duplicate  (``dedupe``) a row identical, cell for cell, to an earlier one.
+               The first is kept. Two rows with the same id that differ are
+               NOT touched -- which of them is right is a question for the
+               source, and the uniqueness checks report it.
+
+    Mirrors R's ``.strip_duplicate_header_row`` and ``.drop_exact_duplicates``.
     """
+    counts = dict.fromkeys(CLEAN_KINDS, 0)
     if df is None or len(df) == 0 or df.shape[1] == 0:
-        return df, 0
+        return df, counts
     heads = [_original_header(c) for c in df.columns]
-    n = len(df)
-    nonblank = np.zeros((n, df.shape[1]), dtype=bool)
-    match = np.zeros((n, df.shape[1]), dtype=bool)
+    n, m = len(df), df.shape[1]
+    nonblank = np.zeros((n, m), dtype=bool)
+    match = np.zeros((n, m), dtype=bool)
+    cells = []
     for j, c in enumerate(df.columns):
-        cell = df[c].astype(str).str.strip().str.lower()
-        nb = (df[c].notna() & (cell != "") & (cell != "nan")).to_numpy()
+        txt = df[c].astype(str).str.strip()
+        nb = (df[c].notna() & (txt != "") & (txt.str.lower() != "nan")).to_numpy()
         nonblank[:, j] = nb
-        match[:, j] = nb & (cell.to_numpy() == heads[j])
+        low = txt.str.lower().to_numpy()
+        match[:, j] = nb & (low == heads[j])
+        cells.append(np.where(nb, txt.to_numpy(), ""))
     n_nb = nonblank.sum(axis=1)
     n_match = match.sum(axis=1)
     is_header = (n_nb >= 2) & (n_match == n_nb)
-    first = df.iloc[:, 0].astype(str).str.strip().str.lower()
-    is_footer = ((n_nb == 1) & nonblank[:, 0]
-                 & first.str.match(r"^[0-9][0-9,]*\s+rows?\s+selected\.?$",
-                                   na=False).to_numpy())
+    first_col = pd.Series(cells[0]).str.lower()
+    is_trailer = ((n_nb == 1) & nonblank[:, 0]
+                  & first_col.str.match(r"^[0-9][0-9,]*\s+rows?\s+selected\.?$",
+                                        na=False).to_numpy())
     is_blank = n_nb == 0
-    drop = is_header | is_footer | is_blank
-    return df.loc[~drop].reset_index(drop=True), int(drop.sum())
+    first_nb = np.full(n, "", dtype=object)
+    for j in range(m - 1, -1, -1):
+        first_nb = np.where(nonblank[:, j], cells[j], first_nb)
+    looks_total = (n_nb >= 1) & ~is_header & np.array(
+        [bool(_TOTAL_LABEL.match(str(v))) for v in first_nb])
+    data_row = ~(is_header | is_trailer | is_blank | looks_total)
+    last_data = int(np.flatnonzero(data_row).max()) if data_row.any() else -1
+    is_total = looks_total & (np.arange(n) > last_data)
+    drop = is_header | is_trailer | is_blank | is_total
+    is_dup = np.zeros(n, dtype=bool)
+    if dedupe and (~drop).any():
+        keep = np.flatnonzero(~drop)
+        frame = pd.DataFrame({j: col[keep] for j, col in enumerate(cells)})
+        is_dup[keep] = frame.duplicated(keep="first").to_numpy()
+    counts.update(header=int(is_header.sum()), trailer=int(is_trailer.sum()),
+                  blank=int(is_blank.sum()), total=int(is_total.sum()),
+                  duplicate=int(is_dup.sum()))
+    gone = drop | is_dup
+    if not gone.any():
+        return df, counts
+    return df.loc[~gone].reset_index(drop=True), counts
+
+
+def strip_junk_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Remove repeated headers, the row-count trailer, blank rows and trailing
+    total lines (``clean_rows`` without de-duplication); the count removed."""
+    out, counts = clean_rows(df)
+    return out, int(sum(counts.values()))
+
+
+def describe_clean_log(detail: dict) -> str:
+    """'OriginationInvestments.xls: 1 exact duplicate row; ...' for a report."""
+    parts = []
+    for f, kinds in (detail or {}).items():
+        bits = [f"{int(v)} {CLEAN_LABELS.get(k, k)} row{'s' if int(v) != 1 else ''}"
+                for k, v in kinds.items() if int(v) > 0]
+        if bits:
+            parts.append(f"{f}: " + ", ".join(bits))
+    return "; ".join(parts)
 
 
 def _coerce(values: pd.Series, type_: str, canonical: str) -> pd.Series:
@@ -305,6 +375,7 @@ class CanonicalInputs:
     paths: dict = field(default_factory=dict)
     missing: list = field(default_factory=list)
     strip_log: dict = field(default_factory=dict)
+    clean_log: dict = field(default_factory=dict)   # file -> {kind: rows}
 
     @property
     def ok(self) -> bool:
@@ -325,16 +396,25 @@ def canonicalise(inputs) -> CanonicalInputs:
     if tables is None:
         tables = dict(inputs) if isinstance(inputs, dict) else {}
     paths = dict(getattr(inputs, "paths", {}) or {})
-    out, log = {}, {}
+    # what the reader already removed, then anything left (tables built
+    # without read_all_inputs)
+    detail = {f: dict(k) for f, k in
+              (getattr(inputs, "clean_log", None) or {}).items()}
+    out = {}
     for name, raw in tables.items():
         if raw is None:
             continue
-        clean, n = strip_junk_rows(raw)
-        if n:
+        clean, counts = clean_rows(raw)
+        if sum(counts.values()):
             p = paths.get(name)
-            log[p.name if p is not None else name] = n
+            d = detail.setdefault(p.name if p is not None else name, {})
+            for k, v in counts.items():
+                if v:
+                    d[k] = d.get(k, 0) + int(v)
         schema = INPUT_SCHEMAS.get(name)
         out[name] = _canonical_frame(clean, schema) if schema else clean
+    detail = {f: k for f, k in detail.items() if sum(k.values())}
+    log = {f: int(sum(k.values())) for f, k in detail.items()}
     return CanonicalInputs(tables=out, paths=paths,
                            missing=list(getattr(inputs, "missing", []) or []),
-                           strip_log=log)
+                           strip_log=log, clean_log=detail)

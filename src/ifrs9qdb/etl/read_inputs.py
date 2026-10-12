@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import io
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
@@ -120,12 +120,16 @@ def _read_html_table(path: Path) -> pd.DataFrame:
     df = max(tables, key=len)          # the data table, not a heading table
 
     df.columns = [str(c).strip() for c in df.columns]
-    # drop the repeated header rows SQL*Plus emits per page
+    # drop the repeated header rows SQL*Plus emits per page, counted so the
+    # report says what was removed (read_all_inputs adds them to its log)
+    n0 = len(df)
     if len(df.columns):
         first = df.columns[0]
         df = df[df[first].astype(str).str.strip() != first]
-    df = df.dropna(how="all")
-    return df.reset_index(drop=True)
+    n1 = len(df)
+    df = df.dropna(how="all").reset_index(drop=True)
+    df.attrs["cleaned"] = {"header": n0 - n1, "blank": n1 - len(df)}
+    return df
 
 
 def read_input(path: Path) -> pd.DataFrame:
@@ -161,6 +165,8 @@ class InputSet:
     tables: dict[str, pd.DataFrame]
     paths: dict[str, Path]
     missing: list[str]
+    # rows removed on reading, by file and kind (schema.clean_rows)
+    clean_log: dict = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -191,7 +197,7 @@ def read_all_inputs(input_dir, verbose: bool = False) -> InputSet:
     picture at once, which is more useful than stopping at the first gap.
     """
     input_dir = Path(input_dir)
-    tables, paths, missing = {}, {}, []
+    tables, paths, missing, clean_log = {}, {}, [], {}
     for spec in INPUT_SPECS:
         p = resolve_input_path(input_dir, spec)
         if p is None:
@@ -202,8 +208,19 @@ def read_all_inputs(input_dir, verbose: bool = False) -> InputSet:
         except Exception as exc:  # a corrupt file is a missing file, with a reason
             missing.append(f"{spec.file} ({type(exc).__name__}: {exc})")
             continue
+        # Rows that are not data -- repeated headers, the row-count trailer,
+        # blank rows, total lines at the end, exact duplicate rows -- are
+        # removed here, once, so the validation and the ETL see the same rows.
+        from ..validation.schema import NO_DEDUPE, clean_rows
+        pre = dict(df.attrs.get("cleaned") or {})
+        df, counts = clean_rows(df, dedupe=spec.name not in NO_DEDUPE)
+        for k, v in pre.items():
+            counts[k] = counts.get(k, 0) + int(v)
+        if sum(counts.values()):
+            clean_log[p.name] = {k: int(v) for k, v in counts.items() if v}
         tables[spec.name] = df
         paths[spec.name] = p
         if verbose:
             print(f"  {spec.name:<32}{len(df):>8,} rows  ({detect_format(p)})")
-    return InputSet(tables=tables, paths=paths, missing=missing)
+    return InputSet(tables=tables, paths=paths, missing=missing,
+                    clean_log=clean_log)

@@ -146,6 +146,7 @@ def pre_run_check(input_dir, static_dir=None, config_dir=None,
                      "n_fail": summary["checks"] - summary["passed"]})
     return {"results": frame, "summary": summary, "extract_date": ext,
             "strip_log": dict(canonicalise(src).strip_log),
+            "clean_log": dict(canonicalise(src).clean_log),
             "missing": list(src.missing)}
 
 

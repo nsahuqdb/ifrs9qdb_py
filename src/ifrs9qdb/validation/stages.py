@@ -79,7 +79,7 @@ def validate_stages(*, inputs=None, static=None, trans_lending=None,
         from .schema import canonicalise
         inputs = canonicalise(inputs)
         if header_strip_log is None:
-            header_strip_log = inputs.strip_log
+            header_strip_log = inputs.clean_log or inputs.strip_log
     # The TRANSFORM checks read R's intermediates -- trans_l, cm_view,
     # trans_i, inv_view -- so those are built in R's shape from the frames
     # the ETL produced (r_frames.py).

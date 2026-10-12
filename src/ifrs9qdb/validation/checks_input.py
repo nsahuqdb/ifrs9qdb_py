@@ -679,14 +679,20 @@ def _v_extract_date_plausible(inputs):
 
 
 def _v_duplicate_headers_stripped(inputs, header_strip_log=None):
-    log = {k: int(v) for k, v in dict(header_strip_log or {}).items() if int(v) > 0}
-    if not log:
+    """What the reader removed: file -> {kind: rows} (or file -> rows)."""
+    from .schema import describe_clean_log
+    detail = {}
+    for f, v in dict(header_strip_log or {}).items():
+        kinds = dict(v) if isinstance(v, dict) else {"header": int(v)}
+        kinds = {k: int(n) for k, n in kinds.items() if int(n) > 0}
+        if kinds:
+            detail[f] = kinds
+    if not detail:
         return ok()
-    parts = [f"{k} ({v})" for k, v in log.items()]
-    return fail(sum(log.values()),
-                f"Auto-removed repeated header row(s) from {len(log)} file(s): "
-                + ", ".join(parts),
-                examples=list(log)[:10])
+    return fail(sum(sum(k.values()) for k in detail.values()),
+                "Removed on reading, before any check: "
+                + describe_clean_log(detail),
+                examples=list(detail)[:10])
 
 
 def _v_values_typed(inputs):
@@ -1005,11 +1011,18 @@ INPUT_STAGE_VALIDATORS: list[Validator] = _presence_validators() + [
        "names the values that were lost, so the extract can be fixed.",
        "Re-export the file with the column in its usual format: dates as "
        "M/D/YYYY, YYYY-MM-DD or DD-MON-YY, numbers without separators or text."),
-    _v("INPUT_duplicate_headers_stripped", Severity.WARN,
-       "No repeated header rows were found in the input files",
+    _v("INPUT_duplicate_headers_stripped", Severity.INFO,
+       "Rows that are not data were removed on reading",
        _v_duplicate_headers_stripped, "",
-       "SQL*Plus repeats its headings every thousand rows. Left in, they "
-       "become contracts with a customer id of \"CUSTOMERID\".",
-       "Informational: the reader strips them. A large count means the export "
-       "settings changed."),
+       "Exports carry rows that are not data: SQL*Plus repeats its headings "
+       "every page and ends with \"N rows selected.\", Excel copies can "
+       "carry blank rows, a total line at the end, or the same row twice. "
+       "Left in, a heading becomes a contract with a customer id of "
+       "\"CUSTOMERID\" and a repeated row a duplicate id. They are removed "
+       "when the file is read, before every check and the ETL. Two rows with "
+       "the same id that differ are not removed: the uniqueness checks "
+       "report them. Repayment schedules are never de-duplicated (two equal "
+       "instalments on one date can be real).",
+       "None: listed so the clean-up is on record. A large count means the "
+       "export settings changed."),
 ]

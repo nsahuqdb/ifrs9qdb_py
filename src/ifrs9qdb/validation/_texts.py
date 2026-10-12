@@ -193,7 +193,8 @@ STAGE_TEXTS: dict[str, tuple[str, str]] = {
     'TRANS_LENDPV_customer_count_matches_trans': (
         'The customer view is keyed on CustomerMaster. A contract whose '
         'customer is not there is missing from the view, so it gets no '
-        'customer-level stage.',
+        'customer-level stage. A customer in CustomerMaster with no lending '
+        'contract is not a problem: it carries no exposure.',
         "Add the missing customers to CustomerMaster, or correct the contracts'"
         ' customer ids at source.',
     ),
