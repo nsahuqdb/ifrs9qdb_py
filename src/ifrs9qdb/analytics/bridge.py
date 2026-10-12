@@ -10,7 +10,8 @@ engine frame, the same pricing context) and changing one ingredient at a time:
     f2  + the current stage                                    -> Stage migration
     f3  + the current rating, on the previous run's PD curves  -> Rating migration
     f4  + the current macro inputs, on the previous model      -> Macro variables
-    f5  + the current model and ECL settings                   -> Model
+    f5' + the current ECL settings                             -> ECL settings
+    f5  + the current PD model                                 -> Model
     f6  + the current collateral, LGD and EIR                  -> LGD & collateral
 
 Method change is the previous run's model ECL against f0: the previous run on
@@ -27,18 +28,22 @@ Derecognised, one that arrived New business. Every contract's components
 therefore sum EXACTLY to its change in the reports, and a customer, a facility,
 an account type, a segment or a stage is a sum of contracts.
 
-The ECL settings in model.yml (the EAD fallback rules for a contract with no
-repayment schedule, the Stage 3 method, the exposure cap) are part of the model:
-the steps before Model are priced on the previous run's, and Model switches to
-the current run's.
+The ECL settings in model.yml (its ``ecl`` block: the EAD fallback rules for a
+contract with no repayment schedule, the Stage 3 method, the exposure cap) are
+not the PD model and are their own step, ECL settings: the steps before it are
+priced on the previous run's settings, and it switches to the current run's.
+Model is then the PD model alone, so a quarter in which only the settings
+changed shows no Model step.
 
 Macro and model are told apart by pricing once more on PD curves built from the
 current run's macro inputs and the previous run's model, both read from the
 runs' frozen ``config_used``. What counts as which:
 
-    model  model.yml (the MEV models, the TTC anchor, the horizons), the model
-           chosen (config.yml run.internal_model), the TTC PD table, and how
-           the MEV models combine (model_inputs.yml mev_model_weights)
+    model  model.yml except its ``ecl`` block (the MEV models, the TTC anchor,
+           the horizons), the model chosen (config.yml run.internal_model),
+           the TTC PD table, and how the MEV models combine
+           (model_inputs.yml mev_model_weights)
+    settings  model.yml's ``ecl`` block
     macro  the rest of model_inputs.yml (MEV forecasts, scenario weights, the
            GCC paths), the scenario severities and the GDP histories
 
@@ -74,6 +79,7 @@ BRIDGE_COMPONENTS = {
     "rating": "Rating migration",
     "macro": "Macro variables",
     "model": "Model",
+    "settings": "ECL settings",
     "pd_curves": "PD curves (macro and model)",
     "lgd": "LGD & collateral",
     "overlay": "Overlay",
@@ -81,8 +87,8 @@ BRIDGE_COMPONENTS = {
 }
 # what a contract carries (moving between groups is a group's, not a contract's)
 CONTRACT_COMPONENTS = ("method", "derecognised", "new_business", "exposure",
-                       "stage", "rating", "macro", "model", "pd_curves", "lgd",
-                       "overlay", "other")
+                       "stage", "rating", "macro", "settings", "model",
+                       "pd_curves", "lgd", "overlay", "other")
 
 # level -> the contract attribute that places a contract in a group
 BRIDGE_LEVELS = {"book": None, "customer": "customer", "facility": "contract",
@@ -245,8 +251,15 @@ def config_changes(a: BridgeRun, b: BridgeRun) -> dict:
     none, and then neither can be said to have changed or not."""
     if not (a.has_config and b.has_config):
         return {"known": False, "model_changed": None, "macro_changed": None,
-                "model": [], "macro": []}
-    model = _dict_diff(a.model_cfg, b.model_cfg, "model.yml")
+                "settings_changed": None, "model": [], "macro": [],
+                "settings": []}
+    # model.yml's ecl block is the ECL settings, not the PD model
+    ecl_a = (a.model_cfg or {}).get("ecl") if isinstance(a.model_cfg, dict) else None
+    ecl_b = (b.model_cfg or {}).get("ecl") if isinstance(b.model_cfg, dict) else None
+    settings = _dict_diff(ecl_a, ecl_b, "model.yml: ecl")
+    strip = lambda m: {k: v for k, v in (m or {}).items() if k != "ecl"} \
+        if isinstance(m, dict) else m
+    model = _dict_diff(strip(a.model_cfg), strip(b.model_cfg), "model.yml")
     if (a.model_id or "") != (b.model_id or ""):
         model.append({"item": "config.yml: run.internal_model",
                       "before": a.model_id or "(default)",
@@ -262,7 +275,8 @@ def config_changes(a: BridgeRun, b: BridgeRun) -> dict:
     for k in _MACRO_STATIC:
         macro += _table_diff(a.static.get(k), b.static.get(k), f"{k}.csv")
     return {"known": True, "model_changed": bool(model),
-            "macro_changed": bool(macro), "model": model, "macro": macro}
+            "macro_changed": bool(macro), "settings_changed": bool(settings),
+            "model": model, "macro": macro, "settings": settings}
 
 
 def _hybrid_ctx(a: BridgeRun, b: BridgeRun):
@@ -438,8 +452,9 @@ def ecl_bridge(a: BridgeRun, b: BridgeRun) -> dict:
     same_settings = (ca.rules == cb.rules and ca.stage3 == cb.stage3
                      and ca.cap == cb.cap)
     eff = {k: np.zeros(len(both)) for k in ("method", "exposure", "stage",
-                                           "rating", "macro", "model",
-                                           "pd_curves", "lgd", "other")}
+                                           "rating", "macro", "settings",
+                                           "model", "pd_curves", "lgd",
+                                           "other")}
     ok = np.zeros(len(both), dtype=bool)
     not_split_rating = 0
     for i, key in enumerate(both):
@@ -487,26 +502,29 @@ def ecl_bridge(a: BridgeRun, b: BridgeRun) -> dict:
         f5 = _price(cb, sb, h_bc, bb, la, cum_b, eir_a)
         if ctx_h is not None:
             f4 = _price(cb_a, sb, h_bb, bb, la, cum_h, eir_a)
+            # the current ECL settings, still on the previous PD model
+            f4s = f4 if same_settings else _price(cb, sb, h_bc, bb, la, cum_h, eir_a)
         else:
-            # no macro step: the settings still switch at Model, not here
+            # no macro step: the curves are the current run's from here, and
+            # the settings switch on their own
             f4 = f5 if same_settings else _price(cb_a, sb, h_bb, bb, la, cum_b, eir_a)
+            f4s = f5
         f6 = _price(cb, sb, h_bc, bb, lb, cum_b, eir_b)
-        f = [f0, f1, f2, f3, f4, f5, f6]
+        f = [f0, f1, f2, f3, f4, f4s, f5, f6]
         if not all(np.isfinite(x) for x in f):
             continue
         ok[i] = True
         eff["exposure"][i] = f1 - f0
         eff["stage"][i] = f2 - f1
         eff["rating"][i] = f3 - f2
+        eff["settings"][i] = f4s - f4
         if split and ctx_h is not None:
             eff["macro"][i] = f4 - f3
-            eff["model"][i] = f5 - f4
+            eff["model"][i] = f5 - f4s
         elif split:
             eff["other"][i] += f4 - f3           # neither changed
-            eff["model"][i] = f5 - f4            # the ECL settings, if any
         else:
             eff["pd_curves"][i] = f4 - f3
-            eff["model"][i] = f5 - f4            # the ECL settings, if any
         eff["lgd"][i] = f6 - f5
         model_a = rows.at[key, "ecl_a"] - rows.at[key, "overlay_a"]
         model_b = rows.at[key, "ecl_b"] - rows.at[key, "overlay_b"]
@@ -531,7 +549,7 @@ def ecl_bridge(a: BridgeRun, b: BridgeRun) -> dict:
         notes.append(f"Repricing the previous run on this engine, with its own "
                      f"data and config, moves it by {meth:,.0f}: it was priced "
                      "by another version of the calculation. That is shown as "
-                     "Method change.")
+                     "Method change, not as a change of model.")
     if not_split_rating:
         notes.append(f"{not_split_rating:,} contract(s) moved to a rating the "
                      "previous run had no PD curve for; their rating move is "
@@ -634,8 +652,8 @@ def bridge_view(rows: pd.DataFrame, level: str = "book", members=None,
     steps["moved_out"] = -float(rows.loc[in_a & cont & ~in_b, "ecl_a"].sum())
     steps["moved_in"] = float(rows.loc[~in_a & cont & in_b, "ecl_a"].sum())
     stay = in_b & cont
-    for k in ("method", "exposure", "stage", "rating", "macro", "model",
-              "pd_curves", "lgd", "overlay", "other"):
+    for k in ("method", "exposure", "stage", "rating", "macro", "settings",
+              "model", "pd_curves", "lgd", "overlay", "other"):
         steps[k] = float(rows.loc[stay, k].sum())
     opening = float(rows.loc[in_a, "ecl_a"].sum())
     closing = float(rows.loc[in_b, "ecl_b"].sum())
@@ -713,8 +731,8 @@ def bridge_by(rows: pd.DataFrame, level: str) -> pd.DataFrame:
     out["moved_out"] = 0.0 - total(rows["ecl_a"], ga, moved)
     out["moved_in"] = total(rows["ecl_a"], gb, moved)
     out["new_business"] = total(rows["new_business"], gb, status == "new")
-    for k in ("method", "exposure", "stage", "rating", "macro", "model",
-              "pd_curves", "lgd", "overlay", "other"):
+    for k in ("method", "exposure", "stage", "rating", "macro", "settings",
+              "model", "pd_curves", "lgd", "overlay", "other"):
         out[k] = total(rows[k], gb, cont)
     out["closing"] = total(rows["ecl_b"], gb)
     out["change"] = out["closing"] - out["opening"]

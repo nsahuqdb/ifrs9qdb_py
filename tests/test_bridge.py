@@ -52,7 +52,8 @@ class TestTwoQuarters:
     def test_an_unchanged_config_moves_neither_macro_nor_model(self, quarters):
         ch = quarters["changes"]
         assert ch["known"] and not ch["model_changed"] and not ch["macro_changed"]
-        assert quarters["rows"][["macro", "model", "pd_curves"]].abs().sum().sum() == 0
+        assert quarters["rows"][["macro", "settings", "model",
+                                 "pd_curves"]].abs().sum().sum() == 0
 
     def test_the_book_view_is_the_whole_move(self, quarters):
         rows = quarters["rows"]
@@ -201,7 +202,8 @@ class TestMacroAndModel:
         assert any("mev_forecasts" in c["item"] for c in br["changes"]["macro"])
         assert abs(move) > 1_000
         assert t["macro"] == pytest.approx(move, abs=1e-3)
-        for k in ("method", "exposure", "stage", "rating", "model", "lgd", "other"):
+        for k in ("method", "exposure", "stage", "rating", "settings", "model",
+                  "lgd", "other"):
             assert abs(t[k]) < 1e-3, k
 
     def test_a_model_change_is_all_model(self, variants):
@@ -210,7 +212,8 @@ class TestMacroAndModel:
         assert br["changes"]["model"][0]["after"] == -0.06
         assert abs(move) > 1_000
         assert t["model"] == pytest.approx(move, abs=1e-3)
-        for k in ("method", "exposure", "stage", "rating", "macro", "lgd", "other"):
+        for k in ("method", "exposure", "stage", "rating", "macro", "settings",
+                  "lgd", "other"):
             assert abs(t[k]) < 1e-3, k
 
     def test_both_split_with_the_macro_measured_on_the_old_model(self, variants):
@@ -222,6 +225,35 @@ class TestMacroAndModel:
         assert both["macro"] == pytest.approx(macro_only["macro"], abs=1e-3)
         assert both["macro"] + both["model"] == pytest.approx(move, abs=1e-3)
         assert abs(both["other"]) < 1e-3
+
+
+    def test_an_ead_rule_change_is_ecl_settings_not_model(self, variants):
+        """The EAD fallback rules are model.yml's ecl block, not the PD model:
+        the steps before ECL settings are priced on the previous run's rules,
+        and a change to them is ECL settings -- the Model step stays zero."""
+        br, t, move = _totals(variants["base"], variants["rule"])
+        ch = br["changes"]
+        assert ch["settings_changed"]
+        assert not ch["model_changed"] and not ch["macro_changed"]
+        assert any("ead_fallback" in c["item"] for c in ch["settings"])
+        assert abs(move) > 1_000
+        assert t["settings"] == pytest.approx(move, abs=1e-3)
+        for k in ("method", "exposure", "stage", "rating", "macro", "model",
+                  "lgd", "other"):
+            assert abs(t[k]) < 1e-3, k
+
+    def test_an_earlier_calculation_is_method_change(self, variants):
+        """A previous run whose PD curves are not what this engine builds from
+        its config -- priced by another version of the calculation -- is
+        restated before anything else moves: the whole move is Method change."""
+        br, t, move = _totals(variants["oldcalc"], variants["base"])
+        assert not br["changes"]["model_changed"] and not br["changes"]["macro_changed"]
+        assert abs(move) > 1_000
+        assert t["method"] == pytest.approx(move, abs=1e-3)
+        for k in ("exposure", "stage", "rating", "macro", "settings", "model",
+                  "lgd", "other"):
+            assert abs(t[k]) < 1e-3, k
+        assert any("Method change" in n for n in br["notes"])
 
 
 def test_a_customer_or_facility_is_labelled_with_its_name():
@@ -237,26 +269,3 @@ def test_a_customer_or_facility_is_labelled_with_its_name():
     assert m["C1"] == "C1 — Acme" and m["C2"] == "C2"
     f = bridge_members(rows, "facility").set_index("value")["label"]
     assert f["F1"] == "F1 — Acme" and f["F3"] == "F3"
-
-    def test_an_ead_rule_change_is_the_model_not_exposure(self, variants):
-        """The EAD fallback rules are model.yml's: the steps before Model are
-        priced on the previous run's, so a change to them is Model."""
-        br, t, move = _totals(variants["base"], variants["rule"])
-        assert br["changes"]["model_changed"] and not br["changes"]["macro_changed"]
-        assert any("ead_fallback" in c["item"] for c in br["changes"]["model"])
-        assert abs(move) > 1_000
-        assert t["model"] == pytest.approx(move, abs=1e-3)
-        for k in ("method", "exposure", "stage", "rating", "macro", "lgd", "other"):
-            assert abs(t[k]) < 1e-3, k
-
-    def test_an_earlier_calculation_is_method_change(self, variants):
-        """A previous run whose PD curves are not what this engine builds from
-        its config -- priced by another version of the calculation -- is
-        restated before anything else moves: the whole move is Method change."""
-        br, t, move = _totals(variants["oldcalc"], variants["base"])
-        assert not br["changes"]["model_changed"] and not br["changes"]["macro_changed"]
-        assert abs(move) > 1_000
-        assert t["method"] == pytest.approx(move, abs=1e-3)
-        for k in ("exposure", "stage", "rating", "macro", "model", "lgd", "other"):
-            assert abs(t[k]) < 1e-3, k
-        assert any("Method change" in n for n in br["notes"])
