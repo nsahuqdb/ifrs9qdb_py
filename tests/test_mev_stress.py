@@ -171,3 +171,59 @@ class TestStpdToCurves:
     def test_a_table_without_the_columns_is_empty(self):
         assert stpd_to_curves(pd.DataFrame({"a": [1]})) == {}
         assert stpd_to_curves(None) == {}
+
+
+class TestScenarioWeights:
+    """A different weighting is repriced, not interpolated: the PD chain is
+    rebuilt with the weights and the book priced with compute_ecl."""
+
+    @needs_frozen
+    def test_the_runs_weights_are_what_its_curves_were_built_with(self):
+        from ifrs9qdb.stress import run_scenario_weights
+        rw = run_scenario_weights(OUT)
+        assert rw["ok"], rw.get("reason")
+        assert len(rw["internal"]) == 5
+        assert sum(rw["internal"].values()) == pytest.approx(1.0)
+        assert sum(rw["external"].values()) == pytest.approx(1.0, abs=1e-6)
+
+    @needs_frozen
+    def test_at_the_runs_own_weights_nothing_moves(self, book):
+        """The control: the run's own weights reprice to its own provision.
+        A weighted sum of the five scenario provisions did not -- the external
+        scale is weighted year by year, and the exposure cap is not linear."""
+        from ifrs9qdb.stress import run_scenario_weights, scenario_weights_stress
+        r = scenario_weights_stress(*book, OUT, run_scenario_weights(OUT)["internal"])
+        assert r["ok"], r.get("reason")
+        assert r["delta"] == pytest.approx(0.0, abs=1e-6)
+        assert r["after"] == pytest.approx(r["provision"], abs=1e-3)
+
+    @needs_frozen
+    def test_more_weight_on_the_downturn_costs_more(self, book):
+        from ifrs9qdb.stress import run_scenario_weights, scenario_weights_stress
+        w = dict(run_scenario_weights(OUT)["internal"])
+        w["Significant Downturn"] += 0.2
+        r = scenario_weights_stress(*book, OUT, w)
+        assert r["ok"] and r["delta"] > 0
+        # weights are normalised: the rebuilt chain used them summing to one
+        assert sum(r["weights_used"].values()) == pytest.approx(1.0)
+        ext = r["by_portfolio"].set_index("portfolio")
+        for pf in ("Investments", "Banks and Fis"):
+            if pf in ext.index:   # the external scale keeps its own weights
+                assert ext.loc[pf, "change"] == pytest.approx(0.0, abs=1e-6)
+
+    @needs_frozen
+    def test_an_unknown_scenario_is_refused(self, book):
+        from ifrs9qdb.stress import run_scenario_weights, scenario_weights_stress
+        w = dict(run_scenario_weights(OUT)["internal"], **{"Mild Panic": 0.5})
+        r = scenario_weights_stress(*book, OUT, w)
+        assert not r["ok"] and "Mild Panic" in r["reason"]
+
+    @needs_frozen
+    def test_the_sensitivity_moves_ten_points_onto_each_scenario(self, book):
+        from ifrs9qdb.stress import scenario_weights_sensitivity
+        sv = scenario_weights_sensitivity(*book, OUT)
+        assert len(sv) == 5
+        assert (sv["weight_after"] - sv["weight_before"]).round(9).eq(0.10).all()
+        down = sv.set_index("scenario").loc["Significant Downturn", "change"]
+        up = sv.set_index("scenario").loc["Significant Uptrend", "change"]
+        assert down > 0 > up

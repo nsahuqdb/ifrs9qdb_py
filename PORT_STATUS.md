@@ -654,15 +654,13 @@ modules under `ifrs9qdb.analytics` plus the stress additions.
 | Module | What it answers |
 | --- | --- |
 | `profile` | where the provision sits: segments, concentration, staging, data quality |
-| `walk` | how it moved, reconciling exactly |
-| `bridge` | why it moved, contract by contract and cause by cause, at any level (below) |
-| `attribution` | *why* it moved — the indicative split, the coverage bridge, and an exact engine-level decomposition |
+| `bridge` | how much and why it moved, contract by contract and cause by cause, at any level (below) |
 | `staging` | why names sit where they sit, and who migrated |
 | `risk` | the parameters themselves: PD curves, LGD floor, collateral, EAD run-off |
 | `scenarios` | the five per-scenario runs, compared and reweighted |
 | `model_view` | what the run froze: its config, scenarios, MEV forecast |
 
-Four results are worth recording, because each is a statement about the port
+Three results are worth recording, because each is a statement about the port
 rather than about the book:
 
 * **`staging_consistency` finds 0 mismatches over 13,188 contracts.** It
@@ -670,10 +668,6 @@ rather than about the book:
   against the stage the R engine wrote. Every contract agrees. That is the
   strongest available evidence that the staging rule was ported rather than
   approximated.
-* **`factor_attribution_exact` reconciles to machine precision.** It reprices
-  each contract five times through the engine, substituting one ingredient at
-  a time, so the four effects sum to the move by construction. 4,797 of 4,797
-  matched contracts priced; nothing fell into `uncovered`.
 * **`mev_stress` rebuilds the whole PD chain from the run's frozen config and,
   with no edit, reproduces the run's own provision to 1e-6.** The rebuild is
   therefore measuring the macro path and not itself. A run priced by an
@@ -777,6 +771,72 @@ this repository can see:
   reports), once both read the same EAD fallback rules: R's model config did
   not carry model.yml's ecl section, so R priced on its built-in rules
   whatever a run's config said (fixed in R 1.0.3).
+
+## One set of ECL functions (0.30.0)
+
+Everything that prices a contract now prices it the way the run's own report
+does, with the same three functions in `etl/report.py`:
+
+| Function | What it is |
+| --- | --- |
+| `build_ecl_context(out_dir, model_cfg)` | the run's pricing context: PD curves, EAD schedules, netted collateral, EAD fallback rules, LGD parameters, Stage 3 method, cap |
+| `ecl_frame(out_dir)` | one row per position (both books, AccountMaster order) with every fact the report prices on |
+| `compute_ecl(ctx, frame, lgd=None, cum=None)` | the price: EAD curve, LGD, PD, discounting, Stage 3, cap |
+
+The report, the ECL bridge, every stress lever, what-if rules, the roll
+forward, the macro path, single-run scenario repricing and the one-contract
+calculator (`compute_ecl_one`) all call `compute_ecl`. A lever changes an
+input (a frame column, or the context through `ctx.copy()`), never the
+formula. Before this, `stress.reprice` had a loop of its own (`compute_lgd`
+and `sum_marginal_ecl` on curves it built itself) and the bridge priced
+through its own `_price`; both are gone.
+
+A different scenario weighting is repriced too (`stress.
+scenario_weights_stress`, `scenario_weights_sensitivity`): the PD chain is
+rebuilt from the run's frozen config with the weights given and the book
+priced with `compute_ecl` -- `mev_stress` with the macro path unedited. It
+was a weighted sum of the five scenario provisions
+(`analytics.scenario_reweight`, `scenario_sensitivity`, removed), which is not
+what a run books -- the external scale is weighted year by year from GCC
+growth, and the exposure cap is not linear -- so even at the run's own
+weights it was 0.5m and 0.6m off the booked figure on the two reference runs;
+the repricing reproduces it exactly. `run_scenario_weights` gives the
+weights a run is priced with, as the engine resolves them
+(`etl.macro.resolve_scenario_weights`, which `build_stpd_from_static` now
+calls too), not the config's rounded `explicit_weights` snapshot. The
+weights are the internal scale's; `mev_stress(weight_mode="custom")` no
+longer applies them to the external scale as well (R never did), and takes
+`external_weights` for that.
+
+Removed, as second answers to a question the bridge already answers exactly:
+`analytics.walk` (`ecl_walk`, `ecl_walk_detail`, `flow_profile`,
+`movement_by`, `stage_transitions`) and `analytics.attribution`
+(`ecl_factor_attribution`, `coverage_bridge`, `factor_attribution_exact`,
+`factor_attribution_diagnosis`). `reconcile_report` no longer carries a walk;
+it returns each run's provision beside the file comparison.
+
+What it changed, on the two reference runs (run_00001 / run_00002):
+
+* **The report and the bridge: nothing.** The report rebuilt through
+  `compute_ecl` equals the stored one to 1e-8 on every contract; the bridge's
+  steps are identical.
+* **Stress levers and what-if: nothing, except the maturity lever.** Extending
+  maturity used to stretch the EAD curve the contract was priced on, which for
+  a Stage 1 contract is its 12-month curve, so the 12-month horizon grew too.
+  The maturity date now moves (calendar months, the day clamped) and the
+  contract is priced on what that date gives, Stage 1 still capped at 12
+  months: +1 year on the whole book is 2,377.3m (was 2,523.6m) and
+  2,292.4m (was 2,406.3m). A what-if rule with a maturity change moves the
+  same way (2,360.3m, was 2,367.5m).
+* **Roll forward.** A contract's balance in k months now comes from its full
+  EAD path, not from the 12-month curve a Stage 1 provision looks at, which
+  ran most Stage 1 contracts off in a year; the extract date moves k months
+  and a deferral shortens by k. In 12 months: 1,195.7m (was 957.9m) and
+  1,189.0m (was 986.8m), with 4,868 and 4,617 contracts run off (were 5,626
+  and 5,274); in 3 months 1,757.2m and 1,681.2m.
+* **R 1.1.0 and Python 0.30.0 agree** on all 139 figures compared (report,
+  bridge, every stress lever, sweeps, what-if, roll forward, macro path,
+  scenarios): largest difference 0.000036.
 
 ## The surface is complete
 

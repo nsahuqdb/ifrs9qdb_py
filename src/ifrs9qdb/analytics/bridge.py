@@ -109,7 +109,7 @@ class BridgeRun:
     out_dir: Path | None = None
     report: pd.DataFrame | None = None   # normalised; one row per position
     frame: pd.DataFrame | None = None    # the engine frame, one row per position
-    ctx: object = None                   # etl.report._Ctx
+    ctx: object = None                   # etl.report.EclContext
     model_cfg: dict | None = None
     model_inputs: dict | None = None
     static: object = None
@@ -134,7 +134,7 @@ def load_bridge_run(run_dir, report_path=None) -> BridgeRun:
     the run's own frozen copies when it has them, as its report used.
     """
     from ..etl.pipeline import load_model_config
-    from ..etl.report import _Ctx, _portfolio_map, engine_frame
+    from ..etl.report import _portfolio_map, build_ecl_context, ecl_frame
     from ..etl.static_ref import load_static_reference
     from ..inputs import as_id
     from .profile import normalise
@@ -171,26 +171,14 @@ def load_bridge_run(run_dir, report_path=None) -> BridgeRun:
     run = (rc or {}).get("run") if isinstance(rc, dict) else None
     model_id = (run or {}).get("internal_model") if isinstance(run, dict) else None
 
-    ctx = _Ctx(out_dir, model_cfg=model_cfg)
-    pmap = _portfolio_map(static)
-    parts = [engine_frame(out_dir, s, pmap) for s in ("_1", "_2")]
-    parts = [p for p in parts if p is not None]
-    if not parts:
+    # what the run's report was priced on: its context and contract facts
+    # (etl.report), one row per position -- see ecl_frame
+    ctx = build_ecl_context(out_dir, model_cfg=model_cfg)
+    frame = ecl_frame(out_dir, _portfolio_map(static))
+    if frame is None:
         return BridgeRun(run_dir, False, f"No AccountMaster in {out_dir}")
-    frame = pd.concat(parts, ignore_index=True)
-    # the run's own id keys its collateral and EAD-curve tables; the
-    # normalised one joins the frame to the report and the two runs
-    frame["cid"] = frame["contract"]
-    frame["contract"] = as_id(frame["contract"]).astype("string")
-
-    # One row per position: a contract id is not unique (an investment held in
-    # two positions), and both the report and the engine frame keep the
-    # AccountMaster's order, so the n-th row of a contract in one is the n-th
-    # in the other.
     rep["occ"] = rep.groupby("contract").cumcount()
-    frame["occ"] = frame.groupby("contract").cumcount()
     rep["key"] = rep["contract"].astype(str) + "#" + rep["occ"].astype(str)
-    frame["key"] = frame["contract"].astype(str) + "#" + frame["occ"].astype(str)
     ext = pd.to_datetime(rep["extract_date"], errors="coerce", format="mixed")
     ext = ext.dropna()
     return BridgeRun(
@@ -281,7 +269,7 @@ def _hybrid_ctx(a: BridgeRun, b: BridgeRun):
     """The current run's pricing context on PD curves built from ITS macro
     inputs and the PREVIOUS run's model."""
     from ..etl.macro import build_stpd_from_static
-    from ..etl.report import _Ctx
+    from ..etl.report import EclContext
 
     static_h = copy.copy(b.static)
     for k in _MODEL_STATIC:
@@ -294,9 +282,7 @@ def _hybrid_ctx(a: BridgeRun, b: BridgeRun):
             inputs_h.pop(k, None)
     stpd = build_stpd_from_static(static_h, a.model_cfg, inputs_h,
                                   b.extract_date or "", model_id=a.model_id)
-    ctx = copy.copy(b.ctx)
-    ctx.stpd = _Ctx._stpd(stpd)
-    return ctx
+    return b.ctx.copy(stpd=EclContext._stpd(stpd))
 
 
 def _rebuilt_ctx(r: BridgeRun):
@@ -304,13 +290,11 @@ def _rebuilt_ctx(r: BridgeRun):
     run's own frozen config: what it would have priced with on the current
     calculation."""
     from ..etl.macro import build_stpd_from_static
-    from ..etl.report import _Ctx
+    from ..etl.report import EclContext
 
     stpd = build_stpd_from_static(r.static, r.model_cfg, r.model_inputs,
                                   r.extract_date or "", model_id=r.model_id)
-    ctx = copy.copy(r.ctx)
-    ctx.stpd = _Ctx._stpd(stpd)
-    return ctx
+    return r.ctx.copy(stpd=EclContext._stpd(stpd))
 
 
 def _same_curves(x: dict, y: dict, tol: float = 1e-9) -> bool:
@@ -329,36 +313,10 @@ def _same_curves(x: dict, y: dict, tol: float = 1e-9) -> bool:
 def _with_settings(ctx, of):
     """``ctx`` (the current run's data) on the ECL settings of ``of``: its EAD
     fallback rules, Stage 3 method and exposure cap."""
-    out = copy.copy(ctx)
-    out.rules, out.stage3, out.cap = of.rules, of.stage3, of.cap
-    return out
+    return ctx.copy(rules=of.rules, stage3=of.stage3, cap=of.cap)
 
 
 # ------------------------------------------------------------ the bridge ----
-def _price(ctx, stage: int, ht, bal: float, lgd: float, cum, eir) -> float:
-    """One contract, as the report prices it (etl/report.py _segment)."""
-    from ..engine import sum_marginal_ecl
-    if stage == 3:
-        if ctx.stage3 == "zero":
-            return 0.0
-        return bal if bal > 0 else 0.0
-    if cum is None or ht is None:
-        return float("nan")
-    curve, H, _ = ht
-    tot = sum_marginal_ecl(curve, lgd, cum, eir, H)
-    if np.isfinite(tot) and ctx.cap and bal > 0:
-        tot = min(tot, bal)
-    return float(tot)
-
-
-def _num0(v) -> float:
-    try:
-        v = float(v)
-    except (TypeError, ValueError):
-        return 0.0
-    return v if np.isfinite(v) else 0.0
-
-
 def ecl_bridge(a: BridgeRun, b: BridgeRun) -> dict:
     """Every contract's move from run ``a`` to run ``b``, split into causes.
 
@@ -367,8 +325,7 @@ def ecl_bridge(a: BridgeRun, b: BridgeRun) -> dict:
     and the components, which sum to ``ecl_b - ecl_a`` -- with what changed
     in the config, whether macro and model could be told apart, and notes.
     """
-    from ..engine import compute_lgd
-    from ..etl.report import _ead_curve
+    from ..etl.report import compute_ecl
 
     if not (a.ok and b.ok):
         return {"ok": False, "reason": a.reason or b.reason}
@@ -455,79 +412,76 @@ def ecl_bridge(a: BridgeRun, b: BridgeRun) -> dict:
                                            "other")}
     ok = np.zeros(len(both), dtype=bool)
     not_split_rating = 0
-    for i, key in enumerate(both):
-        if key not in fa.index or key not in fb.index:
-            continue
-        ea, eb = fa.loc[key], fb.loc[key]
-        # priced on the engine frame's own stage, rating and segment -- what
-        # the report priced with
-        sa, sb = int(ea["stage"]), int(eb["stage"])
-        ba, bb = _num0(ea["on_balance"]), _num0(eb["on_balance"])
-        na = _num0(ca.collnet.get(ea["cid"], 0.0))
-        nb = _num0(cb.collnet.get(eb["cid"], 0.0))
-        la = compute_lgd(ba, na, base=ca.lgd_base, unsecured_floor=ca.lgd_floor)
-        lb = compute_lgd(bb, nb, base=cb.lgd_base, unsecured_floor=cb.lgd_floor)
-        ra_, rb_ = ea["rating"], eb["rating"]
-        rta = "External" if str(ea["rating_type"]) == "External" else "Internal"
-        rtb = "External" if str(eb["rating_type"]) == "External" else "Internal"
-        pfa, pfb = ea["portfolio"], eb["portfolio"]
-        cum_a = ca_m.pd_curve(pfa, ra_, rta)
-        cum_r = ca_m.pd_curve(pfb, rb_, rtb)
-        cum_b = cb.pd_curve(pfb, rb_, rtb)
-        cum_h = ctx_h.pd_curve(pfb, rb_, rtb) if ctx_h is not None else None
+    pos = np.array([k in fa.index and k in fb.index for k in both], dtype=bool)
+    keys = [k for k, p_ in zip(both, pos) if p_]
+    if keys:
+        # Every price is etl.report.compute_ecl() -- the function that priced
+        # both reports -- on one run's context, with the contract facts, LGD or
+        # PD curve held at the other's where a step has not reached them yet.
+        FA, FB = fa.loc[keys], fb.loc[keys]
+        sa = FA["stage"].astype(int).to_numpy()
+        sb = FB["stage"].astype(int).to_numpy()
+        eir_a = FA["eir"].to_numpy()
 
-        def ht(ctx, e, stage, bal):
-            return _ead_curve(ctx, e["cid"], stage, bal, int(e["months"]),
-                              e["payment_type"], e["portfolio"], e["nir"],
-                              e["deferral"], e["pay_freq"])
+        def curves(ctx, F):
+            return [ctx.pd_curve(p_, r_, t_) for p_, r_, t_ in
+                    zip(F["portfolio"], F["rating"], F["rating_type"])]
 
-        h_a = ht(ca, ea, sa, ba)
-        h_ba = ht(cb_a, eb, sa, bb)
-        h_bb = h_ba if sb == sa else ht(cb_a, eb, sb, bb)
-        h_bc = h_bb if same_settings else ht(cb, eb, sb, bb)
-        eir_a, eir_b = ea["eir"], eb["eir"]
+        cum_a, cum_r = curves(ca_m, FA), curves(ca_m, FB)
+        cum_h = curves(ctx_h, FB) if ctx_h is not None else None
+        # the current balance, EAD curve and term, on the previous stage and EIR
+        FBa = FB.assign(stage=sa, eir=eir_a)
+        FBb = FB.assign(eir=eir_a)            # ... and on the current stage
 
-        f0 = _price(ca, sa, h_a, ba, la, cum_a, eir_a)
-        f1 = _price(cb_a, sa, h_ba, bb, la, cum_a, eir_a)
-        f2 = _price(cb_a, sb, h_bb, bb, la, cum_a, eir_a)
-        if cum_r is None and cum_a is not None and sb != 3:
-            # the previous run had no curve for the current rating: the rating
-            # move cannot be priced on its own and travels with the next step
-            f3 = f2
-            not_split_rating += 1
-        else:
-            f3 = _price(cb_a, sb, h_bb, bb, la, cum_r, eir_a)
-        f5 = _price(cb, sb, h_bc, bb, la, cum_b, eir_a)
+        def price(ctx, F, lgd=None, cum=None):
+            return compute_ecl(ctx, F, lgd=lgd, cum=cum)
+
+        p0 = price(ca_m, FA)
+        f0 = p0["ecl"].to_numpy()
+        la = p0["lgd"].to_numpy()             # the previous LGD, held to f5
+        f1 = price(cb_a, FBa, la, cum_a)["ecl"].to_numpy()
+        f2 = price(cb_a, FBb, la, cum_a)["ecl"].to_numpy()
+        f3 = price(cb_a, FBb, la, cum_r)["ecl"].to_numpy()
+        # the previous run had no curve for the current rating: the rating
+        # move cannot be priced on its own and travels with the next step
+        hold = np.array([r_ is None and a_ is not None and s_ != 3
+                         for r_, a_, s_ in zip(cum_r, cum_a, sb)], dtype=bool)
+        f3 = np.where(hold, f2, f3)
+        f5 = price(cb, FBb, la)["ecl"].to_numpy()
         if ctx_h is not None:
-            f4 = _price(cb_a, sb, h_bb, bb, la, cum_h, eir_a)
+            f4 = price(cb_a, FBb, la, cum_h)["ecl"].to_numpy()
             # the current ECL settings, still on the previous PD model
-            f4s = f4 if same_settings else _price(cb, sb, h_bc, bb, la, cum_h, eir_a)
+            f4s = f4 if same_settings else price(cb, FBb, la, cum_h)["ecl"].to_numpy()
         else:
             # no macro step: the curves are the current run's from here, and
             # the settings switch on their own
-            f4 = f5 if same_settings else _price(cb_a, sb, h_bb, bb, la, cum_b, eir_a)
+            f4 = f5 if same_settings else price(cb_a, FBb, la)["ecl"].to_numpy()
             f4s = f5
-        f6 = _price(cb, sb, h_bc, bb, lb, cum_b, eir_b)
-        f = [f0, f1, f2, f3, f4, f4s, f5, f6]
-        if not all(np.isfinite(x) for x in f):
-            continue
-        ok[i] = True
-        eff["exposure"][i] = f1 - f0
-        eff["stage"][i] = f2 - f1
-        eff["rating"][i] = f3 - f2
-        eff["settings"][i] = f4s - f4
+        f6 = price(cb, FB)["ecl"].to_numpy()
+
+        good = np.all(np.isfinite(np.vstack([f0, f1, f2, f3, f4, f4s, f5, f6])),
+                      axis=0)
+        not_split_rating = int((hold & good).sum())
+        idx = np.where(pos)[0]
+        ok[idx] = good
+        z = lambda v: np.where(good, v, 0.0)
+        eff["exposure"][idx] = z(f1 - f0)
+        eff["stage"][idx] = z(f2 - f1)
+        eff["rating"][idx] = z(f3 - f2)
+        eff["settings"][idx] = z(f4s - f4)
         if split and ctx_h is not None:
-            eff["macro"][i] = f4 - f3
-            eff["model"][i] = f5 - f4s
+            eff["macro"][idx] = z(f4 - f3)
+            eff["model"][idx] = z(f5 - f4s)
         elif split:
-            eff["other"][i] += f4 - f3           # neither changed
+            eff["other"][idx] += z(f4 - f3)          # neither changed
         else:
-            eff["pd_curves"][i] = f4 - f3
-        eff["lgd"][i] = f6 - f5
-        model_a = rows.at[key, "ecl_a"] - rows.at[key, "overlay_a"]
-        model_b = rows.at[key, "ecl_b"] - rows.at[key, "overlay_b"]
-        eff["method"][i] = f0 - model_a
-        eff["other"][i] += model_b - f6
+            eff["pd_curves"][idx] = z(f4 - f3)
+        eff["lgd"][idx] = z(f6 - f5)
+        kk = list(keys)
+        model_a = (rows.loc[kk, "ecl_a"] - rows.loc[kk, "overlay_a"]).to_numpy()
+        model_b = (rows.loc[kk, "ecl_b"] - rows.loc[kk, "overlay_b"]).to_numpy()
+        eff["method"][idx] = z(f0 - model_a)
+        eff["other"][idx] += z(model_b - f6)
 
     cont = rows.loc[both]
     move = (cont["ecl_b"] - cont["ecl_a"]).to_numpy()

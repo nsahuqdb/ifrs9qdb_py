@@ -31,6 +31,7 @@ HOW R READS A COLUMN MATTERS
 """
 from __future__ import annotations
 
+import copy
 import math
 import re
 from pathlib import Path
@@ -39,13 +40,15 @@ import numpy as np
 import pandas as pd
 
 from ..dates import calendar_months, fer_parse_date, months_between, years_between
-from ..engine import (EclConfig, compute_lgd, ead_fallback_rules,
-                      fallback_ead_curve, resolve_ead_shape, sum_marginal_ecl)
+from ..engine import (MIN_HORIZON_MONTHS, EclConfig, compute_lgd,
+                      ead_fallback_rules, fallback_ead_curve, months_to_maturity,
+                      resolve_ead_shape, sum_marginal_ecl)
 from ..ids import as_id
 
 __all__ = ["REPORT_COLUMNS", "OVERLAY_COLUMNS", "build_final_ecl_report",
            "classify_stage_report", "read_output_csv", "DEFAULT_PORTFOLIOS",
-           "engine_frame"]
+           "engine_frame", "ecl_frame", "EclContext", "build_ecl_context",
+           "compute_ecl", "ead_path", "run_pricing_config"]
 
 REPORT_COLUMNS = [
     "Run Id", "Enterprise Entity Id", "Extract Date", "Contract Id",
@@ -277,8 +280,14 @@ def classify_stage_report(dpd, default_flag, watchlist, local_any, portfolio,
 
 
 # ------------------------------------------------------------- engine ------
-class _Ctx:
-    """R's build_ecl_context(): the segment-independent pricing lookups."""
+class EclContext:
+    """R's build_ecl_context(): the segment-independent pricing lookups.
+
+    Everything that prices a contract -- the run's report, the comparison
+    bridge, every stress, what-if and roll-forward -- prices on one of these
+    and :func:`compute_ecl`. A lever changes the context (``copy``) or the
+    contract facts, never the answer.
+    """
 
     def __init__(self, out_dir, model_cfg=None, stpd=None, cfg=None):
         cfg = cfg or EclConfig()
@@ -372,24 +381,44 @@ class _Ctx:
             _chr(_col(r, "Rating")).astype(str)
         return dict(zip(key, _chr(_col(r, "Hierarchy"))))
 
+    def copy(self, **changes) -> "EclContext":
+        """A shallow copy with some lookups replaced -- a stress's context.
+        The run's own lookups are never changed in place."""
+        out = copy.copy(self)
+        for k, v in changes.items():
+            if not hasattr(out, k):
+                raise AttributeError(f"EclContext has no {k!r}")
+            setattr(out, k, v)
+        return out
+
     def pd_curve(self, portfolio, rating, rating_type):
-        """R's lookup_pd_curve(): External -> type 2, anything else -> 1."""
-        rt = "2" if str(rating_type) == "External" else "1"
+        """R's lookup_pd_curve(): the external scale (named "External" or
+        "External Rating", or type 2) -> type 2, anything else -> 1."""
+        t = str(rating_type)
+        rt = "2" if (t.startswith("External") or t == "2") else "1"
         bucket = self.rat2bucket.get(f"{rt}{_KEYSEP}{rating}")
         if bucket is None or (isinstance(bucket, float) and math.isnan(bucket)):
             return None
         return self.stpd.get(f"{portfolio}{_KEYSEP}{bucket}")
 
 
+_Ctx = EclContext       # the name the rest of the package grew up with
+
+
+def build_ecl_context(out_dir, model_cfg=None, stpd=None,
+                      cfg: EclConfig | None = None) -> EclContext:
+    """R's build_ecl_context(): a run's pricing context, from its Output
+    folder and model config (the ``ecl`` block: EAD fallback rules, Stage 3
+    method, exposure cap, LGD). ``stpd`` prices on another set of PD curves
+    (a scenario's, a rebuilt chain's) instead of the run's StPD.csv."""
+    return EclContext(out_dir, model_cfg=model_cfg, stpd=stpd, cfg=cfg)
+
+
 def _months_to_maturity(d_mat, d_ext, min_months: int = 3) -> int:
     """R's months_to_maturity(): LIC's count (a part month is a whole one;
-    ``min_months`` only for a facility at or past maturity)."""
-    if pd.isna(d_mat) or pd.isna(d_ext):
-        return min_months
-    m = (d_mat.year - d_ext.year) * 12 + (d_mat.month - d_ext.month)
-    if d_mat.day > d_ext.day:
-        m += 1
-    return min_months if m <= 0 else int(m)
+    ``min_months`` only for a facility at or past maturity). One count for
+    every caller: :func:`engine.months_to_maturity`."""
+    return months_to_maturity(d_mat, d_ext, min_months)
 
 
 def _pd_lifetime_at(cum, stage: int, months: int) -> float:
@@ -401,50 +430,123 @@ def _pd_lifetime_at(cum, stage: int, months: int) -> float:
     return float(cum[min(h, len(cum) - 1)])
 
 
-def _ead_curve(ctx: _Ctx, cid, stage, on_bal, months, payment_type, portfolio,
-               nir, deferral, pay_freq):
+def _ead_curve(ctx: EclContext, cid, stage, on_bal, months, payment_type,
+               portfolio, nir, deferral, pay_freq):
     """R's resolve_ead_curve(): the schedule when there is one, else LIC's
-    parametric fallback; returns (curve, horizon, shape)."""
+    parametric fallback (:func:`engine.fallback_ead_curve`, the one
+    fallback); Stage 1 capped at twelve months. Returns (curve, horizon,
+    shape), shape None for a supplied schedule."""
     curve = ctx.schedules.get(cid)
     if curve is not None and len(curve) > 0:
         H = min(12, len(curve)) if stage == 1 else len(curve)
         return curve[:H], H, None
-    H = min(12, months) if stage == 1 else min(600, months)
-    if H is None or H < 1:
-        H = 1
     rules, default = ctx.rules
     shape = resolve_ead_shape(payment_type, portfolio, rules=rules, default=default)
-    if months is not None and months <= 3:
+    if months is not None and months <= MIN_HORIZON_MONTHS:
         shape = "bullet"
-    ob = 0.0 if on_bal is None or not np.isfinite(on_bal) else float(on_bal)
-    if shape == "bullet":
-        return np.full(H, ob), H, shape
-    N = max(1, int(months))
-    D = int(deferral) if deferral is not None and np.isfinite(deferral) else 0
-    D = max(0, min(max(D, 0), N - 1))
-    n_amort = max(1, N - D)
-    f = int(pay_freq) if pay_freq is not None and np.isfinite(pay_freq) and pay_freq >= 1 else 1
-    t = np.arange(H)
-    # payment dates counted back from maturity (R's build_ead_fallback_curve)
-    n_pay = max(1, -(-n_amort // f))
-    p1 = N - (n_pay - 1) * f
-    paid = np.where(t < p1, 0, np.minimum(n_pay, (t - p1) // f + 1))
-    prog = paid / n_pay
-    if shape == "linear":
-        coef = np.maximum(0.0, 1 - prog)
-    elif shape == "annuity":
-        r = 0.0 if nir is None or not np.isfinite(nir) else nir / 12
-        if r <= 1e-9:
-            coef = np.maximum(0.0, 1 - prog)
-        else:
-            rp = r * f
-            num = (1 + rp) ** n_pay - (1 + rp) ** paid
-            den = (1 + rp) ** n_pay - 1
-            coef = np.where(paid >= n_pay, 0.0, np.maximum(0.0, num / den))
+    full = fallback_ead_curve(on_bal, months, payment_type, pay_freq, deferral,
+                              portfolio=portfolio, nir=nir, rules=rules,
+                              default=default)
+    H = min(12, len(full)) if stage == 1 else len(full)
+    return full[:H], H, shape
+
+
+def ead_path(ctx: EclContext, row) -> np.ndarray | None:
+    """A contract's whole EAD path, month by month from the extract date:
+    its supplied schedule, else its fallback over its full remaining term --
+    never cut to the twelve months a Stage 1 provision looks at. What a
+    balance is after k months is read from this (roll-forward)."""
+    curve, _, _ = _ead_curve(ctx, row["cid"], 2, row["on_balance"],
+                             _months_to_maturity(row["d_maturity"], row["d_extract"]),
+                             row["payment_type"], row["portfolio"], row["nir"],
+                             row["deferral"], row["pay_freq"])
+    return curve
+
+
+def compute_ecl(ctx: EclContext, frame: pd.DataFrame, lgd=None,
+                cum=None) -> pd.DataFrame:
+    """Price every contract of ``frame`` on ``ctx``: R's compute_ecl().
+
+    THE pricing function. The run's report, the comparison bridge and every
+    stress, what-if, roll-forward and macro or scenario repricing call it, so
+    the ECL is calculated one way everywhere:
+
+        ECL = sum_t EAD(t) x LGD x [cumPD(t+1) - cumPD(t)] / (1 + EIR)^(t/12)
+
+    with the EAD curve from :func:`_ead_curve` (Stage 1 capped at twelve
+    months), LGD from :func:`engine.compute_lgd` on the contract's net
+    collateral, the PD curve of its segment and rating, Stage 3 per the
+    context's method, and the provision capped at the balance when the
+    context says so.
+
+    ``frame`` is :func:`engine_frame` / :func:`ecl_frame`, or a copy with
+    some facts changed (stage, rating, balance, EIR, dates). ``lgd`` and
+    ``cum`` -- one value per row, NaN / None to look it up -- hold a
+    contract's LGD or PD curve at another run's, which is how the bridge
+    changes one ingredient at a time.
+
+    Returns one row per contract: ecl, lgd, collcov, impcov, pdlife,
+    collval, shape (the fallback shape, None for a supplied schedule) and
+    horizon.
+    """
+    n = len(frame)
+    out = {k: np.full(n, np.nan) for k in ("ecl", "lgd", "collcov", "impcov",
+                                           "pdlife")}
+    out["collval"] = np.zeros(n)
+    shape = np.empty(n, dtype=object)
+    horizon = np.zeros(n, dtype=int)
+    cid = (frame["cid"] if "cid" in frame.columns else frame["contract"]).to_numpy()
+    stage = frame["stage"].to_numpy()
+    onbal = pd.to_numeric(frame["on_balance"], errors="coerce").to_numpy(dtype=float)
+    if "d_maturity" in frame.columns and "d_extract" in frame.columns:
+        months = [_months_to_maturity(m, e) for m, e in
+                  zip(frame["d_maturity"], frame["d_extract"])]
     else:
-        coef = np.ones(H)
-    coef = np.where(t < D, 1.0, coef)
-    return ob * coef, H, shape
+        months = [int(m) for m in frame["months"]]
+    pt, pf = frame["payment_type"].to_numpy(), frame["portfolio"].to_numpy()
+    nir, dfr = frame["nir"].to_numpy(), frame["deferral"].to_numpy()
+    pfq, eir = frame["pay_freq"].to_numpy(), frame["eir"].to_numpy()
+    rat, rtp = frame["rating"].to_numpy(), frame["rating_type"].to_numpy()
+    lgd_in = None if lgd is None else np.asarray(lgd, dtype=float)
+    for i in range(n):
+        c = cid[i]
+        onb = 0.0 if not np.isfinite(onbal[i]) else float(onbal[i])
+        st = int(stage[i])
+        cnet = ctx.collnet.get(c, 0.0) if c is not None else 0.0
+        cnet = 0.0 if cnet is None or not np.isfinite(cnet) else float(cnet)
+        out["collval"][i] = cnet
+        out["collcov"][i] = cnet / onb if onb > 0 else np.nan
+        matm = int(months[i])
+        curve, H, shape[i] = _ead_curve(ctx, c, st, onb, matm, pt[i], pf[i],
+                                        nir[i], dfr[i], pfq[i])
+        horizon[i] = H
+        if lgd_in is not None and np.isfinite(lgd_in[i]):
+            lg = float(lgd_in[i])
+        else:
+            lg = compute_lgd(onb, cnet, base=ctx.lgd_base,
+                             unsecured_floor=ctx.lgd_floor)
+        out["lgd"][i] = lg
+        cm = cum[i] if cum is not None else ctx.pd_curve(pf[i], rat[i], rtp[i])
+        if st == 3:
+            if ctx.stage3 == "zero":
+                out["ecl"][i] = 0.0
+                out["impcov"][i] = 0.0 if onb > 0 else np.nan
+            else:
+                out["ecl"][i] = onb if onb > 0 else 0.0
+                out["impcov"][i] = 1.0 if onb > 0 else np.nan
+        else:
+            tot = (float("nan") if cm is None else
+                   sum_marginal_ecl(curve, lg, cm, eir[i], H))
+            if np.isfinite(tot) and ctx.cap and onb > 0:
+                tot = min(tot, onb)
+            out["ecl"][i] = tot
+            if np.isfinite(tot):
+                out["impcov"][i] = tot / onb if onb > 0 else np.nan
+        out["pdlife"][i] = _pd_lifetime_at(cm, st, matm)
+    res = pd.DataFrame(out, index=frame.index)
+    res["shape"] = shape
+    res["horizon"] = horizon
+    return res
 
 
 def engine_frame(out_dir, suffix: str, portfolio_map: dict | None = None,
@@ -535,6 +637,34 @@ def engine_frame(out_dir, suffix: str, portfolio_map: dict | None = None,
     })
 
 
+def ecl_frame(out_dir, portfolio_map: dict | None = None,
+              dpd_stage2_threshold: float | None = None) -> pd.DataFrame | None:
+    """Both books' :func:`engine_frame`, as the report prices them, one row
+    per position: ``cid`` is the run's own contract id (what its collateral
+    and EAD tables are keyed on), ``contract`` the normalised one the report
+    uses, and ``key`` the contract with its occurrence -- a contract id is not
+    unique (an investment held in two positions), and the report and the
+    frame both keep the AccountMaster's order, so the n-th row of a contract
+    in one is the n-th in the other.
+
+    ``dpd_stage2_threshold`` defaults to the one the run froze with its
+    config, as its report was staged on."""
+    if dpd_stage2_threshold is None:
+        from ..stress import staging_threshold
+        dpd_stage2_threshold = staging_threshold(out_dir)
+    parts = [engine_frame(out_dir, s, portfolio_map, dpd_stage2_threshold)
+             for s in ("_1", "_2")]
+    parts = [p for p in parts if p is not None]
+    if not parts:
+        return None
+    f = pd.concat(parts, ignore_index=True)
+    f["cid"] = f["contract"]
+    f["contract"] = as_id(f["contract"]).astype("string")
+    f["occ"] = f.groupby("contract").cumcount()
+    f["key"] = f["contract"].astype(str) + "#" + f["occ"].astype(str)
+    return f
+
+
 def _segment(out_dir, suffix, ctx: _Ctx, portfolio_map, entity_id,
              run_id_label, dpd_stage2_threshold) -> pd.DataFrame | None:
     """R's .fer_build_segment(): one book's rows of the report."""
@@ -584,44 +714,10 @@ def _segment(out_dir, suffix, ctx: _Ctx, portfolio_map, entity_id,
                      & (d_open[both].dt.month == d_ext[both].dt.month)).astype(int)
 
     # ---- the engine: R's compute_ecl() -----------------------------------
-    lgd = np.full(n, np.nan); collcov = np.full(n, np.nan)
-    ecl = np.full(n, np.nan); impcov = np.full(n, np.nan)
-    pdlife = np.full(n, np.nan); collval = np.zeros(n)
-    for i in range(n):
-        cid = contract.iat[i]
-        onb = on_bal.iat[i]
-        onb = 0.0 if pd.isna(onb) else float(onb)
-        st = int(stage[i])
-        cnet = ctx.collnet.get(cid, 0.0) if cid is not None else 0.0
-        cnet = 0.0 if cnet is None or not np.isfinite(cnet) else float(cnet)
-        collval[i] = cnet
-        collcov[i] = cnet / onb if onb > 0 else np.nan
-        matm = int(e["months"].iat[i])
-        curve, H, _shape = _ead_curve(
-            ctx, cid, st, onb, matm, e["payment_type"].iat[i],
-            e["portfolio"].iat[i], e["nir"].iat[i], e["deferral"].iat[i],
-            e["pay_freq"].iat[i])
-        lg = compute_lgd(onb, cnet, base=ctx.lgd_base,
-                         unsecured_floor=ctx.lgd_floor)
-        lgd[i] = lg
-        cum = ctx.pd_curve(e["portfolio"].iat[i], e["rating"].iat[i],
-                           e["rating_type"].iat[i])
-        if st == 3:
-            if ctx.stage3 == "zero":
-                ecl[i] = 0.0
-                impcov[i] = 0.0 if onb > 0 else np.nan
-            else:
-                ecl[i] = onb if onb > 0 else 0.0
-                impcov[i] = 1.0 if onb > 0 else np.nan
-        else:
-            tot = (float("nan") if cum is None else
-                   sum_marginal_ecl(curve, lg, cum, e["eir"].iat[i], H))
-            if np.isfinite(tot) and ctx.cap and onb > 0:
-                tot = min(tot, onb)
-            ecl[i] = tot
-            if np.isfinite(tot):
-                impcov[i] = tot / onb if onb > 0 else np.nan
-        pdlife[i] = _pd_lifetime_at(cum, st, matm)
+    priced = compute_ecl(ctx, e)
+    lgd, collcov = priced["lgd"].to_numpy(), priced["collcov"].to_numpy()
+    ecl, impcov = priced["ecl"].to_numpy(), priced["impcov"].to_numpy()
+    pdlife, collval = priced["pdlife"].to_numpy(), priced["collval"].to_numpy()
 
     lgd_rate = np.where(np.isin(stage, [1, 2]), lgd, np.nan)
     resid_lgd = np.where(stage == 3, 1.0, np.nan)
@@ -763,6 +859,28 @@ def _portfolio_map(static) -> dict:
     return out
 
 
+def run_pricing_config(run_dir):
+    """(static, model_cfg) a run is priced on: its frozen ``config_used`` when
+    it has one, else the package defaults -- the same for the report, the
+    comparison bridge and every stress, so all of them price one way."""
+    run_dir = Path(run_dir)
+    if run_dir.name == "Output" and not (run_dir / "Output").is_dir():
+        run_dir = run_dir.parent
+    try:
+        from .static_ref import load_static_reference
+        frozen = run_dir / "config_used" / "static"
+        static = load_static_reference(frozen if frozen.is_dir() else None)
+    except Exception:
+        static = None
+    try:
+        from .pipeline import load_model_config
+        frozen = run_dir / "config_used" / "config"
+        model_cfg, _ = load_model_config(frozen if frozen.is_dir() else None)
+    except Exception:
+        model_cfg = None
+    return static, model_cfg
+
+
 def build_final_ecl_report(run_dir, entity_id=None, run_id_label=None,
                            dpd_stage2_threshold: float = 60,
                            cfg: EclConfig | None = None,
@@ -774,22 +892,12 @@ def build_final_ecl_report(run_dir, entity_id=None, run_id_label=None,
     """Price a run and write its ECL report (R's build_final_ecl_report)."""
     run_dir = Path(run_dir)
     out_dir = run_dir / "Output" if (run_dir / "Output").is_dir() else run_dir
-    if static is None:
-        try:
-            from .static_ref import load_static_reference
-            frozen = run_dir / "config_used" / "static"
-            static = load_static_reference(frozen if frozen.is_dir() else None)
-        except Exception:
-            static = None
-    if model_cfg is None:
-        try:
-            from .pipeline import load_model_config
-            frozen = run_dir / "config_used" / "config"
-            model_cfg, _ = load_model_config(frozen if frozen.is_dir() else None)
-        except Exception:
-            model_cfg = None
+    if static is None or model_cfg is None:
+        st, mc = run_pricing_config(run_dir)
+        static = st if static is None else static
+        model_cfg = mc if model_cfg is None else model_cfg
     pmap = _portfolio_map(static)
-    ctx = _Ctx(out_dir, model_cfg=model_cfg, stpd=stpd, cfg=cfg)
+    ctx = build_ecl_context(out_dir, model_cfg=model_cfg, stpd=stpd, cfg=cfg)
     segs = [_segment(out_dir, "_1", ctx, pmap, entity_id, run_id_label,
                      dpd_stage2_threshold)]
     if include_investments:

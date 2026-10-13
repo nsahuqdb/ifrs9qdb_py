@@ -163,32 +163,28 @@ def compare_runs(run, reference, tol: float = 1e-6) -> pd.DataFrame:
 
 
 def reconcile_report(run, reference) -> dict:
-    """The provision movement between two runs, with the file comparison.
+    """The file comparison between two runs, with each run's provision.
 
-    The headline is the ECL difference, because that is the question asked in a
-    review; the file-level comparison is what explains it.
+    Which files differ is what explains a difference between two runs. Why the
+    provision moved, cause by cause, is ecl_bridge()'s question: it reprices
+    every contract with compute_ecl(), the function the pipeline prices with,
+    so there is no second decomposition here to disagree with it.
     """
-    from .analytics import ecl_walk, normalise
+    from .analytics import normalise, report_total
 
     files = compare_runs(run, reference)
-    a = _output_dir(run) / "FinalEclReport.csv"
-    b = _output_dir(reference) / "FinalEclReport.csv"
-
     out = {
         "files": files.to_dict(orient="records"),
         "files_matching": int((files["status"] == "match").sum()),
         "files_compared": len(files),
     }
-    if a.is_file() and b.is_file():
-        cur = normalise(pd.read_csv(a, low_memory=False))
-        prev = normalise(pd.read_csv(b, low_memory=False))
-        w = ecl_walk(prev, cur)
-        out["walk"] = {
-            "opening": w["opening"], "closing": w["closing"],
-            "residual": w["residual"],
-            "steps": w["steps"].to_dict(orient="records"),
-            "counts": w["counts"],
-        }
+    ecl = {}
+    for side, r in (("run", run), ("reference", reference)):
+        p = _output_dir(r) / "FinalEclReport.csv"
+        if p.is_file():
+            ecl[side] = report_total(normalise(pd.read_csv(p, low_memory=False)))
+    if len(ecl) == 2:
+        out["ecl"] = ecl
     return out
 
 

@@ -298,7 +298,7 @@ __all__ += ["build_term_structure", "build_stpd_from_static", "stress_mevs", "co
             "compute_external_scenario_weights",
             "compute_external_scenario_weights_per_year",
             "resolve_internal_scenario_weights",
-            "resolve_external_scenario_weights"]
+            "resolve_external_scenario_weights", "resolve_scenario_weights"]
 
 
 def stress_mevs(forecasts, severity_z: float, mev_specs) -> np.ndarray:
@@ -521,21 +521,13 @@ def build_stpd_from_static(static, model_cfg, model_inputs, extract_date: str,
     # The external scale is driven by REGIONAL growth, not the domestic MEVs,
     # so it gets its own scaling factors. Using the internal chain for both
     # produced errors five times larger on the external portfolios.
-    gcc_hist = gcc_weighted_history(static.get("gcc_real_gdp_growth"),
-                                    static.get("gcc_gdp_current_prices"))
-    ext_fc = model_inputs.get("external_gcc_forecast")
-    if ext_fc is None:
-        ext_fc = external_gcc_forecast(model_inputs, static, n_forecasts)
+    gcc_hist, ext_fc = _gcc_inputs(static, model_inputs, n_forecasts)
 
-    # The two scales are weighted SEPARATELY. The internal weights come from
-    # where the domestic forecast sits on the domestic history; the external
-    # ones from the regional forecast on the regional history, one vector per
-    # year. An explicit `scenario_weights` overrides both, which is what the
-    # stress pages pass when they reweight a run by hand.
+    # The two scales are weighted SEPARATELY (resolve_scenario_weights). An
+    # explicit `scenario_weights` overrides both.
     if scenario_weights is None:
-        internal_weights = resolve_internal_scenario_weights(model_inputs, static)
-        external_weights = resolve_external_scenario_weights(
-            model_inputs, static, gcc_hist, ext_fc)
+        internal_weights, external_weights = resolve_scenario_weights(
+            static, model_cfg, model_inputs)
     else:
         internal_weights = external_weights = scenario_weights
 
@@ -565,6 +557,40 @@ def build_stpd_from_static(static, model_cfg, model_inputs, extract_date: str,
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+def _n_forecasts(model_cfg, model_inputs) -> int:
+    """How many forecast years the chain models: model.yml's horizons, else
+    the rows of the MEV forecast."""
+    mc = model_cfg or {}
+    horizons = mc.get("horizons", {}) or {}
+    fc_block = ((model_inputs or {}).get("mev_forecasts") or {}).get("forecasts") or {}
+    return int(horizons.get("n_forecasts", mc.get("n_forecasts", len(fc_block))))
+
+
+def _gcc_inputs(static, model_inputs, n_forecasts: int):
+    """The regional history and forecast the external scale is built from."""
+    gcc_hist = gcc_weighted_history(static.get("gcc_real_gdp_growth"),
+                                    static.get("gcc_gdp_current_prices"))
+    ext_fc = model_inputs.get("external_gcc_forecast")
+    if ext_fc is None:
+        ext_fc = external_gcc_forecast(model_inputs, static, n_forecasts)
+    return gcc_hist, ext_fc
+
+
+def resolve_scenario_weights(static, model_cfg, model_inputs):
+    """Both scales' scenario weights, as build_stpd_from_static applies them.
+
+    The internal weights come from where the domestic forecast sits on the
+    domestic history; the external ones from the regional forecast on the
+    regional history, one vector per forecast year. Returns ``(internal,
+    external)``: a dict, and ``{"per_year": ..., "average": ...}``.
+    """
+    gcc_hist, ext_fc = _gcc_inputs(static, model_inputs,
+                                   _n_forecasts(model_cfg, model_inputs))
+    return (resolve_internal_scenario_weights(model_inputs, static),
+            resolve_external_scenario_weights(model_inputs, static, gcc_hist,
+                                              ext_fc))
 
 
 def external_gcc_forecast(model_inputs, static, n_forecasts: int):

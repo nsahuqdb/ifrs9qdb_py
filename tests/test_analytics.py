@@ -3,8 +3,6 @@
 The properties asserted here are the ones that were wrong at some point in the
 R app, kept as regressions:
 
-  * the walk must reconcile exactly, not approximately
-  * every drill-down must sum back to its step
   * staging must follow the real rule, Tasdeer and contagion included
   * customer aggregation must not claim a customer sits in one portfolio
 """
@@ -15,9 +13,8 @@ import pandas as pd
 import pytest
 
 from ifrs9qdb.analytics import (
-    classify_stage, concentration, customer_view, data_quality, ecl_walk,
-    ecl_walk_detail, flow_profile, hhi, hhi_band, hhi_equivalent_n, lorenz_curve,
-    movement_by, normalise, run_profile, stage2_triggers, stage_transitions,
+    classify_stage, concentration, customer_view, data_quality, hhi, hhi_band,
+    hhi_equivalent_n, lorenz_curve, normalise, run_profile, stage2_triggers,
     staging_distribution,
 )
 
@@ -138,76 +135,6 @@ class TestStaging:
         assert any_rows.loc["Watchlist", "contracts"] == 1
 
 
-class TestWalk:
-    @staticmethod
-    def perturb(d, seed):
-        rng = np.random.default_rng(seed)
-        x = d.copy()
-        x["exposure"] = x["exposure"] * rng.uniform(0.7, 1.4, len(x))
-        x["ecl"] = x["ecl"] * rng.uniform(0.5, 1.6, len(x))
-        zero = rng.choice(len(x), max(1, len(x) // 30), replace=False)
-        x.iloc[zero, x.columns.get_loc("exposure")] = 0.0
-        x["coverage"] = np.where(x["exposure"] > 0,
-                                 x["ecl"] / x["exposure"].replace(0, np.nan), 0.0)
-        x["coverage"] = x["coverage"].fillna(0.0)
-        mig = rng.choice(len(x), max(1, len(x) // 12), replace=False)
-        x.iloc[mig, x.columns.get_loc("stage")] = \
-            x.iloc[mig, x.columns.get_loc("stage")].map({1: 2, 2: 1, 3: 2}).fillna(2)
-        return x.iloc[: int(len(x) * 0.92)]
-
-    @real_only
-    @pytest.mark.parametrize("seed", [1, 2, 3, 4, 5])
-    def test_reconciles_exactly_on_the_real_book(self, rep, seed):
-        w = ecl_walk(self.perturb(rep, seed), rep)
-        assert abs(w["residual"]) < 1e-4, f"residual {w['residual']}"
-
-    @real_only
-    def test_every_drill_down_sums_back_to_its_step(self, rep):
-        prev = self.perturb(rep, 9)
-        w = ecl_walk(prev, rep)
-        det = ecl_walk_detail(prev, rep, n=10**9)
-        steps = dict(zip(w["steps"]["label"], w["steps"]["amount"]))
-        for label, frame in det.items():
-            if len(frame) == 0:
-                continue
-            assert frame["amount"].sum() == pytest.approx(steps[label], abs=1e-4), \
-                f"{label} detail does not tie to its step"
-
-    def test_synthetic_walk_reconciles(self):
-        prev = synthetic()
-        curr = prev.copy()
-        curr["ecl"] = curr["ecl"] * 1.4
-        curr["coverage"] = np.where(curr["exposure"] > 0,
-                                    curr["ecl"] / curr["exposure"], 0.0)
-        curr = curr[curr.contract != "C6"]
-        w = ecl_walk(prev, curr)
-        assert abs(w["residual"]) < 1e-9
-
-
-    def test_a_contract_listed_twice_is_two_positions(self):
-        """The walk keeps both, matched in order as the ECL bridge does, so
-        its opening and closing are the reports' totals."""
-        prev = synthetic()
-        extra = prev[prev["contract"] == "C3"].assign(exposure=100.0, ecl=7.0,
-                                                      coverage=0.07)
-        prev = pd.concat([prev, extra], ignore_index=True)
-        curr = prev.iloc[:-1].copy()            # the second C3 position left
-        curr["ecl"] = curr["ecl"] * 1.2
-        curr["coverage"] = np.where(curr["exposure"] > 0,
-                                    curr["ecl"] / curr["exposure"], 0.0)
-        w = ecl_walk(prev, curr)
-        assert w["opening"] == pytest.approx(prev["ecl"].sum())
-        assert w["closing"] == pytest.approx(curr["ecl"].sum())
-        steps = dict(zip(w["steps"]["label"], w["steps"]["amount"]))
-        assert steps["Derecognised"] == pytest.approx(-7.0)
-        assert w["counts"]["left"] == 1
-        det = ecl_walk_detail(prev, curr)
-        assert list(det["Derecognised"]["contract"]) == ["C3"]
-        fl = flow_profile(prev, curr).set_index("flow")
-        assert fl.loc["Derecognised", "contracts"] == 1
-        assert fl.loc["Derecognised", "ecl"] == pytest.approx(7.0)
-
-
 class TestConcentration:
     def test_hhi_bounds_and_bands(self):
         h = hhi(synthetic(), "customer")
@@ -285,13 +212,3 @@ class TestAgainstTheRealBook:
             p = run_profile(rep, by)
             assert p["ecl"].sum() == pytest.approx(rep["ecl"].sum(), rel=1e-9)
 
-    @real_only
-    def test_movement_by_is_zero_against_itself(self, rep):
-        m = movement_by(rep, rep, "portfolio")
-        assert m["change"].abs().max() == pytest.approx(0.0, abs=1e-6)
-
-    @real_only
-    def test_stage_transitions_are_customer_counts(self, rep):
-        t = stage_transitions(rep, rep, by_customer=True)
-        assert "customers" in t.columns
-        assert (t["from"] == t["to"]).all()   # unchanged against itself

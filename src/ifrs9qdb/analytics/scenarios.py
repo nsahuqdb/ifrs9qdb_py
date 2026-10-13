@@ -7,7 +7,9 @@ provision is 1.36bn" means little next to "it is 1.36bn, and it would be
 2.1bn in the severe downturn we assign 15% weight to".
 
 Everything here reads the per-scenario reports a run already wrote. Nothing is
-re-priced, so these are cheap and cannot disagree with the run.
+re-priced, so these are cheap and cannot disagree with the run. What a
+different weighting would book is a repricing, not a weighted sum of these:
+``stress.scenario_weights_stress``.
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ import pandas as pd
 from .profile import normalise
 
 __all__ = ["scenario_files", "scenario_ecl_from_outputs", "scenario_comparison",
-           "scenario_reweight", "scenario_sensitivity", "scenario_stage_split"]
+           "scenario_stage_split"]
 
 _PATTERN = re.compile(r"^FinalEclReport_scenario_(.+)\.csv$")
 
@@ -128,75 +130,6 @@ def scenario_comparison(ecl_by_scenario: dict,
         out["vs_base"] = out["ecl"] - b
         out["vs_base_pct"] = 100 * (out["ecl"] - b) / b
     return out.reset_index(drop=True)
-
-
-def scenario_reweight(ecl_by_scenario: dict, weights: dict) -> dict | None:
-    """The weighted ECL under a different set of scenario weights.
-
-    The weights are normalised over the scenarios actually present, so a
-    weight naming a scenario the run did not price cannot quietly shrink the
-    total. Which ones were dropped is reported rather than assumed harmless.
-    """
-    if not ecl_by_scenario or not weights:
-        return None
-    common = [s for s in weights if s in ecl_by_scenario]
-    if not common:
-        return None
-    w = {s: float(weights[s] or 0) for s in common}
-    total_w = sum(w.values())
-    if total_w <= 0:
-        return None
-    norm = {s: v / total_w for s, v in w.items()}
-    return {"total": sum(ecl_by_scenario[s] * norm[s] for s in common),
-            "normalised_weights": norm,
-            "missing": [s for s in weights if s not in ecl_by_scenario]}
-
-
-def scenario_sensitivity(ecl_by_scenario: dict, weights: dict,
-                         shift: float = 0.10) -> pd.DataFrame:
-    """What moving weight ONTO each scenario does to the provision.
-
-    Each row takes ``shift`` of probability mass from the other scenarios --
-    pro rata, so their relative standing is unchanged -- and gives it to one.
-    That is the question a committee actually asks: if we thought the downturn
-    ten points more likely, what would we book?
-    """
-    base = scenario_reweight(ecl_by_scenario, weights)
-    if base is None:
-        return pd.DataFrame()
-    w = base["normalised_weights"]
-
-    rows = []
-    for s in w:
-        room = 1.0 - w[s]
-        if room <= 0:
-            continue
-        take = min(shift, room)
-        others = [o for o in w if o != s]
-        denom = sum(w[o] for o in others)
-        if denom <= 0:
-            continue
-        up = {o: w[o] * (1 - take / denom) for o in others}
-        up[s] = w[s] + take
-        moved = scenario_reweight(ecl_by_scenario, up)
-        if moved is None:
-            continue
-        rows.append({
-            "scenario": s,
-            "weight_before": w[s], "weight_after": up[s],
-            "ecl_scenario": float(ecl_by_scenario[s]),
-            "ecl_base": base["total"], "ecl_shifted": moved["total"],
-            "change": moved["total"] - base["total"],
-            "pct": 100 * (moved["total"] - base["total"])
-            / max(base["total"], 1.0),
-        })
-    if not rows:
-        return pd.DataFrame()
-    out = pd.DataFrame(rows)
-    out.attrs["base_total"] = base["total"]
-    out.attrs["shift"] = shift
-    return (out.reindex(out["change"].abs().sort_values(ascending=False).index)
-            .reset_index(drop=True))
 
 
 def scenario_stage_split(run) -> pd.DataFrame:

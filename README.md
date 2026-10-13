@@ -80,13 +80,16 @@ src/ifrs9qdb/
                   run_etl_phase2 pause for customer overrides between
     reconcile     compare a produced run against a reference, and
                   write out the rows that differ
-  analytics/      walk, staging, concentration, data quality, profiles;
+  analytics/      staging, concentration, data quality, profiles;
                   bridge.py: why the provision moved between two runs,
                   contract by contract -- exposure, stage, rating, macro
                   variables, model, LGD and collateral, overlay -- for the
                   book or any customers, facilities, account types,
                   segments, stages or ratings
-  stress.py       what-if, packages, reverse stress, roll-forward
+  stress.py       what-if, packages, reverse stress, roll-forward, macro
+                  path, scenario weights; every one prices with
+                  etl/report.py's compute_ecl, as the report and the
+                  bridge do
   validation/     148 run checks with the R engine's ids -- input,
                   transform, derived, pricing readiness (READY) and report
                   -- plus 15 pre-flight checks on the config and static

@@ -27,7 +27,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .engine import fallback_ead_curve, months_to_maturity
 from .ids import as_id
 
 __all__ = ["EngineInputs", "load_engine_inputs", "as_id"]
@@ -80,7 +79,15 @@ class RatingScale:
 
 @dataclass
 class EngineInputs:
-    """Everything needed to reprice a run's book."""
+    """A run, ready to reprice: its pricing context and contract facts --
+    what its own report was priced on (``etl.report.build_ecl_context`` and
+    ``ecl_frame``) -- with the rating scales a notch moves along and the
+    collateral tables behind the netted figure.
+
+    ``pd_curves``, ``ead_curves``, ``collateral_net`` and ``contracts`` are
+    views of that context and frame keyed the way the analytics look them up
+    (``portfolio|bucket``; the normalised contract id), not a second reading
+    of the run's files."""
     ok: bool
     out_dir: Path
     missing: list[str] = field(default_factory=list)
@@ -100,15 +107,28 @@ class EngineInputs:
     # ecl.ead_fallback (R's rules when absent), so a repricing uses the same
     # shapes as the run's own report.
     ead_rules: tuple | None = None
+    # what every repricing prices on: the run's own pricing context and its
+    # contract facts, one row per position (etl.report)
+    ctx: object = None
+    frame: pd.DataFrame | None = None
+    model_cfg: dict | None = None
 
     # -- lookups -------------------------------------------------------
     def scale_for(self, rating_type) -> RatingScale | None:
+        """The scale of a rating type: 1 / 2, or the report's "Internal" /
+        "External" ("External Rating")."""
         if not self.scales:
             return None
-        try:
-            rt = int(rating_type)
-        except (TypeError, ValueError):
-            rt = None
+        t = str(rating_type)
+        if t.startswith("External"):
+            rt = 2
+        elif t.startswith("Internal"):
+            rt = 1
+        else:
+            try:
+                rt = int(float(t))
+            except (TypeError, ValueError):
+                rt = None
         return self.scales.get(rt) or next(iter(self.scales.values()))
 
     def internal_portfolios(self) -> list[str]:
@@ -129,25 +149,22 @@ class EngineInputs:
         return self.pd_curves.get(f"{portfolio}|{int(bucket)}")
 
     def ead_curve(self, contract: str, stage: int, row=None) -> np.ndarray | None:
-        """The supplied curve, else the parametric fallback.
-
-        This is the one place an EAD curve should be looked up. Reading
-        ``ead_curves`` directly is what silently dropped a quarter of the book.
-        """
-        got = self.ead_curves.get(str(contract))
-        if got is not None and len(got):
-            return got[: min(12, len(got))] if stage == 1 else got
-        if row is None:
+        """The EAD curve the engine prices a contract on: its supplied
+        schedule, else the parametric fallback -- ``etl.report._ead_curve``,
+        on the run's own context. Reading ``ead_curves`` directly is what
+        silently dropped a quarter of the book."""
+        from .etl.report import _ead_curve
+        if self.ctx is None or self.frame is None:
             return None
-        curve = fallback_ead_curve(
-            row.get("on_balance"), int(row.get("months_to_mat") or 3),
-            row.get("payment_type"), row.get("payment_frequency"),
-            row.get("deferral"), portfolio=row.get("portfolio"),
-            nir=row.get("nir"),
-            rules=self.ead_rules[0] if self.ead_rules else None,
-            default=self.ead_rules[1] if self.ead_rules else None,
-        )
-        return curve[: min(12, len(curve))] if stage == 1 else curve
+        hit = self.frame[self.frame["contract"] == str(contract)]
+        if len(hit) == 0:
+            return None
+        r = hit.iloc[0]
+        curve, _, _ = _ead_curve(self.ctx, r["cid"], int(stage), r["on_balance"],
+                                 int(r["months"]), r["payment_type"],
+                                 r["portfolio"], r["nir"], r["deferral"],
+                                 r["pay_freq"])
+        return curve
 
 
 def load_engine_inputs(out_dir) -> EngineInputs:
@@ -159,8 +176,6 @@ def load_engine_inputs(out_dir) -> EngineInputs:
     stpd = _read(out_dir, "StPD.csv")
     ratings = _read(out_dir, "Ratings.csv")
     am1 = _read(out_dir, "AccountMaster_1.csv")
-    am2 = _read(out_dir, "AccountMaster_2.csv")
-    lp = _read(out_dir, "LifeTimeParameterOther.csv")
     prt = _read(out_dir, "PortfolioRatingType.csv")
     rtypes = _read(out_dir, "RatingTypes.csv")
     coll = _read(out_dir, "Collateral.csv")
@@ -192,9 +207,6 @@ def load_engine_inputs(out_dir) -> EngineInputs:
         scales[int(rt)] = RatingScale(int(rt), rname.get(int(rt), f"Type {rt}"),
                                       list(g["_r"]), [int(x) for x in g["_h"]])
 
-    hier = {(int(t), str(r)): int(h)
-            for t, r, h in zip(rdf["_rt"], rdf["_r"], rdf["_h"]) if pd.notna(h)}
-
     rt_of_pf: dict[str, int] = {}
     if prt is not None:
         pf = _col(prt, "PortfolioCode")
@@ -202,148 +214,60 @@ def load_engine_inputs(out_dir) -> EngineInputs:
         if pf is not None and tp is not None:
             rt_of_pf = {str(p): int(t) for p, t in zip(pf, tp) if pd.notna(t)}
 
-    # ---- PD curves, zero-prepended -----------------------------------
-    pd_curves: dict[str, np.ndarray] = {}
-    if stpd is not None:
-        pf = _col(stpd, "PortfolioCode")
-        bk = pd.to_numeric(_col(stpd, "PDBucketDim1"), errors="coerce")
-        mon = pd.to_numeric(_col(stpd, "MonthLifetime"), errors="coerce")
-        val = pd.to_numeric(_col(stpd, "PDLifetime"), errors="coerce")
-        if all(x is not None for x in (pf, bk, mon, val)):
-            t = pd.DataFrame({"pf": pf.astype(str), "bk": bk, "m": mon, "v": val}).dropna()
-            for (p, b), g in t.groupby(["pf", "bk"]):
-                g = g.sort_values("m")
-                pd_curves[f"{p}|{int(b)}"] = np.concatenate([[0.0], g["v"].to_numpy()])
+    # ---- what the run is priced on: its own context and contract facts --
+    # One reading of the run's files for every repricing (etl/report.py);
+    # what follows are views of it keyed as the analytics look them up.
+    from .etl.report import (_KEYSEP, _portfolio_map, build_ecl_context,
+                             ecl_frame, run_pricing_config)
+    static, model_cfg = run_pricing_config(out_dir.parent if out_dir.name == "Output"
+                                           else out_dir)
+    ctx = build_ecl_context(out_dir, model_cfg=model_cfg)
+    frame = ecl_frame(out_dir, _portfolio_map(static))
+    if frame is None:
+        return EngineInputs(ok=False, out_dir=out_dir,
+                            missing=["AccountMaster_1.csv"])
 
-    # ---- supplied EAD curves ----------------------------------------
-    ead_curves: dict[str, np.ndarray] = {}
-    if lp is not None:
-        cid = _col(lp, "ContractId")
-        mon = pd.to_numeric(_col(lp, "MonthLifetime"), errors="coerce")
-        val = pd.to_numeric(_col(lp, "EADLifetime"), errors="coerce")
-        if all(x is not None for x in (cid, mon, val)):
-            t = pd.DataFrame({"c": as_id(cid), "m": mon, "v": val}).dropna()
-            for c, g in t.groupby("c"):
-                ead_curves[c] = g.sort_values("m")["v"].to_numpy()
+    pd_curves = {k.replace(_KEYSEP, "|"): v for k, v in ctx.stpd.items()}
 
-    # ---- collateral net per contract --------------------------------
-    # The netting formula, joining allocation -> collateral -> type:
-    #
-    #     sum over allocations of
-    #         CollateralValue x AllocationPercentage x (1 - HaircutGeneral)
-    #
-    # Both factors matter and both were missing. An allocation is a SHARE of a
-    # collateral record, commonly a fifth of it, and most collateral types at
-    # QDB carry HaircutGeneral = 1.00 -- corporate cheques, comfort
-    # assignments, corporate guarantees are worth nothing for provisioning.
-    # Summing raw CollateralValue therefore credited contracts with collateral
-    # they do not have, drove their LGD to the 0.225 floor, and understated
-    # the Stage 2 provision by 9.7% on Business Finance.
+    def by_id(d: dict) -> dict:
+        if not d:
+            return {}
+        ids = as_id(pd.Series(list(d.keys()), dtype=object))
+        return {k2: d[k1] for k1, k2 in zip(d.keys(), ids)}
+
+    ead_curves = by_id(ctx.schedules)
+    collateral_net = by_id(ctx.collnet)
     ctype = _read(out_dir, "CollateralType.csv")
-    collateral_net: dict[str, float] = {}
-    if alloc is not None and coll is not None:
-        haircut = {}
-        if ctype is not None:
-            tid = _col(ctype, "CollateralTypeId")
-            hc = pd.to_numeric(_col(ctype, "HaircutGeneral"), errors="coerce")
-            if tid is not None and hc is not None:
-                haircut = {str(a): float(b) for a, b in zip(tid.astype(str), hc)
-                           if pd.notna(b)}
 
-        cv = _col(coll, "CollateralValue")
-        if cv is None:
-            cv = _col(coll, "Value")
-        cid = _col(coll, "CollateralId")
-        ctid = _col(coll, "CollateralTypeId")
-        net_value: dict[str, float] = {}
-        if cid is not None and cv is not None:
-            types = (ctid.astype(str) if ctid is not None
-                     else pd.Series([""] * len(coll)))
-            for k, v, t in zip(as_id(cid),
-                               pd.to_numeric(cv, errors="coerce"), types):
-                if pd.isna(v):
-                    continue
-                # An UNMAPPED type takes a FULL haircut, so it contributes
-                # nothing. This matches R, where `1 - NA` is NA and the row is
-                # then zeroed (R/ecl_collateral.R:66-67), and it matches the
-                # table: 23 of 26 mapped types carry haircut_general = 1.00 and
-                # exactly one carries 0.00. Defaulting to 0.0, as this line
-                # used to, treated an unknown type as the single most generous
-                # category in the book. Neither default is really right --
-                # Excel's VLOOKUP returns #N/A and forces the mapping to be
-                # fixed -- so CONFIG_collateral_type_coverage firing is the
-                # signal that matters, not the value chosen here.
-                net_value[k] = float(v) * (1.0 - haircut.get(t, 1.0))
-
-        acid = _col(alloc, "ContractId")
-        acol = _col(alloc, "CollateralId")
-        apct = pd.to_numeric(_col(alloc, "AllocationPercentage"), errors="coerce")
-        if acid is not None and acol is not None:
-            if apct is None:
-                apct = pd.Series([1.0] * len(alloc))
-            for c, k, p in zip(as_id(acid), as_id(acol), apct.fillna(0.0)):
-                if k in net_value:
-                    collateral_net[c] = (collateral_net.get(c, 0.0)
-                                         + net_value[k] * float(p))
-
-    # ---- contracts, lending and investments -------------------------
-    def contracts_from(df):
-        if df is None:
-            return None
-        mat = pd.to_datetime(_col(df, "MaturityDate"), errors="coerce", format="mixed")
-        ext = pd.to_datetime(_col(df, "ExtractDate"), errors="coerce", format="mixed")
-        out = pd.DataFrame({
-            "contract": as_id(_col(df, "ContractId")),
-            "portfolio": _col(df, "PortfolioCode").astype(str),
-            "rating": _col(df, "Rating").astype(str),
-            "on_balance": pd.to_numeric(_col(df, "OnBalance"), errors="coerce"),
-            "eir": pd.to_numeric(_col(df, "EIR"), errors="coerce"),
-            "payment_type": _col(df, "PaymentTypeId"),
-            "payment_frequency": pd.to_numeric(_col(df, "PaymentFrequency"),
-                                               errors="coerce").fillna(1),
-            "deferral": pd.to_numeric(_col(df, "DeferralPeriod"),
-                                      errors="coerce").fillna(0),
-            # R's report reads NominalInterestRate as given; only an annuity
-            # rule uses it
-            "nir": pd.to_numeric(_col(df, "NominalInterestRate"), errors="coerce"),
-        })
-        out["maturity_date"] = mat
-        out["extract_date"] = ext
-        out["months_to_mat"] = [months_to_maturity(m, e) for m, e in zip(mat, ext)]
-        return out
-
-    parts = [c for c in (contracts_from(am1), contracts_from(am2)) if c is not None]
-    contracts = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
-    if len(contracts):
-        contracts["rating_type"] = contracts["portfolio"].map(rt_of_pf).fillna(1).astype(int)
-        contracts["bucket"] = [
-            hier.get((int(t), str(r))) for t, r in
-            zip(contracts["rating_type"], contracts["rating"])
-        ]
-        contracts["pd_key"] = [
-            f"{p}|{int(b)}" if pd.notna(b) else None
-            for p, b in zip(contracts["portfolio"], contracts["bucket"])
-        ]
-        contracts["collateral_net"] = contracts["contract"].map(collateral_net).fillna(0.0)
+    rt_code = frame["rating_type"].map(
+        lambda t: 2 if str(t).startswith("External") else 1).astype(int)
+    contracts = pd.DataFrame({
+        "contract": frame["contract"].astype(str),
+        "portfolio": frame["portfolio"].astype(str),
+        "rating": frame["rating"].astype(str),
+        "on_balance": pd.to_numeric(frame["on_balance"], errors="coerce"),
+        "eir": pd.to_numeric(frame["eir"], errors="coerce"),
+        "payment_type": frame["payment_type"],
+        "payment_frequency": frame["pay_freq"],
+        "deferral": frame["deferral"],
+        "nir": frame["nir"],
+        "maturity_date": frame["d_maturity"],
+        "extract_date": frame["d_extract"],
+        "months_to_mat": frame["months"],
+        "rating_type": rt_code,
+    })
+    contracts["bucket"] = [
+        (lambda b: int(b) if b is not None and str(b) not in ("", "nan", "None") else None)(
+            ctx.rat2bucket.get(f"{t}{_KEYSEP}{r}"))
+        for t, r in zip(contracts["rating_type"], contracts["rating"])]
+    contracts["pd_key"] = [f"{p}|{b}" if b is not None else None
+                           for p, b in zip(contracts["portfolio"], contracts["bucket"])]
+    contracts["collateral_net"] = contracts["contract"].map(collateral_net).fillna(0.0)
 
     return EngineInputs(
         ok=True, out_dir=out_dir, contracts=contracts, pd_curves=pd_curves,
         ead_curves=ead_curves, collateral_net=collateral_net, scales=scales,
         rating_type_of_portfolio=rt_of_pf,
         collateral=coll, alloc=alloc, coll_type=ctype,
-        ead_rules=_run_ead_rules(out_dir),
+        ead_rules=ctx.rules, ctx=ctx, frame=frame, model_cfg=model_cfg,
     )
-
-
-def _run_ead_rules(out_dir: Path):
-    """(rules, default) from the model.yml the run froze, or None."""
-    from .engine import ead_fallback_rules
-    for cand in (out_dir.parent / "config_used" / "config" / "model.yml",
-                 out_dir.parent / "config_used" / "model.yml"):
-        if cand.is_file():
-            try:
-                import yaml
-                return ead_fallback_rules(yaml.safe_load(cand.read_text()) or {})
-            except Exception:
-                return None
-    return None

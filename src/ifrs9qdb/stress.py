@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from .analytics.profile import classify_stage, customer_view
-from .engine import EclConfig, compute_lgd, sum_marginal_ecl
+from .engine import EclConfig
 from .inputs import EngineInputs
 
 __all__ = [
@@ -38,6 +38,8 @@ __all__ = [
     "conditional_pd", "staging_threshold", "staging_threshold_sweep",
     "advance_curves", "reprofile_curves", "customer_rows",
     "mev_stress", "MEV_WEIGHT_MODES", "stpd_to_curves",
+    "run_scenario_weights", "scenario_weights_stress",
+    "scenario_weights_sensitivity",
     "match_rules", "reprice_rules", "filter_rating_type",
     "order_by_rating", "scenario_ecl_single_run",
 ]
@@ -149,30 +151,74 @@ class Rule:
 
 
 # --------------------------------------------------------------- repricing --
-def _ingredients(inputs: EngineInputs, report: pd.DataFrame) -> pd.DataFrame:
-    """Join the report to the engine inputs on contract id.
+# Every repricing here -- a stress package, a what-if, a roll-forward, a macro
+# path, a scenario -- prices on the run's own pricing context and contract
+# facts with etl.report.compute_ecl(), the function that priced the run's
+# report. A lever changes compute_ecl()'s inputs or its context, never the
+# answer, so the EAD waterfall, the LGD formula, the staging horizons, the
+# discounting, the Stage 3 method and the exposure cap all still apply, and
+# an unchanged repricing IS the run's report. As the R engine.
 
-    Only columns the inputs do NOT supply are taken from the report: carrying
-    a duplicate (rating_type, say) makes the join produce suffixed columns and
-    the lookups silently return nothing.
+_REPORT_COLS = ("contract", "customer", "stage", "exposure", "ecl", "collcov",
+                "dpd", "watchlist", "restructured", "local2", "local3",
+                "local4", "local5", "local6", "default_flag", "insolvency")
+
+
+def add_months(dates, k) -> pd.Series:
+    """Calendar months added to each date, the day clamped to the month's
+    last -- the 31st plus one month is the 30th or the 28th. As R's
+    add_months(), so a maturity or extract date moves the same way in both."""
+    d = pd.to_datetime(pd.Series(dates), errors="coerce")
+    k = np.broadcast_to(np.asarray(k, dtype=float), (len(d),))
+    out = []
+    for v, m in zip(d, k):
+        if pd.isna(v) or not np.isfinite(m) or m == 0:
+            out.append(v)
+            continue
+        t = v.year * 12 + (v.month - 1) + int(round(m))
+        y, mo = divmod(t, 12)
+        last = pd.Timestamp(year=y, month=mo + 1, day=1).days_in_month
+        out.append(v.replace(year=y, month=mo + 1, day=min(v.day, last)))
+    return pd.Series(out, index=pd.Series(dates).index if hasattr(dates, "index") else None)
+
+
+def _ingredients(inputs: EngineInputs, report: pd.DataFrame) -> pd.DataFrame:
+    """The report's contracts with the facts the run priced them on.
+
+    One row per report row, in the report's order: the report's own stage,
+    customer, exposure and staging flags (what the run booked), joined to
+    the pipeline's contract facts (``etl.report.ecl_frame``) position by
+    position -- a contract id is not unique (an investment held in two
+    positions), so the n-th row of a contract in the report is the n-th in
+    the frame. Joining on the id alone squares a repeated one: two rows
+    against two is four, and the security is priced twice.
     """
-    cols = [c for c in ("contract", "customer", "stage", "exposure", "ecl",
-                        "collcov", "dpd", "watchlist", "restructured", "local2",
-                        "local3", "local4", "local5", "local6", "default_flag",
-                        "insolvency") if c in report.columns]
-    # The account master is de-duplicated before the join. A contract id is not
-    # unique in a LIC book -- an investment security held in two positions
-    # appears in AccountMaster twice, and in the report twice -- and a plain
-    # merge squares that: two report rows against two master rows is FOUR, so
-    # the security was priced twice and every repriced total carried it twice.
-    # De-duplicating the right side keeps one row per report row, which is what
-    # a repricing is. The second position then prices on the first's balance;
-    # that is a known limitation, and the alternative would be to pair them by
-    # an order the files do not guarantee.
-    facts = inputs.contracts
-    if len(facts) and facts["contract"].duplicated().any():
-        facts = facts.drop_duplicates("contract", keep="first")
-    return report[cols].merge(facts, on="contract", how="left")
+    rep = report.reset_index(drop=True)
+    cid = rep["contract"].astype(str)
+    key = cid + "#" + cid.groupby(cid).cumcount().astype(str)
+    left = rep[[c for c in _REPORT_COLS if c in rep.columns]].copy()
+    left["key"] = key.to_numpy()
+    facts = inputs.frame.drop(columns=[c for c in ("contract", "customer", "stage",
+                                                   "dpd") if c in inputs.frame.columns])
+    facts = facts.drop_duplicates("key")
+    m = left.merge(facts, on="key", how="left")
+    m.index = rep.index
+    m["payment_frequency"] = m["pay_freq"]
+    m["months_to_mat"] = m["months"]
+    m["on_balance"] = pd.to_numeric(m["on_balance"], errors="coerce")
+    m["collateral_net"] = [inputs.ctx.collnet.get(c, 0.0) if isinstance(c, str) else 0.0
+                           for c in m["cid"]]
+    return m
+
+
+def _ctx_curves(curves) -> dict:
+    """PD curves in the context's form, from an StPD table or a
+    ``portfolio|bucket`` dict."""
+    from .etl.report import _KEYSEP, EclContext
+    if isinstance(curves, pd.DataFrame):
+        return EclContext._stpd(curves)
+    return {(k.replace("|", _KEYSEP, 1) if _KEYSEP not in k else k):
+            np.asarray(v, dtype=float) for k, v in curves.items()}
 
 
 def reprice(
@@ -184,82 +230,95 @@ def reprice(
     on_balance: pd.Series | None = None,
     collateral_net: pd.Series | None = None,
     maturity_shift_months: pd.Series | None = None,
-    pd_curves: dict[str, np.ndarray] | None = None,
+    pd_curves=None,
     pd_multiplier: float = 1.0,
-    advance_months: int = 0,
     cfg: EclConfig | None = None,
 ) -> pd.DataFrame:
-    """Price every contract, with any input substituted.
+    """Price every contract with ``etl.report.compute_ecl``, with any input
+    substituted -- one value per report row for each:
 
-    Returns one row per contract with the ECL and the LGD the engine used, so a
-    caller can show what changed rather than only the total.
+        stage, rating          the contract facts
+        on_balance             the balance, and a supplied EAD schedule
+                               scaled with it (exposure)
+        collateral_net         the context's net collateral, so LGD moves
+                               through compute_lgd()
+        maturity_shift_months  the maturity date, and a supplied schedule
+                               re-profiled onto the new term
+        pd_curves              another set of PD curves (an StPD table or a
+                               ``portfolio|bucket`` dict): a scenario's, a
+                               rebuilt chain's
+        pd_multiplier          every PD curve scaled, capped at 1
+        cfg                    LGD base and unsecured floor
+
+    The run's own Stage 3 method, exposure cap and EAD fallback rules come
+    with its context. Returns one row per report row with the ECL and the
+    LGD the engine used.
     """
-    cfg = cfg or EclConfig()
+    from .etl.report import compute_ecl
     ing = _ingredients(inputs, report)
     n = len(ing)
-    curves = pd_curves if pd_curves is not None else inputs.pd_curves
+    ctx = inputs.ctx
+    frame = ing.copy()
+    cid = frame["cid"]
 
-    def col(override, name, default=None):
-        if override is not None:
-            return pd.Series(list(override), index=ing.index)
-        if name in ing.columns:
-            return ing[name]
-        return pd.Series([default] * n, index=ing.index)
+    def vec(v):
+        return pd.Series(list(v), index=frame.index)
 
-    st = col(stage, "stage").fillna(2).astype(int)
-    rt = col(rating, "rating")
-    onb = col(on_balance, "on_balance")
-    cnet = col(collateral_net, "collateral_net", 0.0).fillna(0.0)
-    shift = (pd.Series(list(maturity_shift_months), index=ing.index)
-             if maturity_shift_months is not None else pd.Series(0.0, index=ing.index))
+    if stage is not None:
+        frame["stage"] = vec(stage)
+    frame["stage"] = pd.to_numeric(frame["stage"], errors="coerce").fillna(2).astype(int)
+    if rating is not None:
+        frame["rating"] = vec(rating).astype(str)
+    changes = {}
+    if on_balance is not None:
+        new = pd.to_numeric(vec(on_balance), errors="coerce")
+        old = frame["on_balance"]
+        f = new / old
+        moved = old.notna() & (old != 0) & new.notna() & (new != old) & cid.notna()
+        if moved.any():
+            sch = dict(ctx.schedules)
+            for c, k in zip(cid[moved], f[moved]):
+                if c in sch:
+                    sch[c] = np.asarray(sch[c], dtype=float) * float(k)
+            changes["schedules"] = sch
+        frame["on_balance"] = new
+    if collateral_net is not None:
+        cn = dict(ctx.collnet)
+        for c, v in zip(cid, pd.to_numeric(vec(collateral_net), errors="coerce").fillna(0.0)):
+            if isinstance(c, str):
+                cn[c] = float(v)
+        changes["collnet"] = cn
+    if maturity_shift_months is not None:
+        sh = pd.to_numeric(vec(maturity_shift_months), errors="coerce").fillna(0.0).round()
+        if (sh != 0).any():
+            frame["d_maturity"] = add_months(frame["d_maturity"], sh)
+            sch = changes.get("schedules", dict(ctx.schedules))
+            for k in sorted(set(sh[sh != 0])):
+                sch = reprofile_curves(sch, [c for c in cid[sh == k] if isinstance(c, str)], k)
+            changes["schedules"] = sch
+    if pd_curves is not None:
+        changes["stpd"] = _ctx_curves(pd_curves)
+    if pd_multiplier != 1.0:
+        changes["stpd"] = {k: np.clip(np.asarray(v, float) * pd_multiplier, 0, 1)
+                           for k, v in changes.get("stpd", ctx.stpd).items()}
+    if cfg is not None:
+        changes["lgd_base"] = cfg.lgd_base
+        changes["lgd_floor"] = cfg.lgd_unsecured_floor
+    if changes:
+        ctx = ctx.copy(**changes)
 
     ecl = np.full(n, np.nan)
     lgd = np.full(n, np.nan)
-    for i in range(n):
-        row = ing.iloc[i]
-        contract = row["contract"]
-        s = int(st.iloc[i])
-        bal = onb.iloc[i]
-
-        l = compute_lgd(bal, cnet.iloc[i], base=cfg.lgd_base,
-                        unsecured_floor=cfg.lgd_unsecured_floor,
-                        zero_exposure_lgd=cfg.zero_exposure_lgd)
-        lgd[i] = l
-
-        if s == 3:
-            ecl[i] = 0.0 if cfg.stage3_method == "zero" else (
-                0.0 if not (bal and bal > 0) else float(bal))
-            continue
-
-        scale = inputs.scale_for(row.get("rating_type"))
-        bucket = scale.bucket(str(rt.iloc[i])) if scale else None
-        cum = curves.get(f"{row['portfolio']}|{bucket}") if bucket is not None else None
-        if cum is None:
-            continue
-        if pd_multiplier != 1.0:
-            cum = np.clip(np.asarray(cum, float) * pd_multiplier, 0, 1)
-        if advance_months:
-            cum = conditional_pd(cum, advance_months)
-
-        curve = inputs.ead_curve(contract, s, row)
-        if curve is None or len(curve) == 0:
-            continue
-        if shift.iloc[i]:
-            curve = stretch_curve(curve, max(1, len(curve) + int(round(shift.iloc[i]))))
-        if advance_months:
-            curve = advance_curve(curve, advance_months)
-        if bal is not None and row.get("on_balance") and row["on_balance"] != 0:
-            curve = curve * (bal / row["on_balance"])
-
-        v = sum_marginal_ecl(curve, l, cum, row.get("eir") or 0.0, horizon=len(curve))
-        if np.isfinite(v) and cfg.cap_ecl_at_exposure and bal and bal > 0:
-            v = min(v, float(bal))
-        ecl[i] = v
+    have = cid.notna().to_numpy()
+    if have.any():
+        res = compute_ecl(ctx, frame[have])
+        ecl[have] = res["ecl"].to_numpy()
+        lgd[have] = res["lgd"].to_numpy()
 
     out = ing[["contract", "customer", "portfolio", "rating", "stage",
                "exposure"]].copy()
-    out["stage_after"] = st.to_numpy()
-    out["rating_after"] = rt.to_numpy()
+    out["stage_after"] = frame["stage"].to_numpy()
+    out["rating_after"] = frame["rating"].to_numpy()
     out["ecl"] = ecl
     out["lgd"] = lgd
     return out
@@ -278,8 +337,7 @@ def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
     scoped = (ing["portfolio"].isin(spec.portfolios) if spec.portfolios
               else pd.Series(True, index=ing.index))
 
-    base_cfg = cfg or EclConfig()
-    before = reprice(inputs, report, cfg=base_cfg)
+    before = reprice(inputs, report, cfg=cfg)
 
     # staging policy
     local_any = pd.Series(False, index=ing.index)
@@ -331,9 +389,7 @@ def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
         inputs, report, stage=stage, rating=rating, on_balance=on_balance,
         collateral_net=cnet, maturity_shift_months=shift,
         pd_multiplier=spec.pd_multiplier,
-        cfg=EclConfig(stage3_method=base_cfg.stage3_method,
-                      cap_ecl_at_exposure=base_cfg.cap_ecl_at_exposure,
-                      lgd_base=spec.lgd_base, lgd_unsecured_floor=spec.lgd_floor),
+        cfg=EclConfig(lgd_base=spec.lgd_base, lgd_unsecured_floor=spec.lgd_floor),
     )
 
     ok = before["ecl"].notna() & after["ecl"].notna()
@@ -488,44 +544,72 @@ def roll_forward(inputs, report, months: int = 12,
                  portfolios: list[str] | None = None) -> dict:
     """The provision in ``months`` months if nothing else changes.
 
-    Three things move together and all three are needed: the balance advances
-    along its own curve, the PD becomes conditional on surviving those months,
-    and contracts maturing inside the window run off. Omitting either of the
-    first two misstates the answer badly -- on a worked example, by -55% and
-    +280% respectively.
+    The book in scope is moved forward ``k`` months and priced with
+    ``etl.report.compute_ecl`` on the run's own context, as R's
+    roll_forward():
+
+      EAD    a contract's balance is what its own EAD path reaches at month
+             k -- its supplied schedule, or its fallback over its full term,
+             never the twelve months a Stage 1 provision looks at -- and a
+             supplied schedule is advanced (elapsed months dropped);
+      PD     conditional on surviving those months, not the original curve,
+             which would charge for a default known not to have happened;
+      term   the extract date moves k months, so a fallback curve is rebuilt
+             over what remains, and any deferral shortens by k; a contract
+             whose path ends inside the window has run off.
+
+    Staging, ratings and collateral are held. Contracts out of scope keep
+    their provision.
     """
+    from .etl.report import compute_ecl, ead_path
     if not inputs.ok:
         return {"ok": False, "reason": f"Engine inputs missing: {', '.join(inputs.missing)}"}
+    k = int(round(months))
+    if k <= 0:
+        return {"ok": False, "reason": "Roll forward by at least one month."}
     before = reprice(inputs, report)
     ing = _ingredients(inputs, report)
+    ctx = inputs.ctx
     scoped = (ing["portfolio"].isin(portfolios) if portfolios
-              else pd.Series(True, index=ing.index))
+              else pd.Series(True, index=ing.index)) & ing["cid"].notna()
 
-    on_balance = ing["on_balance"].to_numpy().copy()
+    on_balance = ing["on_balance"].to_numpy(dtype=float).copy()
     matured = np.zeros(len(ing), dtype=bool)
     for i in np.where(scoped.to_numpy())[0]:
-        row = ing.iloc[i]
-        curve = inputs.ead_curve(row["contract"], int(row.get("stage") or 2), row)
-        if curve is None or months >= len(curve):
+        path = ead_path(ctx, ing.iloc[i])
+        if path is None or k >= len(path):
             matured[i] = True
             on_balance[i] = 0.0
         else:
-            on_balance[i] = curve[months]
+            on_balance[i] = float(path[k])
 
-    after = reprice(inputs, report, on_balance=on_balance, advance_months=months)
-    a = after["ecl"].to_numpy().copy()
+    live = scoped.to_numpy() & ~matured
+    a = before["ecl"].to_numpy(dtype=float).copy()
     a[matured] = 0.0
+    if live.any():
+        frame = ing[live].copy()
+        frame["stage"] = pd.to_numeric(frame["stage"], errors="coerce").fillna(2).astype(int)
+        frame["on_balance"] = on_balance[live]
+        frame["d_extract"] = add_months(frame["d_extract"], k)
+        frame["deferral"] = (pd.to_numeric(frame["deferral"], errors="coerce")
+                             .fillna(0) - k).clip(lower=0)
+        adv = ctx.copy(
+            schedules=advance_curves(ctx.schedules, list(frame["cid"]), k),
+            stpd={key: conditional_pd(v, k) for key, v in ctx.stpd.items()})
+        a[live] = compute_ecl(adv, frame)["ecl"].to_numpy()
 
-    ok = before["ecl"].notna() & pd.Series(a).notna()
+    b = before["ecl"].to_numpy(dtype=float)
+    ok = np.isfinite(b) & np.isfinite(a)
     return {
-        "ok": True, "months": months,
-        "before": float(before.loc[ok, "ecl"].sum()),
-        "after": float(pd.Series(a)[ok].sum()),
-        "delta": float(pd.Series(a)[ok].sum() - before.loc[ok, "ecl"].sum()),
+        "ok": True, "months": k,
+        "before": float(b[ok].sum()),
+        "after": float(a[ok].sum()),
+        "delta": float(a[ok].sum() - b[ok].sum()),
         "matured": int(matured.sum()),
-        "matured_exposure": float(ing.loc[matured, "exposure"].sum()),
-        "exposure_before": float(ing.loc[ok, "exposure"].sum()),
-        "exposure_after": float(pd.Series(on_balance)[ok].sum()),
+        "matured_exposure": float(np.nansum(
+            ing["on_balance"].to_numpy(dtype=float)[matured])),
+        "exposure_before": float(ing["on_balance"].to_numpy()[ok].sum()),
+        "exposure_after": float(on_balance[ok].sum()),
     }
 
 
@@ -750,7 +834,8 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
                shock: dict | None = None,
                weight_mode: str = "auto",
                weights: dict | None = None,
-               cfg: EclConfig | None = None) -> dict:
+               cfg: EclConfig | None = None,
+               external_weights: dict | None = None) -> dict:
     """Reprice the book on a different macroeconomic path.
 
     The whole PD chain is rebuilt from the run's OWN frozen config with the
@@ -770,7 +855,10 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
         auto    leave the config alone; the weights follow the new path
         hold    pin the internal weights to what the unedited config gives,
                 isolating the PD effect
-        custom  use the weights supplied
+        custom  use the weights supplied: ``weights`` for the internal
+                scale, normalised; the external scale keeps its own (set per
+                year from GCC growth, which this screen does not edit)
+                unless ``external_weights`` are given too
 
     ``before`` is the run rebuilt from its own config with no edit, so the
     change is the edit's alone. For a run priced by this version of the
@@ -854,10 +942,36 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
             **(raw.get("internal_scenario_weights") or {}),
             "mode": "explicit", "explicit_weights": held}
     elif weight_mode == "custom" and weights:
-        for node in ("internal_scenario_weights", "external_scenario_weights"):
-            raw.setdefault(node, {})
-            raw[node]["mode"] = "explicit"
-            raw[node]["explicit_weights"] = {k: float(v) for k, v in weights.items()}
+        names = list(base_internal or weights)
+        for node, given in (("internal_scenario_weights", weights),
+                            ("external_scenario_weights", external_weights)):
+            if not given:
+                continue
+            try:
+                w = {k: float(v) for k, v in given.items()}
+            except (TypeError, ValueError):
+                w = {}
+            unknown = [k for k in w if k not in names]
+            if unknown:
+                return {"ok": False, "reason": "Not a scenario of this run: "
+                                               f"{', '.join(unknown)}."}
+            miss = [k for k in names if k not in w]
+            if miss:
+                return {"ok": False,
+                        "reason": f"Custom weights are missing: {', '.join(miss)}."}
+            tot = sum(w.values())
+            if not np.isfinite(tot) or tot <= 0 or \
+                    any(not np.isfinite(v) or v < 0 for v in w.values()):
+                return {"ok": False, "reason": "Custom weights must be numbers "
+                                               "of zero or more that sum to "
+                                               "more than zero."}
+            raw[node] = {**(raw.get(node) or {}), "mode": "explicit",
+                         "explicit_weights": {k: w[k] / tot for k in names}}
+    try:                               # what the rebuilt chain weights by
+        used_internal = {k: float(v) for k, v in
+                         resolve_internal_scenario_weights(raw, static).items()}
+    except Exception:
+        used_internal = None
 
     extract = str(report["extract_date"].dropna().iloc[0]) \
         if "extract_date" in report.columns and report["extract_date"].notna().any() \
@@ -868,11 +982,10 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
                                           model_id=run_model_id(run_path))
     except Exception as exc:
         return {"ok": False, "reason": f"Rebuilding the PD chain failed: {exc}"}
-    curves = stpd_to_curves(stpd_new)
+    curves = _ctx_curves(stpd_new)
     if not curves:
         return {"ok": False, "reason": "The rebuilt StPD had no usable curves."}
 
-    base_cfg = cfg or EclConfig()
     # The baseline: the run rebuilt on THIS engine with no edit. When that is
     # not the run's own curves (it was priced by another version of the
     # calculation), the stress is measured from the rebuild and the gap to the
@@ -881,15 +994,15 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
     try:
         stpd_base = build_stpd_from_static(static, model, raw0, extract,
                                            model_id=run_model_id(run_path))
-        bc = stpd_to_curves(stpd_base)
-        if bc and not _same_pd_curves(bc, inputs.pd_curves):
+        bc = _ctx_curves(stpd_base)
+        if bc and not _same_pd_curves(bc, inputs.ctx.stpd):
             base_curves = bc
     except Exception:
         base_curves = None
-    own = reprice(inputs, report, cfg=base_cfg)
+    own = reprice(inputs, report, cfg=cfg)
     before = own if base_curves is None else \
-        reprice(inputs, report, pd_curves=base_curves, cfg=base_cfg)
-    after = reprice(inputs, report, pd_curves=curves, cfg=base_cfg)
+        reprice(inputs, report, pd_curves=base_curves, cfg=cfg)
+    after = reprice(inputs, report, pd_curves=curves, cfg=cfg)
 
     d = before[["contract", "customer", "portfolio", "rating", "stage",
                 "exposure"]].copy()
@@ -935,6 +1048,7 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
         "priced": int(ok.sum()),
         "weight_mode": weight_mode,
         "weights_base": base_internal,
+        "weights_used": used_internal,
         "by_portfolio": by_pf.reindex(
             by_pf["change"].abs().sort_values(ascending=False).index
         ).reset_index(drop=True),
@@ -942,6 +1056,115 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
         "path": path,
         "stpd": stpd_new,
     }
+
+
+# ------------------------------------------------------- scenario weights --
+def run_scenario_weights(run_path) -> dict:
+    """The scenario weights a run is priced with, as this engine resolves
+    them from its frozen config (``etl.macro.resolve_scenario_weights``):
+    ``internal``, and ``external`` averaged over the forecast years it is set
+    for, one vector a year from GCC growth.
+
+    Not the config's ``explicit_weights``: on an ``auto`` mode those are a
+    rounded snapshot, and in a config written before 0.29 the earlier
+    method's.
+    """
+    import yaml
+
+    from .analytics.model_view import config_used
+    from .etl.macro import resolve_scenario_weights
+    from .etl.static_ref import load_static_reference
+    cu = config_used(run_path)
+    if cu is None:
+        return {"ok": False,
+                "reason": "This run has no frozen config (config_used)."}
+    try:
+        static = load_static_reference(cu["static"])
+        model = yaml.safe_load((cu["config"] / "model.yml").read_text(encoding="utf-8"))
+        raw = yaml.safe_load((cu["config"] / "model_inputs.yml")
+                             .read_text(encoding="utf-8"))
+        internal, external = resolve_scenario_weights(static, model, raw)
+    except Exception as exc:
+        return {"ok": False,
+                "reason": f"The run's scenario weights could not be resolved: {exc}"}
+    names = list(static["scenario_severity"]["scenario"])
+    ext = external["average"]
+    return {"ok": True,
+            "internal": {k: float(internal[k]) for k in names if k in internal},
+            "external": {k: float(ext[k]) for k in names if k in ext.index}}
+
+
+def scenario_weights_stress(inputs, report, run_path, weights: dict,
+                            cfg: EclConfig | None = None) -> dict:
+    """The book repriced on different internal scenario weights.
+
+    Not a weighted sum of the five scenario provisions: the PD chain is
+    rebuilt from the run's frozen config with these weights, exactly as a run
+    would build it, and the book priced with ``compute_ecl`` -- ``mev_stress``
+    with the macro path unedited. Measured from the run rebuilt on this
+    engine, so at the run's own weights the change is nil. The external scale
+    keeps its own weights.
+    """
+    return mev_stress(inputs, report, run_path, weight_mode="custom",
+                      weights=weights, cfg=cfg)
+
+
+def scenario_weights_sensitivity(inputs, report, run_path,
+                                 weights: dict | None = None,
+                                 shift: float = 0.10,
+                                 cfg: EclConfig | None = None) -> pd.DataFrame:
+    """What moving ``shift`` of probability ONTO each scenario does.
+
+    Each row takes it from the other scenarios -- pro rata, so their relative
+    standing is unchanged -- gives it to one, and reprices the book on the
+    result (``scenario_weights_stress``). From ``weights``, else the run's
+    own. That is the question a committee asks: if we thought the downturn
+    ten points more likely, what would we book?
+    """
+    if weights is None:
+        rw = run_scenario_weights(run_path)
+        if not rw.get("ok"):
+            return pd.DataFrame()
+        weights = rw["internal"]
+    w = {k: float(v) for k, v in weights.items()}
+    tot = sum(w.values())
+    if not w or tot <= 0:
+        return pd.DataFrame()
+    w = {k: v / tot for k, v in w.items()}
+    base = scenario_weights_stress(inputs, report, run_path, w, cfg=cfg)
+    if not base.get("ok"):
+        return pd.DataFrame()
+    from .analytics.scenarios import scenario_ecl_from_outputs
+    own = scenario_ecl_from_outputs(run_path)
+    own = own.get("ecl", {}) if own.get("ok") else {}
+
+    rows = []
+    for s in w:
+        room = 1.0 - w[s]
+        others = [o for o in w if o != s]
+        denom = sum(w[o] for o in others)
+        if room <= 0 or denom <= 0:
+            continue
+        take = min(shift, room)
+        up = {o: w[o] * (1 - take / denom) for o in others}
+        up[s] = w[s] + take
+        r = scenario_weights_stress(inputs, report, run_path, up, cfg=cfg)
+        if not r.get("ok"):
+            continue
+        rows.append({
+            "scenario": s, "weight_before": w[s], "weight_after": up[s],
+            "ecl_scenario": own.get(s, float("nan")),
+            "ecl_base": base["after"], "ecl_shifted": r["after"],
+            "change": r["after"] - base["after"],
+            "pct": 100 * (r["after"] - base["after"]) / max(base["after"], 1.0),
+        })
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    out.attrs["base_total"] = base["after"]
+    out.attrs["shift"] = shift
+    return (out.reindex(out["change"].abs().sort_values(ascending=False).index)
+            .reset_index(drop=True))
 
 
 # ------------------------------------------------------------- what-if -----
@@ -1007,7 +1230,6 @@ def reprice_rules(inputs: EngineInputs, report: pd.DataFrame, rules,
     if report is None or len(report) == 0 or not rules:
         return {"ok": False, "reason": "Nothing to reprice."}
 
-    base_cfg = cfg or EclConfig()
     ing = _ingredients(inputs, report)
     if len(ing) == 0:
         return {"ok": False,
@@ -1023,7 +1245,7 @@ def reprice_rules(inputs: EngineInputs, report: pd.DataFrame, rules,
         return {"ok": False, "reason": "No contract matched any rule.",
                 "conflicts": matched["conflicts"]}
 
-    before = reprice(inputs, report, cfg=base_cfg)
+    before = reprice(inputs, report, cfg=cfg)
 
     # The levers, built per contract from whichever rule claimed it.
     stage = ing["stage"].fillna(2).astype(int).to_numpy().copy()
@@ -1061,7 +1283,7 @@ def reprice_rules(inputs: EngineInputs, report: pd.DataFrame, rules,
                        on_balance=pd.Series(onbal),
                        collateral_net=pd.Series(cnet),
                        maturity_shift_months=pd.Series(shift),
-                       pd_curves=curves, cfg=base_cfg)
+                       pd_curves=curves, cfg=cfg)
 
     after = price()
     # Contracts on a scenario's curves get their own pass, stitched back in.
@@ -1193,7 +1415,6 @@ def scenario_ecl_single_run(inputs: EngineInputs, report: pd.DataFrame,
     extract = str(report["extract_date"].dropna().iloc[0]) \
         if "extract_date" in report.columns and report["extract_date"].notna().any() \
         else ""
-    base_cfg = cfg or EclConfig()
     from .etl.model_registry import run_model_id
     out = {}
     for name in wanted:
@@ -1205,11 +1426,11 @@ def scenario_ecl_single_run(inputs: EngineInputs, report: pd.DataFrame,
         except Exception as exc:
             return {"ok": False,
                     "reason": f"Rebuilding the PD chain for {name} failed: {exc}"}
-        curves = stpd_to_curves(stpd)
+        curves = _ctx_curves(stpd)
         if not curves:
             return {"ok": False,
                     "reason": f"The rebuilt StPD for {name} had no curves."}
-        priced = reprice(inputs, report, pd_curves=curves, cfg=base_cfg)
+        priced = reprice(inputs, report, pd_curves=curves, cfg=cfg)
         out[name] = float(pd.to_numeric(priced["ecl"], errors="coerce").sum())
 
     return {"ok": True, "ecl": out, "scenarios": wanted,

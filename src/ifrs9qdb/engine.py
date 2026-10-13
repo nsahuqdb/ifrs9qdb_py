@@ -283,6 +283,23 @@ def fallback_ead_curve(
     return float(on_balance) * coef
 
 
+def _one_contract_ctx(contract_id, collateral_net, schedule_curves, cfg):
+    """A pricing context for one contract priced outside a run: the active
+    fallback rules, its collateral and schedule, the settings in ``cfg``."""
+    from .etl.report import EclContext
+    cfg = cfg or EclConfig()
+    ctx = EclContext.__new__(EclContext)
+    ctx.cfg = cfg
+    ctx.rules = (_active_rules, _active_default)
+    ctx.stage3, ctx.cap = cfg.stage3_method, cfg.cap_ecl_at_exposure
+    ctx.lgd_base, ctx.lgd_floor = cfg.lgd_base, cfg.lgd_unsecured_floor
+    ctx.collnet = {str(contract_id): collateral_net}
+    ctx.schedules = {str(k): np.asarray(v, dtype=float)
+                     for k, v in (schedule_curves or {}).items()}
+    ctx.stpd, ctx.rat2bucket = {}, {}
+    return ctx
+
+
 def resolve_ead_curve(
     contract_id: str,
     schedule_curves: dict[str, Sequence[float]] | None,
@@ -295,25 +312,19 @@ def resolve_ead_curve(
     portfolio: str | None = None,
     nir: float | None = None,
 ) -> np.ndarray | None:
-    """The EAD curve the engine prices against.
-
-    The supplied monthly curve when there is one, otherwise the parametric
-    fallback. Stage 1 is capped at twelve months either way.
-    """
-    curve = None
-    if schedule_curves:
-        got = schedule_curves.get(str(contract_id))
-        if got is not None and len(got) > 0:
-            curve = np.asarray(got, dtype=float)
-    if curve is None:
-        if on_balance is None or not np.isfinite(on_balance):
+    """The EAD curve the engine prices against: ``etl.report._ead_curve``,
+    the one the run's report uses, for a contract priced outside a run."""
+    from .etl.report import _ead_curve
+    if not schedule_curves or not len(schedule_curves.get(str(contract_id), [])):
+        try:
+            if not np.isfinite(float(on_balance)):
+                return None
+        except (TypeError, ValueError):
             return None
-        curve = fallback_ead_curve(
-            on_balance, months_remaining, payment_type, payment_frequency,
-            deferral, portfolio=portfolio, nir=nir
-        )
-    if stage == 1:
-        curve = curve[: min(12, len(curve))]
+    ctx = _one_contract_ctx(contract_id, 0.0, schedule_curves, None)
+    curve, _, _ = _ead_curve(ctx, str(contract_id), int(stage), on_balance,
+                             int(months_remaining), payment_type, portfolio,
+                             nir, deferral, payment_frequency)
     return curve
 
 
@@ -399,36 +410,23 @@ def compute_ecl_one(
     deferral: int | None = 0,
     cfg: EclConfig | None = None,
 ) -> dict:
-    """Price one contract. Returns ecl, lgd, ead curve length and coverage."""
-    cfg = cfg or EclConfig()
-    lgd = compute_lgd(
-        on_balance,
-        collateral_net,
-        base=cfg.lgd_base,
-        unsecured_floor=cfg.lgd_unsecured_floor,
-        zero_exposure_lgd=cfg.zero_exposure_lgd,
-    )
+    """Price one contract outside a run. Returns ecl, lgd, ead curve length
+    and coverage.
 
-    if stage == 3:
-        if cfg.stage3_method == "zero":
-            ecl = 0.0
-        else:
-            ecl = 0.0 if (on_balance is None or not np.isfinite(on_balance) or on_balance <= 0) \
-                else float(on_balance)
-        cov = (ecl / on_balance) if (on_balance and on_balance > 0) else float("nan")
-        return {"contract": contract_id, "ecl": ecl, "lgd": lgd, "horizon": 0, "coverage": cov}
-
-    curve = resolve_ead_curve(
-        contract_id, schedule_curves, stage, on_balance, months_remaining,
-        payment_type, payment_frequency, deferral,
-    )
-    if curve is None or cum_pd is None:
-        return {"contract": contract_id, "ecl": float("nan"), "lgd": lgd,
-                "horizon": 0, "coverage": float("nan")}
-
-    ecl = sum_marginal_ecl(curve, lgd, cum_pd, eir, horizon=len(curve))
-    if np.isfinite(ecl) and cfg.cap_ecl_at_exposure and on_balance and on_balance > 0:
-        ecl = min(ecl, float(on_balance))
-    cov = (ecl / on_balance) if (on_balance and on_balance > 0 and np.isfinite(ecl)) else float("nan")
-    return {"contract": contract_id, "ecl": ecl, "lgd": lgd,
-            "horizon": len(curve), "coverage": cov}
+    Not a second implementation: it prices with ``etl.report.compute_ecl``,
+    the function that prices every run's report, on a context holding just
+    this contract."""
+    import pandas as pd
+    from .etl.report import compute_ecl
+    ctx = _one_contract_ctx(contract_id, collateral_net, schedule_curves, cfg)
+    frame = pd.DataFrame({
+        "cid": [str(contract_id)], "stage": [int(stage)],
+        "on_balance": [on_balance], "months": [int(months_remaining)],
+        "payment_type": [payment_type], "portfolio": [None], "nir": [np.nan],
+        "deferral": [deferral], "pay_freq": [payment_frequency],
+        "eir": [eir], "rating": [None], "rating_type": [None]})
+    cum = None if cum_pd is None else np.asarray(cum_pd, dtype=float)
+    r = compute_ecl(ctx, frame, cum=[cum]).iloc[0]
+    return {"contract": contract_id, "ecl": float(r["ecl"]), "lgd": float(r["lgd"]),
+            "horizon": 0 if int(stage) == 3 or not np.isfinite(r["ecl"]) else int(r["horizon"]),
+            "coverage": float(r["impcov"])}
