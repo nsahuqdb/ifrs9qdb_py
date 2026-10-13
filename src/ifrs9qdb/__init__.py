@@ -4,7 +4,7 @@ Port of the R package of the same name. The calculation is validated against
 the same golden fixtures, so the two implementations cannot drift apart
 silently.
 """
-__version__ = "0.29.4"
+__version__ = "0.29.5"
 
 from .engine import (  # noqa: F401
     EclConfig,

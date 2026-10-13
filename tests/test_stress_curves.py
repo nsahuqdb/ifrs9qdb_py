@@ -108,6 +108,18 @@ class TestStagingThreshold:
             "key,value\ndpd_stage2_threshold_days,45\n", encoding="utf-8")
         assert staging_threshold(tmp_path) == 45
 
+    def test_it_reads_the_runs_frozen_config(self, tmp_path):
+        # where a run keeps it: config_used/static, beside Output/
+        static = tmp_path / "config_used" / "static"
+        static.mkdir(parents=True)
+        (tmp_path / "config_used" / "config").mkdir()
+        (static / "staging_thresholds.csv").write_text(
+            "key,value,description\ndpd_stage2_threshold_days,30,x\n",
+            encoding="utf-8")
+        (tmp_path / "Output").mkdir()
+        assert staging_threshold(tmp_path / "Output") == 30
+        assert staging_threshold(tmp_path) == 30
+
     def test_a_run_without_the_file_falls_back(self, tmp_path):
         assert staging_threshold(tmp_path) == 60
         assert staging_threshold(tmp_path, default=30) == 30

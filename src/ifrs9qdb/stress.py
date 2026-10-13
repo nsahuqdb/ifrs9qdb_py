@@ -580,17 +580,21 @@ def tornado(inputs, report, base: StressSpec | None = None,
 def staging_threshold(out_dir, default: float = 60) -> float:
     """The DPD threshold the run actually used.
 
-    A run freezes its staging policy beside its outputs. Sweeping around a
-    hardcoded 60 when the run used something else compares the book against a
-    policy nobody applied.
+    A run freezes its staging policy with its config, in
+    ``config_used/static/staging_thresholds.csv`` beside ``Output/``; a copy
+    beside the outputs is read when there is no frozen config. Sweeping around
+    a hardcoded 60 when the run used something else compares the book against
+    a policy nobody applied.
     """
     if out_dir is None:
         return default
+    from .analytics.model_view import config_used
     p = Path(out_dir)
-    f = p / "staging_thresholds.csv"
-    if not f.is_file():
-        f = p / "Output" / "staging_thresholds.csv"
-    if not f.is_file():
+    cu = config_used(p)
+    cands = ([cu["static"] / "staging_thresholds.csv"] if cu else []) + [
+        p / "staging_thresholds.csv", p / "Output" / "staging_thresholds.csv"]
+    f = next((c for c in cands if c.is_file()), None)
+    if f is None:
         return default
     try:
         d = pd.read_csv(f)
