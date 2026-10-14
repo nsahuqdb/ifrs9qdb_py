@@ -191,18 +191,19 @@ class TestScenarioWeights:
         """The control: the run's own weights reprice to its own provision.
         A weighted sum of the five scenario provisions did not -- the external
         scale is weighted year by year, and the exposure cap is not linear."""
-        from ifrs9qdb.stress import run_scenario_weights, scenario_weights_stress
-        r = scenario_weights_stress(*book, OUT, run_scenario_weights(OUT)["internal"])
+        from ifrs9qdb.stress import run_scenario_weights
+        r = mev_stress(*book, OUT, weight_mode="custom",
+                       weights=run_scenario_weights(OUT)["internal"])
         assert r["ok"], r.get("reason")
         assert r["delta"] == pytest.approx(0.0, abs=1e-6)
         assert r["after"] == pytest.approx(r["provision"], abs=1e-3)
 
     @needs_frozen
     def test_more_weight_on_the_downturn_costs_more(self, book):
-        from ifrs9qdb.stress import run_scenario_weights, scenario_weights_stress
+        from ifrs9qdb.stress import run_scenario_weights
         w = dict(run_scenario_weights(OUT)["internal"])
         w["Significant Downturn"] += 0.2
-        r = scenario_weights_stress(*book, OUT, w)
+        r = mev_stress(*book, OUT, weight_mode="custom", weights=w)
         assert r["ok"] and r["delta"] > 0
         # weights are normalised: the rebuilt chain used them summing to one
         assert sum(r["weights_used"].values()) == pytest.approx(1.0)
@@ -213,9 +214,9 @@ class TestScenarioWeights:
 
     @needs_frozen
     def test_an_unknown_scenario_is_refused(self, book):
-        from ifrs9qdb.stress import run_scenario_weights, scenario_weights_stress
+        from ifrs9qdb.stress import run_scenario_weights
         w = dict(run_scenario_weights(OUT)["internal"], **{"Mild Panic": 0.5})
-        r = scenario_weights_stress(*book, OUT, w)
+        r = mev_stress(*book, OUT, weight_mode="custom", weights=w)
         assert not r["ok"] and "Mild Panic" in r["reason"]
 
     @needs_frozen

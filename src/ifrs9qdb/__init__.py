@@ -4,7 +4,7 @@ Port of the R package of the same name. The calculation is validated against
 the same golden fixtures, so the two implementations cannot drift apart
 silently.
 """
-__version__ = "0.30.0"
+__version__ = "0.31.0"
 
 from .engine import (  # noqa: F401
     EclConfig,
@@ -17,8 +17,9 @@ from .engine import (  # noqa: F401
 )
 from .inputs import EngineInputs, load_engine_inputs  # noqa: F401,E402
 from .stress import (  # noqa: F401,E402
-    Rule, StressSpec, apply_stress, compare_packages, reprice,
-    reverse_stress, reverse_stress_all, roll_forward, tornado,
+    StressSpec, apply_stress, compare_packages, read_packages, reprice,
+    reverse_stress, reverse_stress_all, roll_forward, standard_packages,
+    tornado, write_packages,
 )
 from .overlays import (  # noqa: F401,E402
     Overlay, apply_overlay_bundle, apply_overlay_to_run, apply_overlays,

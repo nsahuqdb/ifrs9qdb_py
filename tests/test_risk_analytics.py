@@ -246,6 +246,13 @@ class TestCustomerLookup:
                     / max(sub["exposure"].sum(), 1))
         assert r["found"]["pd"].iloc[0] == pytest.approx(expected)
 
+    def test_a_name_with_spaces_is_one_id_when_read_as_a_stress_reads_it(self):
+        from ifrs9qdb.analytics import customer_lookup
+        d = synthetic().assign(customer=["A B", "A B", "C", "D"])
+        r = customer_lookup(d, "A B; C", spaces=False)
+        assert set(r["found"]["customer"]) == {"A B", "C"} and r["missing"] == []
+        assert customer_lookup(d, "A B", spaces=True)["missing"] == ["A", "B"]
+
     def test_nothing_asked_for_is_nothing_returned(self):
         from ifrs9qdb.analytics import customer_lookup
         assert customer_lookup(synthetic(), "") == {}

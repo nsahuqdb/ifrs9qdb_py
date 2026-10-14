@@ -646,14 +646,16 @@ def data_quality_detail(d: pd.DataFrame, n: int = 200) -> dict:
     return out
 
 
-def customer_lookup(report: pd.DataFrame, customer_ids) -> dict:
+def customer_lookup(report: pd.DataFrame, customer_ids, spaces: bool = True) -> dict:
     """Look several customers up at once, and say which were not found.
 
     Ids arrive pasted from a spreadsheet or an email, so any of commas,
-    semicolons, newlines and spaces separate them. The ones that matched and
-    the ones that did not are BOTH returned: a lookup that quietly drops an
-    unknown id lets somebody conclude a name is not in the book when they
-    simply mistyped it.
+    semicolons, newlines and spaces separate them. ``spaces=False`` reads them
+    as a stress's scope does (``stress.stress_scope``): only commas, semicolons
+    and newlines separate them, so a customer named with spaces is one id. The
+    ones that matched and the ones that did not are BOTH returned: a lookup
+    that quietly drops an unknown id lets somebody conclude a name is not in
+    the book when they simply mistyped it.
 
     PD and LGD are exposure-weighted across the customer's facilities, which is
     the only aggregation of them that means anything.
@@ -666,7 +668,8 @@ def customer_lookup(report: pd.DataFrame, customer_ids) -> dict:
         raw = customer_ids
     else:
         raw = ",".join(str(c) for c in customer_ids)
-    ids = [t for t in re.split(r"[,;\s]+", raw.strip()) if t]
+    sep = r"[,;\s]+" if spaces else r"[,;\n]+"
+    ids = [t.strip() for t in re.split(sep, raw.strip()) if t.strip()]
     if not ids:
         return {}
 

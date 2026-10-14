@@ -9,7 +9,7 @@ provision is 1.36bn" means little next to "it is 1.36bn, and it would be
 Everything here reads the per-scenario reports a run already wrote. Nothing is
 re-priced, so these are cheap and cannot disagree with the run. What a
 different weighting would book is a repricing, not a weighted sum of these:
-``stress.scenario_weights_stress``.
+``stress.mev_stress`` with custom weights.
 """
 from __future__ import annotations
 

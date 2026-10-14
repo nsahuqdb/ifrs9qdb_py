@@ -27,21 +27,21 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from .analytics.profile import classify_stage, customer_view
+from .analytics.profile import classify_stage
 from .engine import EclConfig
 from .inputs import EngineInputs
 
 __all__ = [
-    "StressSpec", "Rule", "reprice", "apply_stress", "compare_packages",
+    "StressSpec", "SCOPE_FIELDS", "STANDARD_PACKAGES", "standard_packages",
+    "packages_path", "read_packages", "write_packages", "stress_scope",
+    "reprice", "apply_stress", "compare_packages",
     "reverse_stress", "reverse_stress_all", "roll_forward", "tornado",
     "TORNADO_LEVERS", "REVERSE_LEVERS", "stretch_curve", "advance_curve",
     "conditional_pd", "staging_threshold", "staging_threshold_sweep",
     "advance_curves", "reprofile_curves", "customer_rows",
     "mev_stress", "MEV_WEIGHT_MODES", "stpd_to_curves",
-    "run_scenario_weights", "scenario_weights_stress",
-    "scenario_weights_sensitivity",
-    "match_rules", "reprice_rules", "filter_rating_type",
-    "order_by_rating", "scenario_ecl_single_run",
+    "run_scenario_weights", "scenario_weights_sensitivity",
+    "filter_rating_type", "order_by_rating", "scenario_ecl_single_run",
 ]
 
 
@@ -102,52 +102,156 @@ def conditional_pd(cum, k: int) -> np.ndarray:
 # ------------------------------------------------------------------ specs --
 @dataclass
 class StressSpec:
-    """A named set of levers applied together."""
+    """One stress: who it reaches, and what changes for them.
+
+    Packages, what-ifs on named customers and staging-policy changes are all
+    this. The scope is every contract in ``portfolios`` AND ``stages`` AND
+    ``customers`` -- an empty list does not narrow it -- and every lever
+    reaches the scope only: the rest of the book keeps its own price. ``None``
+    for the DPD threshold and the LGD parameters means the run's own, so a
+    stress that changes nothing reprices to the run's report. As R's
+    stress_default().
+    """
     name: str = "Stress"
+    # who
     portfolios: list[str] = field(default_factory=list)
-    dpd_threshold: float = 60
+    stages: list[int] = field(default_factory=list)
+    customers: list[str] = field(default_factory=list)
+    # staging
+    dpd_threshold: float | None = None
     contagion: bool = True
     tasdeer_collective: bool = True
     watchlist_triggers: bool = True
     local_triggers: bool = True
-    pd_multiplier: float = 1.0
-    lgd_base: float = 0.45
-    lgd_floor: float = 0.5
-    collateral_pct: float = 100.0
-    exposure_pct: float = 100.0
-    rating_notches: int = 0
-    maturity_years: float = 0.0
+    stage_to: int | None = None
     default_top_n: int = 0
+    # PD and rating
+    pd_multiplier: float = 1.0
+    pd_scenario: str = ""
+    rating_notches: int = 0
+    # LGD and collateral
+    lgd_base: float | None = None
+    lgd_floor: float | None = None
+    collateral_pct: float = 100.0
+    # exposure and term
+    exposure_pct: float = 100.0
+    maturity_years: float = 0.0
 
     def is_empty(self) -> bool:
         d = StressSpec()
         return all(getattr(self, k) == getattr(d, k)
-                   for k in asdict(d) if k not in ("name", "portfolios"))
+                   for k in asdict(d) if k not in ("name",) + SCOPE_FIELDS)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "StressSpec":
+        """A spec from a saved package or a request: unknown keys ignored,
+        blanks back to their defaults, numbers and lists coerced."""
+        d = dict(d or {})
+        out = {}
+        for f in cls.__dataclass_fields__.values():
+            if f.name not in d:
+                continue
+            v = d[f.name]
+            if f.name in SCOPE_FIELDS:
+                if v is None or v == "":
+                    v = []
+                elif isinstance(v, str):
+                    v = [t for t in v.replace(";", ",").split(",") if t.strip()]
+                elif not isinstance(v, (list, tuple)):
+                    v = [v]     # one value: R's YAML writes a vector of one so
+                v = [str(x).strip() for x in v] if f.name != "stages" \
+                    else [int(float(x)) for x in v]
+            elif f.name in ("dpd_threshold", "lgd_base", "lgd_floor", "stage_to"):
+                v = None if v is None or v == "" or (isinstance(v, float) and np.isnan(v)) \
+                    else (int(float(v)) if f.name == "stage_to" else float(v))
+                if f.name == "stage_to" and v == 0:
+                    v = None
+            elif f.name in ("default_top_n", "rating_notches"):
+                v = int(float(v or 0))
+            elif f.name in ("pd_multiplier", "collateral_pct", "exposure_pct",
+                            "maturity_years"):
+                v = float(v)
+            elif f.name in ("contagion", "tasdeer_collective",
+                            "watchlist_triggers", "local_triggers"):
+                v = bool(v)
+            elif f.name in ("name", "pd_scenario"):
+                v = "" if v is None else str(v)
+            out[f.name] = v
+        return cls(**out)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
 
 
-@dataclass
-class Rule:
-    """A what-if rule: who it applies to, and what changes for them."""
-    label: str = "Rule 1"
-    customers: list[str] = field(default_factory=list)
-    portfolios: list[str] = field(default_factory=list)
-    stages: list[int] = field(default_factory=list)
-    stage_to: int | None = None
-    rating_notches: int = 0
-    collateral_pct: float = 100.0
-    exposure_pct: float = 100.0
-    maturity_years: float = 0.0
-    pd_scenario: str = ""
+SCOPE_FIELDS = ("portfolios", "stages", "customers")
 
-    def matches(self, report: pd.DataFrame) -> pd.Series:
-        keep = pd.Series(True, index=report.index)
-        if self.customers:
-            keep &= report["customer"].astype(str).isin([str(c) for c in self.customers])
-        if self.portfolios:
-            keep &= report["portfolio"].isin(self.portfolios)
-        if self.stages:
-            keep &= report["stage"].isin([float(s) for s in self.stages])
-        return keep
+# The standard packages: each a single coherent story rather than an arbitrary
+# bundle, and the same in both engines (R's standard_packages()).
+STANDARD_PACKAGES = [
+    {"name": "Mild downturn", "pd_multiplier": 1.25, "rating_notches": 1,
+     "collateral_pct": 90.0},
+    {"name": "Severe downturn", "pd_multiplier": 2.0, "rating_notches": 3,
+     "collateral_pct": 70.0, "exposure_pct": 110.0},
+    {"name": "Collateral revaluation", "collateral_pct": 50.0},
+    {"name": "Staging tightened to 30 days", "dpd_threshold": 30.0},
+    {"name": "Largest five default", "default_top_n": 5},
+]
+
+
+def standard_packages(portfolios=None) -> list[StressSpec]:
+    """The standard packages, scoped to ``portfolios`` (all if None)."""
+    return [StressSpec.from_dict({**p, "portfolios": list(portfolios or [])})
+            for p in STANDARD_PACKAGES]
+
+
+def packages_path(project_root) -> Path:
+    """Where saved packages live: the project's config/stress_packages.yml,
+    the file R's stress_read() and stress_write() use."""
+    return Path(project_root) / "config" / "stress_packages.yml"
+
+
+def read_packages(path) -> list[StressSpec]:
+    """Saved packages, or none. R writes and reads the same file."""
+    import yaml
+    p = Path(path)
+    if not p.is_file():
+        return []
+    try:
+        y = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return []
+    return [StressSpec.from_dict(d) for d in (y.get("packages") or [])
+            if isinstance(d, dict)]
+
+
+def write_packages(specs, path) -> Path:
+    """Save packages for next quarter, in R's format (packages: [...]); a
+    None (the run's own) is left out, as R leaves a NULL out."""
+    import yaml
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for sp in specs:
+        d = (sp if isinstance(sp, StressSpec) else StressSpec.from_dict(sp)).to_dict()
+        rows.append({k: v for k, v in d.items() if v is not None})
+    p.write_text(yaml.safe_dump({"packages": rows}, sort_keys=False,
+                                allow_unicode=True), encoding="utf-8")
+    return p
+
+
+def stress_scope(ing: pd.DataFrame, spec: StressSpec) -> pd.Series:
+    """The contracts a stress reaches: in its portfolios AND stages AND
+    customers, an empty list not narrowing it."""
+    keep = pd.Series(True, index=ing.index)
+    if spec.portfolios:
+        keep &= ing["portfolio"].isin(list(spec.portfolios))
+    if spec.stages:
+        keep &= pd.to_numeric(ing["stage"], errors="coerce").isin(
+            [int(x) for x in spec.stages])
+    if spec.customers:
+        keep &= ing["customer"].astype(str).str.strip().isin(
+            [str(c).strip() for c in spec.customers])
+    return keep.fillna(False)
 
 
 # --------------------------------------------------------------- repricing --
@@ -326,40 +430,70 @@ def reprice(
 
 # ------------------------------------------------------------ apply stress --
 def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
-                 spec: StressSpec, cfg: EclConfig | None = None) -> dict:
-    """Apply a stress package and reprice."""
+                 spec, cfg: EclConfig | None = None) -> dict:
+    """Apply one stress and reprice -- a package, a what-if on named
+    customers or a staging-policy change; there is no other.
+
+    Every lever reaches the scope only (``stress_scope``), in this order:
+
+      staging     the policy re-stages the scope, when it differs from the
+                  run's own -- a stress that leaves it alone keeps the
+                  reported stages, manual overrides included; then
+                  ``stage_to`` moves the scope to one stage, and the scope's
+                  ``default_top_n`` largest customers by exposure go to
+                  Stage 3
+      rating      notched along each contract's own scale
+      exposure    the balance, and a supplied EAD schedule with it
+      collateral  the net collateral, so LGD moves through compute_lgd()
+      maturity    the maturity date, in calendar months, and a supplied
+                  schedule re-profiled onto the new term
+      PD, LGD     the scope is priced on its scenario's curves when one is
+                  named, times the multiplier, and on the LGD base and floor
+                  given; the rest of the book on the run's own
+
+    Both sides are priced with ``etl.report.compute_ecl`` (``reprice``), so
+    an empty stress is the run's report. As R's stress_apply().
+    """
     if not inputs.ok:
         return {"ok": False, "reason": f"Engine inputs missing: {', '.join(inputs.missing)}"}
+    if not isinstance(spec, StressSpec):
+        spec = StressSpec.from_dict(spec)
     ing = _ingredients(inputs, report)
     if len(ing) == 0:
         return {"ok": False, "reason": "The report could not be matched to the inputs."}
 
-    scoped = (ing["portfolio"].isin(spec.portfolios) if spec.portfolios
-              else pd.Series(True, index=ing.index))
-
+    scoped = stress_scope(ing, spec)
+    sc = scoped.to_numpy()
+    if not sc.any():
+        return {"ok": False, "reason": "No contract is in this stress's scope."}
     before = reprice(inputs, report, cfg=cfg)
+    notes: list[str] = []
 
-    # staging policy
-    local_any = pd.Series(False, index=ing.index)
-    if spec.local_triggers:
-        for c in ("restructured", "local2", "local3", "local4", "local5", "local6"):
-            if c in ing.columns:
-                local_any |= (ing[c] == 1).fillna(False)
-    watch = ing.get("watchlist") if spec.watchlist_triggers else None
-    new_stage = classify_stage(
-        ing.get("dpd"), ing.get("default_flag"), watch, local_any,
-        ing["portfolio"], ing["customer"], dpd_threshold=spec.dpd_threshold,
-        contagion=spec.contagion, tasdeer_collective=spec.tasdeer_collective)
+    # staging policy: re-staged only when it is not the run's own
+    run_thr = staging_threshold(inputs.out_dir)
+    thr = run_thr if spec.dpd_threshold is None else float(spec.dpd_threshold)
     stage = ing["stage"].fillna(2).astype(int).to_numpy().copy()
-    stage[scoped.to_numpy()] = new_stage[scoped.to_numpy()]
-
-    # ratings
-    rating = ing["rating"].astype(str).to_numpy().copy()
-    if spec.rating_notches:
-        for i in np.where(scoped.to_numpy())[0]:
-            sc = inputs.scale_for(ing.iloc[i].get("rating_type"))
-            if sc:
-                rating[i] = sc.notch(rating[i], spec.rating_notches)
+    if (thr != run_thr or not spec.contagion or not spec.tasdeer_collective
+            or not spec.watchlist_triggers or not spec.local_triggers):
+        local_any = pd.Series(False, index=ing.index)
+        if spec.local_triggers:
+            for c in ("restructured", "local2", "local3", "local4", "local5", "local6"):
+                if c in ing.columns:
+                    local_any |= (ing[c] == 1).fillna(False)
+        watch = ing.get("watchlist") if spec.watchlist_triggers else None
+        new_stage = classify_stage(
+            ing.get("dpd"), ing.get("default_flag"), watch, local_any,
+            ing["portfolio"], ing["customer"], dpd_threshold=thr,
+            contagion=spec.contagion, tasdeer_collective=spec.tasdeer_collective)
+        stage[sc] = np.asarray(new_stage)[sc]
+        notes.append(f"Re-staged on DPD > {thr:g}"
+                     + ("" if spec.contagion else ", no contagion")
+                     + ("" if spec.tasdeer_collective else ", Tasdeer not collective")
+                     + ("" if spec.watchlist_triggers else ", watchlist not a trigger")
+                     + ("" if spec.local_triggers else ", local flags not triggers"))
+    if spec.stage_to:
+        stage[sc] = int(spec.stage_to)
+        notes.append(f"Moved to Stage {int(spec.stage_to)}")
 
     # largest N forced to default: rank by EXPOSURE, and keep every one picked.
     # Ranking by ECL puts customers already in Stage 3 at the top -- they carry
@@ -369,28 +503,55 @@ def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
     if spec.default_top_n and spec.default_top_n > 0:
         elig = ing[scoped & (ing["exposure"] > 0)]
         rank = elig.groupby("customer")["exposure"].sum().sort_values(ascending=False)
-        defaulted = list(rank.head(spec.default_top_n).index)
-        hit = scoped & ing["customer"].isin(defaulted)
+        defaulted = [str(c) for c in rank.head(spec.default_top_n).index]
+        hit = scoped & ing["customer"].astype(str).isin(defaulted)
         stage[hit.to_numpy()] = 3
+        notes.append(f"{len(defaulted)} largest customers by exposure forced to Stage 3")
+
+    rating = ing["rating"].astype(str).to_numpy().copy()
+    if spec.rating_notches:
+        for i in np.where(sc)[0]:
+            scale = inputs.scale_for(ing.iloc[i].get("rating_type"))
+            if scale:
+                rating[i] = scale.notch(rating[i], spec.rating_notches)
 
     on_balance = ing["on_balance"].to_numpy().copy()
     if spec.exposure_pct != 100:
-        on_balance[scoped.to_numpy()] *= spec.exposure_pct / 100
+        on_balance[sc] *= spec.exposure_pct / 100
 
     cnet = ing["collateral_net"].fillna(0.0).to_numpy().copy()
     if spec.collateral_pct != 100:
-        cnet[scoped.to_numpy()] *= spec.collateral_pct / 100
+        cnet[sc] *= spec.collateral_pct / 100
 
     shift = np.zeros(len(ing))
     if spec.maturity_years:
-        shift[scoped.to_numpy()] = spec.maturity_years * 12
+        shift[sc] = spec.maturity_years * 12
+
+    curves = None
+    if spec.pd_scenario:
+        from .analytics.model_view import read_scenario_stpd
+        curves = read_scenario_stpd(inputs.out_dir, spec.pd_scenario)
+        if not curves:
+            return {"ok": False, "reason": "This run wrote no PD curves for the "
+                                           f"scenario {spec.pd_scenario!r}."}
+        notes.append(f"Priced on the {spec.pd_scenario} PD curves")
+    if spec.pd_multiplier != 1.0:
+        notes.append(f"PD curves scaled by {spec.pd_multiplier:g}x (capped at 1)")
+    lgd_cfg = cfg
+    if spec.lgd_base is not None or spec.lgd_floor is not None:
+        lgd_cfg = EclConfig(
+            lgd_base=inputs.ctx.lgd_base if spec.lgd_base is None else spec.lgd_base,
+            lgd_unsecured_floor=(inputs.ctx.lgd_floor if spec.lgd_floor is None
+                                 else spec.lgd_floor))
 
     after = reprice(
         inputs, report, stage=stage, rating=rating, on_balance=on_balance,
-        collateral_net=cnet, maturity_shift_months=shift,
-        pd_multiplier=spec.pd_multiplier,
-        cfg=EclConfig(lgd_base=spec.lgd_base, lgd_unsecured_floor=spec.lgd_floor),
-    )
+        collateral_net=cnet, maturity_shift_months=shift, pd_curves=curves,
+        pd_multiplier=spec.pd_multiplier, cfg=lgd_cfg)
+    # The PD curves and the LGD parameters are the context's, so they reach
+    # every contract priced on it: outside the scope the run's own price
+    # stands. Everything else outside the scope is unchanged already.
+    after.loc[~scoped, ["ecl", "lgd"]] = before.loc[~scoped, ["ecl", "lgd"]].to_numpy()
 
     ok = before["ecl"].notna() & after["ecl"].notna()
     d = before[["contract", "customer", "portfolio", "rating", "stage"]].copy()
@@ -420,6 +581,19 @@ def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
     by_pf["change"] = by_pf["after"] - by_pf["before"]
 
     moved = priced["stage"] != priced["stage_after"]
+    mv = priced[moved]
+    migration = pd.DataFrame()
+    if len(mv):
+        migration = (mv.assign(move=[f"Stage {int(x)} \u2192 Stage {int(y)}"
+                                     for x, y in zip(mv["stage"], mv["stage_after"])])
+                     .groupby("move")
+                     .agg(contracts=("contract", "size"),
+                          customers=("customer", "nunique"),
+                          exposure=("exposure", "sum"),
+                          ecl_change=("change", "sum"))
+                     .reset_index())
+        migration = migration.reindex(migration["ecl_change"].abs()
+                                      .sort_values(ascending=False).index)
     return {
         "ok": True,
         "name": spec.name,
@@ -427,17 +601,22 @@ def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
         "after": float(priced["ecl_after"].sum()),
         "delta": float(priced["change"].sum()),
         "priced": int(ok.sum()),
+        "scoped": int(sc.sum()),
         "moved": int(moved.sum()),
         "customers_moved": int(priced.loc[moved, "customer"].nunique()),
         "defaulted": defaulted,
+        "notes": notes,
         "by_customer": by_cust,
         "by_portfolio": by_pf.sort_values("change", key=abs, ascending=False),
+        "migration": migration,
         "detail": priced.reindex(priced["change"].abs()
                                  .sort_values(ascending=False).index),
     }
 
 
 def compare_packages(inputs, report, specs: Iterable[StressSpec]) -> pd.DataFrame:
+    """Several stresses priced on identical inputs, worst first -- the
+    question a committee puts is which of these hurts most."""
     rows = []
     for s in specs:
         r = apply_stress(inputs, report, s)
@@ -458,14 +637,14 @@ REVERSE_LEVERS = {
     "collateral_pct": {"label": "Collateral value", "lo": 100.0, "hi": 0.0, "unit": "%"},
     "exposure_pct": {"label": "Exposure", "lo": 100.0, "hi": 300.0, "unit": "%"},
     "lgd_base": {"label": "LGD base", "lo": 0.45, "hi": 1.0, "unit": ""},
-    "default_top_n": {"label": "Largest customers defaulting", "lo": 0, "hi": 50,
+    "default_top_n": {"label": "Largest customers defaulting", "lo": 0, "hi": 100,
                       "unit": " customers", "integer": True},
 }
 
 
 def reverse_stress(inputs, report, lever: str, target_pct: float,
                    base: StressSpec | None = None, tol: float = 0.25,
-                   max_iter: int = 14) -> dict:
+                   max_iter: int = 16) -> dict:
     """Solve for the level of one lever that reaches a target provision.
 
     Every lever is monotonic in the provision, so bisection settles it in a
@@ -497,7 +676,7 @@ def reverse_stress(inputs, report, lever: str, target_pct: float,
                 "value": L["hi"], "unit": L["unit"], "achieved_pct": hi_pct,
                 "provision": hi["after"], "base": base_prov}
 
-    lo, up, best = L["lo"], L["hi"], hi
+    lo, up = L["lo"], L["hi"]
     for _ in range(max_iter):
         mid = (lo + up) / 2
         if L.get("integer"):
@@ -505,7 +684,7 @@ def reverse_stress(inputs, report, lever: str, target_pct: float,
         r = at(mid)
         p = 100 * (r["after"] - base_prov) / base_prov
         if p >= target_pct:
-            up, best = mid, r
+            up = mid
         else:
             lo = mid
         if abs(p - target_pct) <= tol:
@@ -696,7 +875,7 @@ def staging_threshold(out_dir, default: float = 60) -> float:
 def staging_threshold_sweep(inputs, report,
                             thresholds=(0, 15, 30, 45, 60, 75, 90),
                             base: StressSpec | None = None,
-                            reference: float = 60,
+                            reference: float | None = None,
                             cfg: EclConfig | None = None) -> pd.DataFrame:
     """Reprice the book at each candidate Stage 2 DPD threshold.
 
@@ -706,13 +885,16 @@ def staging_threshold_sweep(inputs, report,
     the point -- it is the difference between a policy debate and an argument
     about a number nobody has tested.
 
-    Everything except the threshold is held at ``base``, so each row differs
-    from its neighbours in exactly one thing.
+    Each row is ``apply_stress`` with only the threshold changed from
+    ``base`` (the internally rated portfolios by default), and the run's own
+    threshold is the reference, always priced.
     """
+    spec0 = base or StressSpec(portfolios=inputs.internal_portfolios())
+    if reference is None:
+        reference = staging_threshold(inputs.out_dir)
     rows = []
-    for t in thresholds:
-        spec = replace(base or StressSpec(), dpd_threshold=float(t),
-                       name=f"DPD > {t:g}")
+    for t in sorted({float(x) for x in thresholds} | {float(reference)}):
+        spec = replace(spec0, dpd_threshold=float(t), name=f"DPD > {t:g}")
         r = apply_stress(inputs, report, spec, cfg)
         if not r.get("ok"):
             continue
@@ -726,6 +908,7 @@ def staging_threshold_sweep(inputs, report,
         b = float(ref.iloc[0])
         out[f"vs_{reference:g}"] = out["ecl"] - b
         out[f"vs_{reference:g}_pct"] = 100 * (out["ecl"] - b) / max(abs(b), 1.0)
+    out.attrs["reference"] = float(reference)
     return out
 
 
@@ -1094,21 +1277,6 @@ def run_scenario_weights(run_path) -> dict:
             "external": {k: float(ext[k]) for k in names if k in ext.index}}
 
 
-def scenario_weights_stress(inputs, report, run_path, weights: dict,
-                            cfg: EclConfig | None = None) -> dict:
-    """The book repriced on different internal scenario weights.
-
-    Not a weighted sum of the five scenario provisions: the PD chain is
-    rebuilt from the run's frozen config with these weights, exactly as a run
-    would build it, and the book priced with ``compute_ecl`` -- ``mev_stress``
-    with the macro path unedited. Measured from the run rebuilt on this
-    engine, so at the run's own weights the change is nil. The external scale
-    keeps its own weights.
-    """
-    return mev_stress(inputs, report, run_path, weight_mode="custom",
-                      weights=weights, cfg=cfg)
-
-
 def scenario_weights_sensitivity(inputs, report, run_path,
                                  weights: dict | None = None,
                                  shift: float = 0.10,
@@ -1117,9 +1285,10 @@ def scenario_weights_sensitivity(inputs, report, run_path,
 
     Each row takes it from the other scenarios -- pro rata, so their relative
     standing is unchanged -- gives it to one, and reprices the book on the
-    result (``scenario_weights_stress``). From ``weights``, else the run's
-    own. That is the question a committee asks: if we thought the downturn
-    ten points more likely, what would we book?
+    result -- ``mev_stress`` with these as custom weights and the macro path
+    unedited, so at the run's own weights nothing moves. From ``weights``,
+    else the run's own. That is the question a committee asks: if we thought
+    the downturn ten points more likely, what would we book?
     """
     if weights is None:
         rw = run_scenario_weights(run_path)
@@ -1131,7 +1300,11 @@ def scenario_weights_sensitivity(inputs, report, run_path,
     if not w or tot <= 0:
         return pd.DataFrame()
     w = {k: v / tot for k, v in w.items()}
-    base = scenario_weights_stress(inputs, report, run_path, w, cfg=cfg)
+    def reprice_on(weights):
+        return mev_stress(inputs, report, run_path, weight_mode="custom",
+                          weights=weights, cfg=cfg)
+
+    base = reprice_on(w)
     if not base.get("ok"):
         return pd.DataFrame()
     from .analytics.scenarios import scenario_ecl_from_outputs
@@ -1148,7 +1321,7 @@ def scenario_weights_sensitivity(inputs, report, run_path,
         take = min(shift, room)
         up = {o: w[o] * (1 - take / denom) for o in others}
         up[s] = w[s] + take
-        r = scenario_weights_stress(inputs, report, run_path, up, cfg=cfg)
+        r = reprice_on(up)
         if not r.get("ok"):
             continue
         rows.append({
@@ -1165,173 +1338,6 @@ def scenario_weights_sensitivity(inputs, report, run_path,
     out.attrs["shift"] = shift
     return (out.reindex(out["change"].abs().sort_values(ascending=False).index)
             .reset_index(drop=True))
-
-
-# ------------------------------------------------------------- what-if -----
-def match_rules(report: pd.DataFrame, rules) -> dict:
-    """Assign each contract to at most ONE rule, and name the conflicts.
-
-    Rules do not stack. A contract caught by two of them has no defined
-    answer -- applying both in some order would make the result depend on the
-    order, and applying one silently would hide the other -- so it is excluded
-    from repricing and listed instead. This mirrors the overlay feature's
-    no-stacking rule, and for the same reason: an adjustment nobody can
-    reconstruct is worse than one that was refused.
-
-    Returns ``{assignment, conflicts}``: a Series of rule index or NA per
-    contract, and a frame of the contracts more than one rule claimed.
-    """
-    if report is None or len(report) == 0 or not rules:
-        return {"assignment": pd.Series(dtype="Int64"),
-                "conflicts": pd.DataFrame()}
-
-    hits = pd.DataFrame(
-        {j: rule.matches(report).fillna(False).to_numpy()
-         for j, rule in enumerate(rules)}, index=report.index)
-    n_hit = hits.sum(axis=1)
-
-    assignment = pd.Series(pd.NA, index=report.index, dtype="Int64")
-    single = n_hit == 1
-    if single.any():
-        assignment[single] = hits[single].to_numpy().argmax(axis=1)
-
-    clash = n_hit > 1
-    conflicts = pd.DataFrame()
-    if clash.any():
-        labels = [r.label for r in rules]
-        conflicts = pd.DataFrame({
-            "contract": report.loc[clash, "contract"].to_numpy(),
-            "customer": report.loc[clash, "customer"].to_numpy(),
-            "rules": [" + ".join(labels[j] for j in range(len(rules)) if row[j])
-                      for _, row in hits[clash].iterrows()],
-        })
-    return {"assignment": assignment, "conflicts": conflicts}
-
-
-def reprice_rules(inputs: EngineInputs, report: pd.DataFrame, rules,
-                  cfg: EclConfig | None = None) -> dict:
-    """Apply a set of what-if rules and reprice, rule by rule.
-
-    Both sides are priced through the same ``reprice``, so the baseline and
-    the what-if agree by construction. Taking the baseline from the report's
-    own ECL column instead would reintroduce a difference whenever the loaded
-    report predates the current config -- a difference that reads as the
-    what-if having done something.
-
-    A rule naming a ``pd_scenario`` prices its contracts on that scenario's
-    curves. Those contracts are repriced in their own pass, because a curve
-    set applies to a whole repricing; stitching the passes keeps each
-    contract on the curves its rule asked for.
-    """
-    if inputs is None or not inputs.ok:
-        return {"ok": False,
-                "reason": f"Engine inputs missing: {', '.join(inputs.missing)}"
-                if inputs is not None else "No engine inputs."}
-    if report is None or len(report) == 0 or not rules:
-        return {"ok": False, "reason": "Nothing to reprice."}
-
-    ing = _ingredients(inputs, report)
-    if len(ing) == 0:
-        return {"ok": False,
-                "reason": "The report could not be matched to the inputs."}
-
-    # Matched on the INGREDIENTS, not on the report. The two are row-aligned
-    # only while every contract id is unique on both sides, and a LIC report
-    # can repeat one -- an investment security held twice. Matching here keeps
-    # the lever masks aligned with what is actually being priced.
-    matched = match_rules(ing, rules)
-    assignment = matched["assignment"].reset_index(drop=True)
-    if assignment.notna().sum() == 0:
-        return {"ok": False, "reason": "No contract matched any rule.",
-                "conflicts": matched["conflicts"]}
-
-    before = reprice(inputs, report, cfg=cfg)
-
-    # The levers, built per contract from whichever rule claimed it.
-    stage = ing["stage"].fillna(2).astype(int).to_numpy().copy()
-    rating = ing["rating"].astype(str).to_numpy().copy()
-    onbal = pd.to_numeric(ing["on_balance"], errors="coerce").to_numpy().copy()
-    cnet = pd.to_numeric(ing.get("collateral_net"), errors="coerce").fillna(0.0)
-    cnet = cnet.to_numpy().copy()
-    shift = np.zeros(len(ing))
-    scenario_of = np.array([""] * len(ing), dtype=object)
-
-    for j, rule in enumerate(rules):
-        # Int64 holds pd.NA for the unmatched, and NA has no truth value.
-        sel = assignment.eq(j).fillna(False).to_numpy()
-        if not sel.any():
-            continue
-        if rule.stage_to:
-            stage[sel] = int(rule.stage_to)
-        if rule.rating_notches:
-            for i in np.where(sel)[0]:
-                sc = inputs.scale_for(ing.iloc[i].get("rating_type"))
-                if sc:
-                    rating[i] = sc.notch(rating[i], rule.rating_notches)
-        if rule.collateral_pct != 100:
-            cnet[sel] = cnet[sel] * (rule.collateral_pct / 100.0)
-        if rule.exposure_pct != 100:
-            onbal[sel] = onbal[sel] * (rule.exposure_pct / 100.0)
-        if rule.maturity_years:
-            shift[sel] = rule.maturity_years * 12
-        if rule.pd_scenario:
-            scenario_of[sel] = rule.pd_scenario
-
-    def price(curves=None, mask=None):
-        return reprice(inputs, report, stage=pd.Series(stage),
-                       rating=pd.Series(rating),
-                       on_balance=pd.Series(onbal),
-                       collateral_net=pd.Series(cnet),
-                       maturity_shift_months=pd.Series(shift),
-                       pd_curves=curves, cfg=cfg)
-
-    after = price()
-    # Contracts on a scenario's curves get their own pass, stitched back in.
-    from .analytics.model_view import read_scenario_stpd
-    for name in {s for s in scenario_of if s}:
-        curves = read_scenario_stpd(inputs.out_dir, name)
-        if not curves:
-            continue
-        curves = {k: np.asarray(v, dtype=float) for k, v in curves.items()}
-        alt = price(curves)
-        sel = scenario_of == name
-        after.loc[sel, "ecl"] = alt.loc[sel, "ecl"].to_numpy()
-
-    d = before[["contract", "customer", "portfolio", "rating", "stage",
-                "exposure"]].copy()
-    d["ecl_before"] = before["ecl"].to_numpy()
-    d["ecl_after"] = after["ecl"].to_numpy()
-    d["rating_after"] = after["rating_after"].to_numpy()
-    d["stage_after"] = after["stage_after"].to_numpy()
-    d["rule"] = [rules[int(j)].label if pd.notna(j) else ""
-                 for j in assignment.to_numpy()]
-    ok = d["ecl_before"].notna() & d["ecl_after"].notna()
-    priced = d[ok].copy()
-    priced["change"] = priced["ecl_after"] - priced["ecl_before"]
-    touched = priced[priced["rule"] != ""]
-
-    by_rule = (touched.groupby("rule")
-               .agg(contracts=("contract", "size"),
-                    customers=("customer", "nunique"),
-                    exposure=("exposure", "sum"),
-                    before=("ecl_before", "sum"), after=("ecl_after", "sum"))
-               .reset_index())
-    if len(by_rule):
-        by_rule["change"] = by_rule["after"] - by_rule["before"]
-
-    return {
-        "ok": True,
-        "before": float(priced["ecl_before"].sum()),
-        "after": float(priced["ecl_after"].sum()),
-        "delta": float(priced["change"].sum()),
-        "priced": int(ok.sum()),
-        "matched": int(assignment.notna().sum()),
-        "conflicts": matched["conflicts"],
-        "by_rule": by_rule,
-        "movers": customer_rows(touched, n=500),
-        "detail": touched.reindex(
-            touched["change"].abs().sort_values(ascending=False).index),
-    }
 
 
 # -------------------------------------------------------- report helpers ---

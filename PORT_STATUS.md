@@ -838,6 +838,67 @@ What it changed, on the two reference runs (run_00001 / run_00002):
   bridge, every stress lever, sweeps, what-if, roll forward, macro path,
   scenarios): largest difference 0.000036.
 
+## One stress function (0.31.0)
+
+A package and a what-if on named customers were two functions with two
+notions of who they reach: `apply_stress` on portfolios, and `reprice_rules`
+on rules (customers, portfolios and stages each, a contract two rules claimed
+being skipped). A staging-policy change was a package with only the staging
+levers. They are one: `apply_stress(inputs, report, spec)`, where a
+`StressSpec` is a scope
+-- every contract in `portfolios` AND `stages` AND `customers`, an empty list
+not narrowing it -- and the levers moved for it:
+
+| Lever | What moves |
+| --- | --- |
+| `dpd_threshold`, `contagion`, `tasdeer_collective`, `watchlist_triggers`, `local_triggers` | the scope re-staged with `classify_stage`, only when this differs from the run's own policy (so the reported stages, manual overrides included, stand otherwise) |
+| `stage_to` | the scope moved to one stage |
+| `default_top_n` | the scope's largest customers by exposure to Stage 3 |
+| `rating_notches` | along each contract's own scale |
+| `exposure_pct` | the balance, and a supplied EAD schedule with it |
+| `collateral_pct` | the netted collateral, so LGD moves through `compute_lgd` |
+| `maturity_years` | the maturity date by calendar months; supplied schedules re-profiled |
+| `pd_scenario` | one scenario's PD curves (`StPD_<scenario>.csv`) instead of the weighted ones |
+| `pd_multiplier` | the cumulative PD curves, capped at 1 |
+| `lgd_base`, `lgd_floor` | the LGD parameters (`None` is the run's own) |
+
+`StressSpec.from_dict` reads a request or a saved package (unknown keys
+ignored, blanks back to their defaults); `standard_packages()` gives the five
+standard ones, the same as R's `standard_packages()`; `read_packages` and
+`write_packages` read and write `config/stress_packages.yml`, the file R's
+`stress_read()` and `stress_write()` use. `compare_packages`, `tornado`,
+`reverse_stress` and `staging_threshold_sweep` price through `apply_stress`;
+`staging_threshold_sweep` takes `base` and `reference` (the run's own
+threshold, always priced). `customer_lookup(..., spaces=False)` reads ids as
+the scope does, so a name with spaces is one id.
+
+Removed: `Rule`, `match_rules`, `reprice_rules` and `scenario_weights_stress`
+(`mev_stress(weight_mode="custom")` is that repricing, and
+`scenario_weights_sensitivity` calls it). Several stresses on the same
+contracts are several stresses, priced side by side, rather than rules that
+conflict.
+
+What it changed, on the two reference runs (run_00001 / run_00002):
+
+* **Every lever reaches the scope and nothing else.** The PD multiplier and
+  the LGD parameters live on the pricing context, so they reached every
+  contract priced on it: a Business Finance stress moved Al Dhameen, Off BS,
+  Tasdeer and Investments too. PD x1.25 on the internally rated book is now
+  2,403,077,147 / 2,301,130,161 (was 368,729 / 426,972 higher); LGD 0.55 /
+  0.70 on Business Finance 2,409,794,500 / 2,328,807,264 (was 22,424,405 /
+  12,993,611 higher). The lever sensitivity's "PD +25%" and "LGD base" lines
+  move with them, and the reverse stress's PD multiplier reaches +10.57% /
+  +10.22% at the same level (was +10.60% / +10.25%).
+* **What-ifs on named customers, stages, portfolios and scenarios: nothing.**
+  The 19 cases compared price exactly as the rule-based what-if did.
+* **The reverse stress searches as R's does**: 16 steps (was 14), the largest
+  customers up to 100 (was 50), and the level returned always reaches the
+  target.
+* **R 1.2.0 and Python 0.31.0 agree to within 0.000005** on every case
+  compared: 19 single stresses per run (every lever, named customers, stages,
+  a scenario, a combination of eight levers), the lever sensitivity, the
+  reverse stress, the threshold sweep and the standard packages.
+
 ## The surface is complete
 
 Every public function in the R package's analytics and stress surface has a
