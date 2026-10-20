@@ -965,15 +965,13 @@ rule:
 | Overrides | the rating, stage and restructuring overrides applied to the customer, with who, when and why; manual stages in AccountMaster.Stage |
 | Staging | the DPD, watchlist, local-flag, Tasdeer and Stage 3 rules, the manual stage and customer contagion, as formulas |
 | LGD | collateral value x allocation x (1 - haircut) per allocation, then the LGD |
-| PD inputs | scenarios and the resolved weights; the macro model, its forecasts and the scaling factor per scenario and year; the GCC history and forecast from the country tables, and the external scaling factor (PERCENTRANK.EXC, truncated) |
-| PD annual | per grade: PiT (internal or Basel ASRF), cumulative and marginal PD by scenario and year, and the weighted marginal |
-| PD monthly | months 0-600: the rebuilt curve beside the run's StPD.csv and the difference |
+| PD | the rating -> bucket map (Ratings.csv) and the run's monthly cumulative PD curve (StPD.csv) for each portfolio and bucket the customer uses, as inputs |
 | EAD | months to maturity, the fallback shape, payments, deferral and the horizon |
 | ECL | month by month: EAD x LGD x marginal PD / (1 + EIR)^(t/12) |
 
-The ECL reads the rebuilt chain when it reproduces the run's StPD.csv (every
-run this code produced), otherwise the run's StPD; the choice is a cell on
-Settings. `customer_ecl_facts` gathers the figures with the engine's own
+The PD curves are taken as the run has them (0.32.1): the macro model and
+the scenario weights behind them are the same for every customer, so the
+three PD-chain tabs of 0.32.0 were dropped for one PD tab. `customer_ecl_facts` gathers the figures with the engine's own
 functions and `run_customers` lists who can be exported. The R package's
 `customer_ecl_workbook()` writes the same workbook, cell for cell.
 
@@ -982,5 +980,5 @@ run, 72 customers chosen across every portfolio, stage, schedule/fallback and
 flag (1,005 positions) and the largest (286 positions) equal the engine and the
 report on every position, in both engines; R's and Python's workbooks agree
 cell for cell. `tests/test_calc_workbook.py` builds a synthetic run that
-reaches the annuity, deferral, quarterly, Stage 3 at zero, a StPD the chain
-does not reproduce and an overlay.
+reaches the annuity, deferral, quarterly, Stage 3 at zero, a StPD the macro
+model would not give and an overlay.

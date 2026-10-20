@@ -86,7 +86,7 @@ def make_run(tmp: Path, *, annuity: bool = True, stage3: str = "full_outstanding
     for name, df in build_reference_files(static, EXT).items():
         df.to_csv(out / name, index=False)
     stpd = build_stpd_from_static(static, model_cfg, inputs, EXT)
-    if tamper_stpd:
+    if tamper_stpd:              # curves the macro model would not give
         stpd.loc[stpd["MonthLifetime"] > 6, "PDLifetime"] *= 1.01
     stpd.to_csv(out / "StPD.csv", index=False)
 
@@ -225,11 +225,15 @@ class TestFacts:
                                                      nan_ok=True), (cust, l["cid"])
                 assert l["rep_stage"] == l["stage_engine"]
 
-    def test_the_rebuilt_chain_is_the_runs_curve(self, run):
+    def test_the_pd_curves_are_the_runs_stpd(self, run):
         f = customer_ecl_facts(run, "ISSUER")
-        assert f["pd_source"] == "Rebuilt chain"
-        assert f["rebuild_gap"] < 1e-12
-        assert {c["rt"] for c in f["curves"]} == {2}
+        st = pd.read_csv(run / "Output" / "StPD.csv")
+        for c in f["curves"]:
+            assert c["rt"] == 2
+            ref = st[(st.PortfolioCode == c["portfolio"])
+                     & (st.PDBucketDim1 == int(c["bucket"]))].sort_values("MonthLifetime")
+            np.testing.assert_array_equal(c["stpd"][1:], ref["PDLifetime"].to_numpy())
+            assert c["stpd"][0] == 0
 
     def test_overrides_are_listed(self, run):
         f = customer_ecl_facts(run, "C2")
@@ -240,11 +244,6 @@ class TestFacts:
         with pytest.raises(KeyError):
             customer_ecl_facts(run, "NOBODY")
 
-    def test_a_curve_the_chain_does_not_reproduce_is_priced_on_stpd(self, tmp_path):
-        r = make_run(tmp_path, tamper_stpd=True)
-        f = customer_ecl_facts(r, "C1")
-        assert f["pd_source"] == "Run StPD"
-
 
 class TestWorkbook:
     def test_sheets_and_formulas(self, run, tmp_path):
@@ -252,8 +251,7 @@ class TestWorkbook:
         customer_ecl_workbook(run, "C1", p)
         wb = openpyxl.load_workbook(p)
         assert wb.sheetnames == ["Summary", "Settings", "Lines", "Overrides",
-                                 "Staging", "LGD", "PD inputs", "PD annual",
-                                 "PD monthly", "EAD", "ECL"]
+                                 "Staging", "LGD", "PD", "EAD", "ECL"]
         rows = summary_rows(wb)
         assert len(rows) == 5
         assert all(str(r["ECL (this workbook)"]).startswith("=") for r in rows)
@@ -282,7 +280,7 @@ class TestRecalculated:
                 l["ecl_engine"], rel=1e-9, abs=1e-6), l["cid"]
             assert row["Check"] == "OK", l["cid"]
 
-    def test_stage3_at_zero_and_the_stpd_switch(self, tmp_path):
+    def test_stage3_at_zero_and_any_stpd(self, tmp_path):
         r = make_run(tmp_path, stage3="zero", tamper_stpd=True)
         f = customer_ecl_facts(r, "C3")
         p = tmp_path / "c3.xlsx"
