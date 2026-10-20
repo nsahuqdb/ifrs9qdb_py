@@ -947,3 +947,40 @@ second one turned out to be a naming collision, now M2.
    under `auto`.
 3. A second pair of runs, to confirm the exact reproduction holds on a quarter
    these fixes were not measured against.
+
+## The customer ECL calculator (0.32.0)
+
+`customer_ecl_workbook(run_dir, customer_id, dest)` writes one customer's ECL
+as an Excel workbook whose formulas rebuild the provision from the run's
+inputs, so a reviewer can check every figure of the report by hand. The
+workbook starts where the report is priced from -- the run's LIC input files,
+its frozen config and its override log -- and follows `compute_ecl` rule for
+rule:
+
+| Tab | What it holds |
+| --- | --- |
+| Summary | per position: stage and why, LGD, PD lifetime, horizon, ECL from the formulas against the report's, the overlay, and OK / DIFFERS; totals by stage |
+| Settings | the run's staging threshold, LGD base and floor, Stage 3 method, exposure cap, EAD fallback rules, and which PD curve the ECL reads |
+| Lines | the customer's AccountMaster and CustomerStagingFlag rows (inputs) |
+| Overrides | the rating, stage and restructuring overrides applied to the customer, with who, when and why; manual stages in AccountMaster.Stage |
+| Staging | the DPD, watchlist, local-flag, Tasdeer and Stage 3 rules, the manual stage and customer contagion, as formulas |
+| LGD | collateral value x allocation x (1 - haircut) per allocation, then the LGD |
+| PD inputs | scenarios and the resolved weights; the macro model, its forecasts and the scaling factor per scenario and year; the GCC history and forecast from the country tables, and the external scaling factor (PERCENTRANK.EXC, truncated) |
+| PD annual | per grade: PiT (internal or Basel ASRF), cumulative and marginal PD by scenario and year, and the weighted marginal |
+| PD monthly | months 0-600: the rebuilt curve beside the run's StPD.csv and the difference |
+| EAD | months to maturity, the fallback shape, payments, deferral and the horizon |
+| ECL | month by month: EAD x LGD x marginal PD / (1 + EIR)^(t/12) |
+
+The ECL reads the rebuilt chain when it reproduces the run's StPD.csv (every
+run this code produced), otherwise the run's StPD; the choice is a cell on
+Settings. `customer_ecl_facts` gathers the figures with the engine's own
+functions and `run_customers` lists who can be exported. The R package's
+`customer_ecl_workbook()` writes the same workbook, cell for cell.
+
+Checked by recalculating the workbooks in LibreOffice: on the Q2 2026 LIC-config
+run, 72 customers chosen across every portfolio, stage, schedule/fallback and
+flag (1,005 positions) and the largest (286 positions) equal the engine and the
+report on every position, in both engines; R's and Python's workbooks agree
+cell for cell. `tests/test_calc_workbook.py` builds a synthetic run that
+reaches the annuity, deferral, quarterly, Stage 3 at zero, a StPD the chain
+does not reproduce and an overlay.

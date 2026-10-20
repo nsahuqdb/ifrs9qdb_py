@@ -4,7 +4,7 @@ Port of the R package of the same name. The calculation is validated against
 the same golden fixtures, so the two implementations cannot drift apart
 silently.
 """
-__version__ = "0.31.0"
+__version__ = "0.32.0"
 
 from .engine import (  # noqa: F401
     EclConfig,
@@ -55,4 +55,8 @@ from .run_status import (  # noqa: F401,E402
 from .acquisition import (  # noqa: F401,E402
     acquire_inputs_from_zip, list_data_drops, record_input_source,
     validate_input_directory,
+)
+from .calc_workbook import (  # noqa: F401,E402
+    customer_ecl_facts, customer_ecl_workbook, run_customers,
+    write_customer_workbook,
 )
