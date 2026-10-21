@@ -1015,3 +1015,14 @@ x 120 months).
 * `effective_pd()`: Stage 3 at 100% in every PD profile.
 * `pd_by_scale()` and `pd_curves_by_rating()` for the by-rating view and the
   term structure, one scale at a time.
+
+## Movement and Migration read plainly (0.33.1, R 1.4.1)
+
+`settings_changes()` names a changed ECL setting in words (rules matched on
+portfolio and payment type); `customer_stage_migration()` adds the previous
+run's exposure and ECL; the Stage 2 DPD reason is the customer's worst
+facility, so no contagion reason. Checked between runs 13 and 14 on QDB's
+machine: the "Methodology change" there is the Al Dhameen payment type 4
+repayment shape, Bullet in the 26q2-lic snapshot and Equal instalments in
+26q3-lic -- about -5.1m on run 14's Al Dhameen book. Same engine for both
+runs, so no engine change.

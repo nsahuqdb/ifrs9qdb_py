@@ -247,7 +247,7 @@ class TestMacroAndModel:
         ch = br["changes"]
         assert ch["settings_changed"]
         assert not ch["model_changed"] and not ch["macro_changed"]
-        assert any("ead_fallback" in c["item"] for c in ch["settings"])
+        assert any("Repayment shape" in c["item"] for c in ch["settings"])
         assert abs(move) > 1_000
         assert t["settings"] == pytest.approx(move, abs=1e-3)
         for k in ("method", "exposure", "stage", "rating", "macro", "model",
@@ -281,3 +281,49 @@ def test_a_customer_or_facility_is_labelled_with_its_name():
     assert m["C1"] == "C1 — Acme" and m["C2"] == "C2"
     f = bridge_members(rows, "facility").set_index("value")["label"]
     assert f["F1"] == "F1 — Acme" and f["F3"] == "F3"
+
+
+class TestSettingsInWords:
+    """The ECL settings that differ between two runs, said plainly -- the
+    Al Dhameen EAD rule moved from bullet to equal instalments between the
+    26Q2 and 26Q3 snapshots, and the raw key path
+    "ead_fallback.rules[2].shape" told nobody that."""
+
+    def _cfg(self, shape="bullet", extra=None):
+        rules = [{"portfolio": "Business Finance", "payment_type": "4",
+                  "shape": "linear"},
+                 {"portfolio": "Al Dhameen", "payment_type": "4",
+                  "shape": shape}]
+        return {"stage3_method": "full_outstanding", "cap_ecl_at_exposure": True,
+                "ead_fallback": {"default": "bullet",
+                                 "rules": rules + (extra or [])}}
+
+    def test_a_changed_rule_is_named_by_portfolio_and_payment_type(self):
+        from ifrs9qdb.analytics.bridge import settings_changes
+        ch = settings_changes(self._cfg(), self._cfg("linear"))
+        assert ch == [{"item": "Repayment shape, Al Dhameen, payment type 4 "
+                               "(no repayment schedule)",
+                       "before": "Bullet", "after": "Equal instalments"}]
+
+    def test_an_inserted_rule_is_one_change_not_a_cascade(self):
+        from ifrs9qdb.analytics.bridge import settings_changes
+        b = self._cfg()
+        b["ead_fallback"]["rules"].insert(0, {"portfolio": "Tasdeer",
+                                              "payment_type": "3",
+                                              "shape": "bullet"})
+        ch = settings_changes(self._cfg(), b)
+        assert len(ch) == 1 and ch[0]["before"] == "(no rule)"
+
+    def test_other_settings_in_words(self):
+        from ifrs9qdb.analytics.bridge import settings_changes
+        b = self._cfg()
+        b["stage3_method"] = "zero"
+        b["cap_ecl_at_exposure"] = False
+        items = {c["item"]: (c["before"], c["after"])
+                 for c in settings_changes(self._cfg(), b)}
+        assert items["Stage 3 provision method"] == ("full_outstanding", "zero")
+        assert items["Cap the provision at the exposure"] == ("yes", "no")
+
+    def test_unchanged_is_empty(self):
+        from ifrs9qdb.analytics.bridge import settings_changes
+        assert settings_changes(self._cfg(), self._cfg()) == []

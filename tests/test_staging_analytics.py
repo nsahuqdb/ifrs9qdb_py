@@ -104,10 +104,12 @@ class TestStage2TriggerOverlap:
         assert o.loc[o["combination"] == "Watchlist + Restructured",
                      "contracts"].iloc[0] == 1
 
-    def test_an_untriggered_stage_2_is_named_not_dropped(self):
-        """Contagion is why C2 is there. Dropping it would break the total."""
+    def test_a_facility_takes_its_customers_reason(self):
+        """C2 is current, but its customer A is 70 days past due on C1:
+        staging is per customer, so C2's reason is A's DPD, not contagion."""
         o = stage2_trigger_overlap(synthetic())
-        assert "Another facility of the customer" in set(o["combination"])
+        assert "No reason in the report" not in set(o["combination"])
+        assert o.loc[o["combination"] == "DPD 61-90", "contracts"].iloc[0] == 2
 
 
 class TestStage2Reasons:
@@ -135,6 +137,8 @@ class TestStage2Reasons:
         r = stage2_reasons(d)
         hit = d.loc[r.index[r["Stage override"]], "customer"]
         assert set(hit) == {"A"}
+        assert not r[[c for c in r.columns if c != "Stage override"]].loc[
+            r["Stage override"]].any(axis=None)
 
     def test_the_override_file_names_the_customer(self):
         ov = pd.DataFrame({"customer_id": ["C"], "value": ["Stage 2"]})
@@ -142,11 +146,11 @@ class TestStage2Reasons:
         assert set(synthetic().loc[r.index[r["Stage override"]],
                                    "customer"]) == {"C"}
 
-    def test_contagion_only_when_nothing_else(self):
+    def test_no_contagion_reason(self):
         r = stage2_reasons(synthetic())
+        assert "Another facility of the customer" not in r.columns
         row = r.loc[synthetic().index[synthetic()["contract"] == "C2"][0]]
-        assert row["Another facility of the customer"]
-        assert row.drop("Another facility of the customer").sum() == 0
+        assert row["DPD 61-90"]
 
     def test_the_dpd_label_starts_above_the_threshold(self):
         assert "DPD 61-90" in set(stage2_triggers(synthetic())["trigger"])

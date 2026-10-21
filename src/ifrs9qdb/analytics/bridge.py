@@ -231,6 +231,62 @@ def _table_diff(a, b, label: str) -> list[dict]:
     return [{"item": label, "before": f"{len(ra)} rows", "after": f"{len(rb)} rows"}]
 
 
+_SHAPE_WORDS = {"bullet": "Bullet", "linear": "Equal instalments",
+                "annuity": "Annuity"}
+_SETTING_WORDS = {
+    "stage3_method": "Stage 3 provision method",
+    "cap_ecl_at_exposure": "Cap the provision at the exposure",
+    "ead_fallback.default": "Repayment shape when no rule matches "
+                            "(contracts with no repayment schedule)",
+}
+
+
+def settings_changes(ecl_a, ecl_b) -> list[dict]:
+    """The ECL settings (model.yml's ``ecl`` block) that differ, in words.
+
+    The EAD fallback rules are matched on portfolio and payment type, not on
+    their position in the list, so inserting a rule does not read as every
+    later rule changing:
+
+        Repayment shape, Al Dhameen, payment type 4   Bullet -> Equal instalments
+    """
+    a, b = dict(ecl_a or {}), dict(ecl_b or {})
+    out = []
+
+    def word(v):
+        if isinstance(v, bool):
+            return "yes" if v else "no"
+        if v is None:
+            return "(not set)"
+        return _SHAPE_WORDS.get(str(v), str(v))
+
+    def rules(cfg):
+        got = {}
+        for r in ((cfg.get("ead_fallback") or {}).get("rules") or []):
+            if isinstance(r, dict):
+                key = (str(r.get("portfolio") or "any portfolio"),
+                       str(r.get("payment_type") or "any"))
+                got[key] = r.get("shape")
+        return got
+
+    ra, rb = rules(a), rules(b)
+    for key in sorted(set(ra) | set(rb)):
+        if ra.get(key) != rb.get(key):
+            pf, pt = key
+            out.append({"item": f"Repayment shape, {pf}, payment type {pt} "
+                                "(no repayment schedule)",
+                        "before": word(ra.get(key)) if key in ra else "(no rule)",
+                        "after": word(rb.get(key)) if key in rb else "(no rule)"})
+    strip = lambda c: {k: (v if k != "ead_fallback" else
+                           {kk: vv for kk, vv in (v or {}).items() if kk != "rules"})
+                       for k, v in c.items()}
+    for d in _dict_diff(strip(a), strip(b), ""):
+        k = d["item"].removeprefix(": ")
+        out.append({"item": _SETTING_WORDS.get(k, k.replace("_", " ")),
+                    "before": word(d["before"]), "after": word(d["after"])})
+    return out
+
+
 def config_changes(a: BridgeRun, b: BridgeRun) -> dict:
     """What changed in the model and in the macro inputs between two runs,
     read from their frozen config. ``known`` is False when either run has
@@ -242,7 +298,7 @@ def config_changes(a: BridgeRun, b: BridgeRun) -> dict:
     # model.yml's ecl block is the ECL settings, not the PD model
     ecl_a = (a.model_cfg or {}).get("ecl") if isinstance(a.model_cfg, dict) else None
     ecl_b = (b.model_cfg or {}).get("ecl") if isinstance(b.model_cfg, dict) else None
-    settings = _dict_diff(ecl_a, ecl_b, "model.yml: ecl")
+    settings = settings_changes(ecl_a, ecl_b)
     strip = lambda m: {k: v for k, v in (m or {}).items() if k != "ecl"} \
         if isinstance(m, dict) else m
     model = _dict_diff(strip(a.model_cfg), strip(b.model_cfg), "model.yml")

@@ -223,13 +223,16 @@ def customer_stage_migration(prev: pd.DataFrame,
 
     Customers present in both runs only. One that arrived or left has no
     migration to report -- it belongs in the flow analysis.
+
+    ``exposure`` and ``ecl`` are the current run's; ``exposure_prev`` and
+    ``ecl_prev`` what the same customers carried in the previous run.
     """
     if prev is None or curr is None or len(prev) == 0 or len(curr) == 0:
         return pd.DataFrame()
     pv, cv = customer_view(prev), customer_view(curr)
     if pv is None or cv is None or len(pv) == 0 or len(cv) == 0:
         return pd.DataFrame()
-    m = pv[["customer", "stage"]].merge(
+    m = pv[["customer", "stage", "exposure", "ecl"]].merge(
         cv[["customer", "stage", "exposure", "ecl"]], on="customer",
         suffixes=("_prev", "_curr"))
     m["stage_prev"] = pd.to_numeric(m["stage_prev"], errors="coerce")
@@ -237,9 +240,13 @@ def customer_stage_migration(prev: pd.DataFrame,
     m = m.dropna(subset=["stage_prev", "stage_curr"])
     if len(m) == 0:
         return pd.DataFrame()
+    # exposure and ecl are the CURRENT run's (as before); the _prev pair is
+    # what the same customers carried in the previous run
     out = (m.groupby(["stage_prev", "stage_curr"])
-           .agg(customers=("customer", "size"), exposure=("exposure", "sum"),
-                ecl=("ecl", "sum"))
+           .agg(customers=("customer", "size"),
+                exposure=("exposure_curr", "sum"), ecl=("ecl_curr", "sum"),
+                exposure_prev=("exposure_prev", "sum"),
+                ecl_prev=("ecl_prev", "sum"))
            .reset_index().rename(columns={"stage_prev": "from",
                                           "stage_curr": "to"}))
     out["from"] = out["from"].astype(int)

@@ -306,14 +306,18 @@ def stage2_reasons(d: pd.DataFrame, dpd_threshold: float = 60,
     The reasons are the ones the staging actually acts on, named:
 
         Tasdeer (collective)  the portfolio is assessed as Stage 2 outright
-        DPD <thr+1>-90        this contract is past due beyond the threshold
+        DPD <thr+1>-90        the customer's worst facility is past due
+                              beyond the threshold (staging is per customer)
         Watchlist             the customer is on the watchlist
         Restructured          Local Flag 1 -- QDB's restructuring flag,
                               including restructuring overrides
         Stage override        a reviewed override put the customer in Stage 2
-        Another facility of the customer
-                              nothing on this contract, but another facility
-                              of the same customer is in Stage 2 or 3
+
+    All but Tasdeer are customer attributes, as the staging is: a facility is
+    in Stage 2 because its customer is, so there is no separate contagion
+    reason. A customer pulled up by a Stage 3 facility is in Stage 2 on its
+    other facilities only through that; it shows as "Customer has a Stage 3
+    facility".
 
     Local Flag 3 is NOT a reason of its own. The ETL sets it on every customer
     its rule puts in Stage 2 (watchlist, restructured, worst DPD over the
@@ -340,29 +344,30 @@ def stage2_reasons(d: pd.DataFrame, dpd_threshold: float = 60,
     worst_dpd = dpd_all.groupby(cust).transform("max").reindex(s2.index)
     worst_stage = st.groupby(cust).transform("max").reindex(s2.index)
 
-    dpd = dpd_all.reindex(s2.index)
     t_tas = (s2["portfolio"].astype(str) == "Tasdeer")
-    t_dpd = ((dpd > dpd_threshold) & (dpd <= 90)).fillna(False)
+    # per customer: the worst facility's DPD, as the staging reads it
+    t_dpd = ((worst_dpd > dpd_threshold) & (worst_dpd <= 90)).fillna(False)
     t_watch = flag(s2, "watchlist")
     t_restr = flag(s2, "restructured")
     # the ETL's own Stage 2 reasons for the customer: what Local Flag 3
     # restates, so a Local Flag 3 beyond them is an override
-    rule = (t_watch | t_restr
-            | ((worst_dpd > dpd_threshold) & (worst_dpd <= 90)).fillna(False))
+    rule = t_watch | t_restr | t_dpd
     in_file = s2["customer"].astype(str).isin(
         _stage_override_set(stage_overrides, "Stage 2"))
     t_ovr = in_file | (flag(s2, "local3") & ~rule)
     own = t_tas | t_dpd | t_watch | t_restr | t_ovr
-    t_cust = ~own & (worst_stage >= 2).fillna(False)
+    t_s3 = ~own & (worst_stage >= 3).fillna(False)
 
-    return pd.DataFrame({
+    out = pd.DataFrame({
         "Tasdeer (collective)": t_tas.to_numpy(),
         f"DPD {int(dpd_threshold) + 1}-90": t_dpd.to_numpy(),
         "Watchlist": t_watch.to_numpy(),
         "Restructured": t_restr.to_numpy(),
         "Stage override": t_ovr.to_numpy(),
-        "Another facility of the customer": t_cust.to_numpy(),
     }, index=s2.index)
+    if t_s3.any():
+        out["Customer has a Stage 3 facility"] = t_s3.to_numpy()
+    return out
 
 
 def stage2_triggers(d: pd.DataFrame, dpd_threshold: float = 60,
