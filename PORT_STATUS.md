@@ -982,3 +982,15 @@ report on every position, in both engines; R's and Python's workbooks agree
 cell for cell. `tests/test_calc_workbook.py` builds a synthetic run that
 reaches the annuity, deferral, quarterly, Stage 3 at zero, a StPD the macro
 model would not give and an overlay.
+
+### Easier to read (0.32.2)
+
+Nothing frozen; the Summary gives the config version and the calculator
+version the run recorded; plain headers (Stage, Reason, Months counted); EAD
+in words (Repayment schedule / Estimated, As scheduled / Bullet / Equal
+instalments / Annuity, months between payments, grace months, number of
+payments, first payment in month, months counted in ECL); no curve number --
+the PD curve is named ("Business Finance | bucket 11") on Lines and on the PD
+tab and looked up by that name. Every figure unchanged: the 72-customer check
+on the Q2 2026 LIC-config run still matches on every position, and R 1.3.2
+writes the same workbook.

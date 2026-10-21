@@ -52,7 +52,38 @@ from .ids import as_id
 __all__ = ["customer_ecl_facts", "write_customer_workbook",
            "customer_ecl_workbook", "run_customers"]
 
-MAX_MONTH = 600          # EclConfig.max_month: the PD curves run to month 600
+MAX_MONTH = 600
+# the repayment shapes, as a reader would name them
+SHAPE_LABEL = {"bullet": "Bullet", "linear": "Equal instalments",
+               "annuity": "Annuity"}
+# column headers as the workbook shows them (internal name -> shown)
+SHOWN = {
+    "Manual stage (its digits)": "Manual stage",
+    "DPD rule": "DPD over threshold (up to 90)",
+    "Any local flag (or watchlist)": "Watchlist or local flag",
+    "Stage 3 rule": "DPD over 90 or default",
+    "Rule stage": "Stage by the rules",
+    "After manual": "Stage after manual",
+    "Customer's worst in book": "Customer's worst stage",
+    "Final stage": "Stage",
+    "Why": "Reason",
+    "Source": "EAD source",
+    "Months to maturity (N)": "Months to maturity",
+    "Shape": "Repayment type",
+    "f": "Months between payments",
+    "d": "Grace months before repayments",
+    "n payments": "Number of payments",
+    "First payment p1": "First payment in month",
+    "Monthly rate r": "Monthly interest rate",
+    "Path length": "Months of exposure",
+    "Horizon (months)": "Months counted in ECL",
+    "Horizon": "Months counted",
+    "IsLocal1": "IsLocal1 (restructured)",
+}
+
+
+def _shown(cols):
+    return [SHOWN.get(c, c) for c in cols]          # EclConfig.max_month: the PD curves run to month 600
 S1_MONTHS = 12           # Stage 1 looks twelve months ahead
 MIN_MONTHS = 3           # months for a facility at or past maturity
 
@@ -150,6 +181,34 @@ def run_customers(run_dir) -> pd.DataFrame:
         book=("book", lambda s: " + ".join(dict.fromkeys(s))),
         positions=("positions", "sum"), on_balance=("on_balance", "sum"))
     return out.sort_values("on_balance", ascending=False).reset_index(drop=True)
+
+
+def _versions(root: Path) -> dict:
+    """The config version and calculator version the run recorded: its
+    manifest's run metadata, else the saved config it was started from."""
+    import json
+    import yaml
+    meta, snap = {}, {}
+    p = root / "reports" / "manifest.json"
+    if p.is_file():
+        try:
+            m = json.loads(p.read_text(encoding="utf-8"))
+            meta, snap = m.get("run_metadata") or {}, m.get("snapshot") or {}
+        except Exception:
+            pass
+    cfg = meta.get("config_version") or snap.get("label")
+    if not cfg:
+        cu = root / "config_used" / "config_used.yml"
+        try:
+            cfg = (yaml.safe_load(cu.read_text(encoding="utf-8")) or {}).get(
+                "snapshot_label") if cu.is_file() else None
+        except Exception:
+            cfg = None
+    calc = meta.get("calculator_version")
+    if calc and meta.get("calculator_label"):
+        calc = f"{calc} ({meta['calculator_label']})"
+    return {"config_version": cfg or "not recorded (the live config, not a saved version)",
+            "calculator_version": calc or "not recorded"}
 
 
 def _report_rows(out_dir: Path, name: str) -> pd.DataFrame | None:
@@ -365,11 +424,12 @@ def customer_ecl_facts(run_dir, customer_id) -> dict:
         bkey = None if b is None else (str(int(b)) if float(b).is_integer() else str(b))
         l["rt"], l["bucket"] = rt, b
         key = (l["portfolio"], bkey)
-        l["curve_key"] = f"{l['portfolio']}|{bkey}" if bkey is not None else None
+        l["curve_key"] = (f"{l['portfolio']} | bucket {bkey}"
+                          if bkey is not None else None)
         if bkey is None or any(c["key"] == key for c in curves):
             continue
         stpd = ctx.stpd.get(f"{l['portfolio']}{_KEYSEP}{bkey}")
-        curves.append({"key": key, "label": f"{l['portfolio']}|{bkey}",
+        curves.append({"key": key, "label": f"{l['portfolio']} | bucket {bkey}",
                        "portfolio": l["portfolio"], "bucket": b, "rt": int(rt),
                        "stpd": None if stpd is None else np.asarray(stpd, dtype=float)})
 
@@ -379,6 +439,7 @@ def customer_ecl_facts(run_dir, customer_id) -> dict:
         "customer_id": cust, "customer_name": name,
         "engine": f"ifrs9qdb (python) {__version__}",
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        **_versions(root),
         "report_file": "FinalEclReport.csv" if rep is not None else None,
         "overlay_file": ovr_name,
         "settings": {"threshold": thr, "lgd_base": ctx.lgd_base,
@@ -530,19 +591,21 @@ def write_customer_workbook(facts: dict, dest=None):
     B.note(ws_set, r + 1, 1, "First a rule naming the position's portfolio "
            "and payment type, then a rule with no portfolio, else the default. "
            "A facility with 3 months or less to run is a bullet.")
-    B.header(ws_set, r + 2, 1, ["Portfolio", "Payment type", "Shape", "Key"])
+    B.header(ws_set, r + 2, 1, ["Portfolio", "Payment type", "Repayment type",
+                                 "Lookup key"])
     r0 = r + 3
     for k, (pf, pt, sh) in enumerate(st["rules"]):
         rr = r0 + k
         B.put(ws_set, rr, 1, pf or "", inp=True)
         B.put(ws_set, rr, 2, pt, inp=True)
-        B.put(ws_set, rr, 3, sh, inp=True)
+        B.put(ws_set, rr, 3, SHAPE_LABEL.get(sh, SHAPE_LABEL["bullet"]), inp=True)
         B.put(ws_set, rr, 4, f"={_a(rr, 1, fixed=False)}&\"|\"&{_a(rr, 2, fixed=False)}")
     r1 = r0 + max(len(st["rules"]), 1) - 1
     S["rule_key"] = _rng(r0, 4, r1, 4, "Settings")
     S["rule_shape"] = _rng(r0, 3, r1, 3, "Settings")
-    B.put(ws_set, r1 + 2, 1, "Default shape")
-    B.put(ws_set, r1 + 2, 2, st["default_shape"], inp=True)
+    B.put(ws_set, r1 + 2, 1, "Default repayment type")
+    B.put(ws_set, r1 + 2, 2, SHAPE_LABEL.get(st["default_shape"], SHAPE_LABEL["bullet"]),
+          inp=True)
     S["default_shape"] = _a(r1 + 2, 2, "Settings")
     B.widths(ws_set, {"A": 48, "B": 18, "C": 90, "D": 22})
 
@@ -559,10 +622,10 @@ def write_customer_workbook(facts: dict, dest=None):
                "AccountMaster.Stage", "Manual stage (its digits)",
                "IsWatchlist", "IsDefault", "IsDefaultInGCC", "IsInsolvency",
                "IsLocal1", "IsLocal2", "IsLocal3", "IsLocal4", "IsLocal5",
-               "IsLocal6", "Repayment schedule", "Rating bucket", "Curve no."]
+               "IsLocal6", "Repayment schedule", "Rating bucket", "PD curve"]
     C = {n: i + 1 for i, n in enumerate(ln_cols)}
     HR = 4
-    B.header(ws_ln, HR, 1, ln_cols)
+    B.header(ws_ln, HR, 1, _shown(ln_cols))
     LR = {}                                        # line -> row on Lines
     for k, l in enumerate(L):
         rr = HR + 1 + k
@@ -585,22 +648,22 @@ def write_customer_workbook(facts: dict, dest=None):
 
     # ---------------------------------------------------------- PD
     pm = _write_pd(B, ws_pd, facts)
-    # rating bucket and curve number on Lines, by formula
+    # the rating's bucket and the PD curve it reads, on Lines, by formula
     for l in L:
         rr = LR[l["line"]]
         rt = (f"IF(OR(LEFT({_a(rr, C['Rating type'], fixed=False)},8)=\"External\","
-              f"{_a(rr, C['Rating type'], fixed=False)}=\"2\"),\"2\",\"1\")")
+              f"{_a(rr, C['Rating type'], fixed=False)}=\"2\"),\"External\",\"Internal\")")
+        rg = _a(rr, C["Rating"], fixed=False)
         B.put(ws_ln, rr, C["Rating bucket"],
-              f"=IFERROR(INDEX({pm['rm_bucket']},MATCH({rt}&\"|\"&"
-              f"{_a(rr, C['Rating'], fixed=False)},{pm['rm_key']},0)),\"\")", "int")
-        B.put(ws_ln, rr, C["Curve no."],
-              f"=IFERROR(MATCH({_a(rr, C['Portfolio'], fixed=False)}&\"|\"&"
-              f"{_a(rr, C['Rating bucket'], fixed=False)},{pm['keys']},0),\"\")",
+              f"=IF(COUNTIFS({pm['rm_scale']},{rt},{pm['rm_rating']},{rg})=0,\"\","
+              f"SUMIFS({pm['rm_bucket']},{pm['rm_scale']},{rt},{pm['rm_rating']},{rg}))",
               "int")
+        bk = _a(rr, C["Rating bucket"], fixed=False)
+        B.put(ws_ln, rr, C["PD curve"],
+              f"=IF({bk}=\"\",\"\",{_a(rr, C['Portfolio'], fixed=False)}&\" | bucket \"&{bk})")
     B.widths(ws_ln, {"A": 6, "B": 11, "C": 14, "D": 12, "E": 12, "F": 16,
                      "G": 11, "H": 10, "I": 12, "J": 12, "K": 16, "L": 14,
                      "M": 11, "N": 9})
-    ws_ln.freeze_panes = ws_ln.cell(HR + 1, 4)
 
     def ln(line, name, fixed=True):
         return _a(LR[line], C[name], "Lines", fixed)
@@ -649,7 +712,7 @@ def write_customer_workbook(facts: dict, dest=None):
                "Customer's worst in book", "Final stage", "Why",
                "Report stage", "Check"]
     G = {n: i + 1 for i, n in enumerate(sg_cols)}
-    B.header(ws_stg, 4, 1, sg_cols)
+    B.header(ws_stg, 4, 1, _shown(sg_cols))
     GR = {}
     for k, l in enumerate(L):
         GR[l["line"]] = 5 + k
@@ -709,7 +772,6 @@ def write_customer_workbook(facts: dict, dest=None):
     B.widths(ws_stg, {"A": 6, "B": 14, "C": 11, "D": 16, "E": 7, "F": 9,
                       "G": 10, "H": 12, "I": 9, "J": 10, "K": 9, "L": 9,
                       "M": 9, "N": 11, "O": 9, "P": 42, "Q": 9, "R": 9})
-    ws_stg.freeze_panes = ws_stg.cell(5, 3)
 
     def stage(line):
         return _a(GR[line], G["Final stage"], "Staging")
@@ -746,25 +808,25 @@ def _write_pd(B, ws, facts) -> dict:
             "From the run's Output folder: Ratings.csv maps a rating to its "
             "bucket (Hierarchy); StPD.csv gives the cumulative PD by month for "
             "each portfolio and bucket. A position reads the column of its "
-            "portfolio and bucket (Lines: Curve no.). The curves come from the "
+            "portfolio and bucket (the PD curve column on Lines). The curves come from the "
             "macro model and the scenario weights, the same for every customer.")
     r = 4
     ws.cell(r, 1, "Rating buckets (Ratings.csv)").font = B.f_sub
-    B.header(ws, r + 1, 1, ["Rating type", "Rating", "Bucket (Hierarchy)", "Key"])
+    B.header(ws, r + 1, 1, ["Rating scale", "Rating", "Bucket"])
     rm = facts["ratings_map"]
     for k, m in enumerate(rm):
         rr = r + 2 + k
-        B.put(ws, rr, 1, m["rt"], inp=True)
+        B.put(ws, rr, 1, "External" if str(m["rt"]) == "2" else "Internal", inp=True)
         B.put(ws, rr, 2, m["rating"], inp=True)
         B.put(ws, rr, 3, m["bucket"], "int", inp=True)
-        B.put(ws, rr, 4, f"={_a(rr, 1, fixed=False)}&\"|\"&{_a(rr, 2, fixed=False)}")
     last = r + 1 + max(len(rm), 1)
-    out = {"rm_key": _rng(r + 2, 4, last, 4, "PD"),
+    out = {"rm_scale": _rng(r + 2, 1, last, 1, "PD"),
+           "rm_rating": _rng(r + 2, 2, last, 2, "PD"),
            "rm_bucket": _rng(r + 2, 3, last, 3, "PD")}
     curves = facts["curves"]
     nC = len(curves)
     r = last + 2
-    ws.cell(r, 1, "Cumulative PD by month (StPD.csv), portfolio|bucket").font = B.f_sub
+    ws.cell(r, 1, "Cumulative PD by month (StPD.csv), one column per portfolio and bucket").font = B.f_sub
     hr = r + 1
     B.header(ws, hr, 1, ["Month"] + [c["label"] for c in curves])
     first = hr + 1
@@ -777,7 +839,6 @@ def _write_pd(B, ws, facts) -> dict:
             B.put(ws, rr, 2 + k, v, "pd", inp=True)
     out["keys"] = _rng(hr, 2, hr, 1 + max(nC, 1), "PD")
     out["used"] = _rng(first, 2, first + MAX_MONTH, 1 + max(nC, 1), "PD")
-    ws.freeze_panes = ws.cell(first, 2)
     B.widths(ws, {"A": 14, "B": 18, "C": 18, "D": 18, "E": 18, "F": 18})
     return out
 
@@ -854,22 +915,22 @@ def _write_lgd(B, ws, facts, L, ln, S) -> dict:
 
 
 def _write_ead(B, ws, facts, L, ln, stage, S) -> dict:
-    B.title(ws, "EAD: the exposure path and the horizon",
-            "A position with a repayment schedule uses its monthly EAD from "
-            "LifeTimeParameterOther.csv (ECL tab, blue). Without one: months to "
-            "maturity N (a part month counts; 3 at or past maturity), the "
-            "shape from the Settings rules, payments every f months counted "
-            "back from maturity after any deferral d, so n = ROUNDUP((N - d) / "
-            "f) payments with the first in month p1 = N - (n - 1) f. Linear: "
-            "EAD = balance x (1 - paid / n). Annuity: balance x ((1 + r f)^n - "
-            "(1 + r f)^paid) / ((1 + r f)^n - 1), r = NIR / 12. Bullet: the "
-            "balance. Horizon: 12 months at Stage 1 (or less), the whole path "
-            "otherwise, at most month 600.")
+    B.title(ws, "EAD: how the exposure runs down, and how many months count",
+            "With a repayment schedule, the monthly exposure is the schedule's "
+            "(LifeTimeParameterOther.csv, blue on the ECL tab). Without one it is "
+            "estimated: the repayment type comes from the Settings rules (Bullet: "
+            "the balance stays until maturity; Equal instalments: the balance "
+            "falls by the same amount at each payment; Annuity: level payments "
+            "including interest). Payments fall every 'months between payments', "
+            "counted back from maturity, after any grace months. A part month "
+            "counts as a whole one, and a facility at or past maturity runs 3 "
+            "months as a bullet. Months counted in ECL: up to 12 at Stage 1, the "
+            "whole exposure at Stages 2 and 3.")
     cols = ["Line", "Contract", "Source", "Months to maturity (N)", "Shape",
-            "f", "d", "Amortising months", "n payments", "First payment p1",
+            "f", "d", "n payments", "First payment p1",
             "Monthly rate r", "Path length", "Stage", "Horizon (months)"]
     E = {n: i + 1 for i, n in enumerate(cols)}
-    B.header(ws, 4, 1, cols)
+    B.header(ws, 4, 1, _shown(cols))
     out = {}
     for k, l in enumerate(L):
         rr = 5 + k
@@ -878,7 +939,8 @@ def _write_ead(B, ws, facts, L, ln, stage, S) -> dict:
         B.put(ws, rr, E["Line"], f"={ln(x, 'Line')}")
         B.put(ws, rr, E["Contract"], f"={ln(x, 'Contract')}")
         sched = l["schedule"]
-        B.put(ws, rr, E["Source"], "Schedule" if sched is not None else "Fallback")
+        B.put(ws, rr, E["Source"], "Repayment schedule" if sched is not None
+              else "Estimated (no schedule)")
         mat, ext = ln(x, "Maturity date"), ln(x, "Extract date")
         mm = (f"((YEAR({mat})-YEAR({ext}))*12+MONTH({mat})-MONTH({ext})+"
               f"IF(DAY({mat})>DAY({ext}),1,0))")
@@ -891,14 +953,14 @@ def _write_ead(B, ws, facts, L, ln, stage, S) -> dict:
                  f"{S['rule_key']},0)),IFERROR(INDEX({S['rule_shape']},MATCH("
                  f"\"|\"&{pt},{S['rule_key']},0)),{S['default_shape']}))")
         B.put(ws, rr, E["Shape"],
-              f"=IF({g('Source')}=\"Schedule\",\"\",IF({N}<={S['minm']},\"bullet\",{shape}))")
+              f"=IF({g('Source')}=\"Repayment schedule\",\"As scheduled\","
+              f"IF({N}<={S['minm']},\"{SHAPE_LABEL['bullet']}\",{shape}))")
         pfq, dfr = ln(x, "Payment frequency (months)"), ln(x, "Deferral (months)")
         B.put(ws, rr, E["f"], f"=MAX(1,IF(ISNUMBER({pfq}),TRUNC({pfq}),1))", "int")
         B.put(ws, rr, E["d"], f"=MAX(0,MIN(IF(ISNUMBER({dfr}),TRUNC({dfr}),0),"
                               f"MAX(1,{N})-1))", "int")
-        B.put(ws, rr, E["Amortising months"], f"=MAX(1,MAX(1,{N})-{g('d')})", "int")
         B.put(ws, rr, E["n payments"],
-              f"=MAX(1,ROUNDUP({g('Amortising months')}/{g('f')},0))", "int")
+              f"=MAX(1,ROUNDUP(MAX(1,MAX(1,{N})-{g('d')})/{g('f')},0))", "int")
         B.put(ws, rr, E["First payment p1"],
               f"=MAX(1,{N})-({g('n payments')}-1)*{g('f')}", "int")
         nir = ln(x, "Nominal interest rate")
@@ -912,20 +974,22 @@ def _write_ead(B, ws, facts, L, ln, stage, S) -> dict:
               f"=MIN(IF({g('Stage')}=1,MIN({S['s1m']},{g('Path length')}),"
               f"{g('Path length')}),{S['maxm']})", "int", key=True)
         out[x] = {c: _a(rr, E[c], "EAD") for c in cols}
-    B.widths(ws, {"A": 6, "B": 14, "C": 10, "D": 11, "E": 10, "F": 5, "G": 5,
-                  "H": 11, "I": 10, "J": 11, "K": 12, "L": 10, "M": 7, "N": 10})
-    ws.freeze_panes = ws.cell(5, 3)
+    B.widths(ws, {"A": 6, "B": 14, "C": 22, "D": 11, "E": 18, "F": 12, "G": 13,
+                  "H": 11, "I": 11, "J": 12, "K": 11, "L": 7, "M": 12})
     return out
 
 
 def _write_ecl(B, ws, facts, L, ln, lg, ead, pm, S) -> dict:
     B.title(ws, "ECL month by month",
-            "ECL(t) = EAD(t) x LGD x (cumPD(t+1) - cumPD(t)) / (1 + EIR)^(t/12) "
-            "for t below the horizon; the position's ECL is the sum (Summary "
-            "tab), capped at the exposure, with Stage 3 per the Settings.")
-    cols = ["Line", "Contract", "t (month)", "EAD(t)", "In horizon",
-            "cumPD(t)", "cumPD(t+1)", "Marginal PD", "LGD", "EIR",
-            "Discount factor", "ECL(t)"]
+            "ECL in a month = EAD x LGD x PD in the month / discount factor, "
+            "where the PD in the month is the cumulative PD at its end less at "
+            "its start (the position's PD curve, PD tab) and the discount "
+            "factor is (1 + EIR)^(month / 12). A position's ECL is the sum over "
+            "the months counted (Summary tab), capped at the exposure; Stage 3 "
+            "follows the Settings.")
+    cols = ["Line", "Contract", "Month", "EAD", "Counted in ECL",
+            "Cumulative PD at start", "Cumulative PD at end", "PD in the month",
+            "LGD", "EIR", "Discount factor", "ECL in the month"]
     B.header(ws, 4, 1, cols)
     rr = 5
     out = {}
@@ -939,7 +1003,7 @@ def _write_ecl(B, ws, facts, L, ln, lg, ead, pm, S) -> dict:
             n = min(max(1, _fallback_n(l)), MAX_MONTH)
         start = rr
         onb = ln(x, "On balance")
-        curve = ln(x, "Curve no.")
+        curve = f"MATCH({ln(x, 'PD curve')},{pm['keys']},0)"
         for t in range(n):
             B.put(ws, rr, 1, x, "int")
             B.put(ws, rr, 2, l["cid"])
@@ -951,11 +1015,12 @@ def _write_ecl(B, ws, facts, L, ln, lg, ead, pm, S) -> dict:
                 paid = (f"IF({T}<{e['First payment p1']},0,MIN({e['n payments']},"
                         f"INT(({T}-{e['First payment p1']})/{e['f']})+1))")
                 rp = f"({e['Monthly rate r']}*{e['f']})"
-                coef = (f"IF({e['Shape']}=\"linear\",MAX(0,1-{paid}/{e['n payments']}),"
-                        f"IF(AND({e['Shape']}=\"annuity\",{e['Monthly rate r']}>1E-9),"
+                lin, ann = SHAPE_LABEL["linear"], SHAPE_LABEL["annuity"]
+                coef = (f"IF({e['Shape']}=\"{lin}\",MAX(0,1-{paid}/{e['n payments']}),"
+                        f"IF(AND({e['Shape']}=\"{ann}\",{e['Monthly rate r']}>1E-9),"
                         f"IF({paid}>={e['n payments']},0,MAX(0,((1+{rp})^{e['n payments']}"
                         f"-(1+{rp})^{paid})/((1+{rp})^{e['n payments']}-1))),"
-                        f"IF({e['Shape']}=\"annuity\",MAX(0,1-{paid}/{e['n payments']}),1)))")
+                        f"IF({e['Shape']}=\"{ann}\",MAX(0,1-{paid}/{e['n payments']}),1)))")
                 B.put(ws, rr, 4, f"=IF(ISNUMBER({onb}),{onb},0)*{coef}", "amt")
             B.put(ws, rr, 5, f"={T}<{e['Horizon (months)']}")
             B.put(ws, rr, 6, f"=INDEX({pm['used']},{T}+1,{curve})", "pd")
@@ -974,9 +1039,8 @@ def _write_ecl(B, ws, facts, L, ln, lg, ead, pm, S) -> dict:
     out["_col_line"] = _rng(5, 1, max(rr - 1, 5), 1, "ECL")
     out["_col_ecl"] = _rng(5, 12, max(rr - 1, 5), 12, "ECL")
     ws.auto_filter.ref = f"A4:L{max(rr - 1, 5)}"
-    ws.freeze_panes = ws.cell(5, 4)
-    B.widths(ws, {"A": 6, "B": 14, "C": 9, "D": 16, "E": 10, "F": 13, "G": 13,
-                  "H": 13, "I": 10, "J": 10, "K": 12, "L": 14})
+    B.widths(ws, {"A": 6, "B": 14, "C": 8, "D": 16, "E": 10, "F": 14, "G": 14,
+                  "H": 14, "I": 10, "J": 10, "K": 12, "L": 16})
     return out
 
 
@@ -991,6 +1055,8 @@ def _write_summary(B, ws, facts, L, ln, stage, lg, ead, ecl, pm, S, GR, G):
     info = [
         ("Run", facts["run_id"]),
         ("Extract date", L[0]["d_extract"] if L else None),
+        ("Config version", facts["config_version"]),
+        ("Calculator version", facts["calculator_version"]),
         ("Engine", facts["engine"]),
         ("Report compared", facts["report_file"] or "none in the run"),
         ("Overlay report", facts["overlay_file"] or "none"),
@@ -1012,7 +1078,7 @@ def _write_summary(B, ws, facts, L, ln, stage, lg, ead, ecl, pm, S, GR, G):
             "ECL (this workbook)", "ECL (report)", "Difference", "Overlay",
             "ECL final", "Report final", "Check"]
     U = {n: i + 1 for i, n in enumerate(cols)}
-    B.header(ws, hr, 1, cols)
+    B.header(ws, hr, 1, _shown(cols))
     first = hr + 1
     for k, l in enumerate(L):
         rr = first + k
@@ -1032,7 +1098,8 @@ def _write_summary(B, ws, facts, L, ln, stage, lg, ead, ecl, pm, S, GR, G):
         h = (f"MIN(MAX(0,IF({g('Stage')}=1,MIN({S['s1m']},{e['Months to maturity (N)']}),"
              f"{e['Months to maturity (N)']})),{S['maxm']})")
         B.put(ws, rr, U["PD lifetime"],
-              f"=IFERROR(INDEX({pm['used']},{h}+1,{ln(x, 'Curve no.')}),\"\")", "pd")
+              f"=IFERROR(INDEX({pm['used']},{h}+1,MATCH({ln(x, 'PD curve')},"
+              f"{pm['keys']},0)),\"\")", "pd")
         B.put(ws, rr, U["Horizon"], f"={e['Horizon (months)']}", "int")
         a, b = ecl[x]
         tot = f"SUM({_rng(a, 12, b, 12, 'ECL')})"
@@ -1086,7 +1153,6 @@ def _write_summary(B, ws, facts, L, ln, stage, lg, ead, ecl, pm, S, GR, G):
     B.widths(ws, {"A": 8, "B": 12, "C": 16, "D": 18, "E": 10, "F": 7, "G": 34,
                   "H": 16, "I": 16, "J": 9, "K": 12, "L": 9, "M": 18, "N": 18,
                   "O": 12, "P": 12, "Q": 16, "R": 16, "S": 10})
-    ws.freeze_panes = ws.cell(first, 4)
 
 
 def customer_ecl_workbook(run_dir, customer_id, dest=None):

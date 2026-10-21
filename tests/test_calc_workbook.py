@@ -291,7 +291,7 @@ class TestRecalculated:
                                                                rel=1e-9, abs=1e-6)
         assert rows[0]["Stage"] == 3 and rows[0]["ECL (this workbook)"] == 0
         assert rows[1]["Stage"] == 2             # the manual stage; contagion
-        assert rows[1]["Why"] == "Manual stage 2"  # lifts Stage 1 only
+        assert rows[1]["Reason"] == "Manual stage 2"  # lifts Stage 1 only
 
     def test_an_overlay_is_added_to_the_model_figure(self, tmp_path):
         r = make_run(tmp_path, overlay=True)
@@ -322,3 +322,22 @@ def test_a_real_run(tmp_path):
         for row, l in zip(rows, f["lines"]):
             if l["rep_ecl"] is not None:
                 assert row["Check"] == "OK", (c, l["cid"])
+
+
+def test_the_summary_names_the_config_version(run, tmp_path):
+    import json
+    from ifrs9qdb.calc_workbook import _versions
+    assert _versions(run)["config_version"].startswith("not recorded")
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "manifest.json").write_text(json.dumps({
+        "run_metadata": {"config_version": "26Q3-PL-update",
+                         "calculator_version": "v1.3", "calculator_label": "Q3"}}))
+    v = _versions(tmp_path)
+    assert v == {"config_version": "26Q3-PL-update", "calculator_version": "v1.3 (Q3)"}
+    f = customer_ecl_facts(run, "C1")
+    p = tmp_path / "c1.xlsx"
+    write_customer_workbook(f, p)
+    ws = openpyxl.load_workbook(p)["Summary"]
+    labels = {ws.cell(r, 1).value: ws.cell(r, 4).value for r in range(3, 12)}
+    assert labels["Config version"] == f["config_version"]
+    assert all(w.freeze_panes is None for w in openpyxl.load_workbook(p).worksheets)
