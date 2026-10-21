@@ -15,7 +15,8 @@ import pytest
 
 from ifrs9qdb.analytics import (
     customer_stage_migration, customer_view, dpd_by_stage, migration_summary,
-    normalise, rating_migration, stage2_trigger_overlap, stage3_drivers,
+    normalise, rating_migration, stage2_reasons, stage2_trigger_overlap,
+    stage2_triggers, stage3_drivers,
     stage_movers, staging_consistency,
 )
 
@@ -106,7 +107,49 @@ class TestStage2TriggerOverlap:
     def test_an_untriggered_stage_2_is_named_not_dropped(self):
         """Contagion is why C2 is there. Dropping it would break the total."""
         o = stage2_trigger_overlap(synthetic())
-        assert "Contagion or override" in set(o["combination"])
+        assert "Another facility of the customer" in set(o["combination"])
+
+
+class TestStage2Reasons:
+    """Local Flag 3 restates the ETL's own Stage 2 decision, so it is not a
+    reason; what it adds is an override, found where none of the rule's
+    triggers explains it."""
+
+    def _with_local3(self):
+        d = synthetic()
+        d["local3"] = [1, 1, 1, 0, 0]
+        return d
+
+    def test_no_other_local_flag_reason(self):
+        t = stage2_triggers(self._with_local3())
+        assert "Other local flag" not in set(t["trigger"])
+        assert "Stage override" in set(t["trigger"])
+
+    def test_local3_explained_by_the_rule_is_not_an_override(self):
+        r = stage2_reasons(self._with_local3())
+        assert not r["Stage override"].any()
+
+    def test_local3_with_no_trigger_is_an_override(self):
+        d = self._with_local3()
+        d.loc[d["contract"] == "C1", "dpd"] = 0      # A loses its DPD trigger
+        r = stage2_reasons(d)
+        hit = d.loc[r.index[r["Stage override"]], "customer"]
+        assert set(hit) == {"A"}
+
+    def test_the_override_file_names_the_customer(self):
+        ov = pd.DataFrame({"customer_id": ["C"], "value": ["Stage 2"]})
+        r = stage2_reasons(synthetic(), stage_overrides=ov)
+        assert set(synthetic().loc[r.index[r["Stage override"]],
+                                   "customer"]) == {"C"}
+
+    def test_contagion_only_when_nothing_else(self):
+        r = stage2_reasons(synthetic())
+        row = r.loc[synthetic().index[synthetic()["contract"] == "C2"][0]]
+        assert row["Another facility of the customer"]
+        assert row.drop("Another facility of the customer").sum() == 0
+
+    def test_the_dpd_label_starts_above_the_threshold(self):
+        assert "DPD 61-90" in set(stage2_triggers(synthetic())["trigger"])
 
     @real_only
     def test_the_real_book_adds_up_and_is_sorted(self, rep):
@@ -118,14 +161,23 @@ class TestStage2TriggerOverlap:
 
 class TestStage3Drivers:
     @real_only
-    def test_shares_are_of_stage_3_customers(self, rep):
-        """They do NOT add to 100: one customer trips several drivers."""
+    def test_shares_are_of_stage_3_customers_and_add_up(self, rep):
+        """Each Stage 3 customer once: the default flag is not a second
+        driver, because the ETL derives it from DPD over 90."""
         t = stage3_drivers(rep)
         n3 = int((pd.to_numeric(customer_view(rep)["stage"],
                                 errors="coerce") == 3).sum())
-        assert (t["customers"] <= n3).all()
+        assert t["customers"].sum() == n3
+        assert "Default flag" not in set(t["driver"])
         for _, r in t.iterrows():
             assert r["pct_customers"] == pytest.approx(100 * r["customers"] / n3)
+
+    def test_a_default_flag_without_dpd_is_an_override(self):
+        d = synthetic()
+        d.loc[d["contract"] == "C5", "dpd"] = 0
+        t = stage3_drivers(d).set_index("driver")
+        assert t.loc["Stage override", "customers"] == 1
+        assert t.loc["DPD over 90", "customers"] == 0
 
     def test_no_stage_3_returns_empty(self):
         d = synthetic()

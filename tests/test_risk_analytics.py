@@ -186,6 +186,76 @@ class TestSegmentMatrix:
         assert len(segment_matrix(synthetic(), rows="sector")) == 0
 
 
+class TestEffectivePd:
+    def test_stage_3_counts_at_100_percent(self):
+        """The report carries the curve PD beside a Stage 3 row; the
+        provision does not use it, so neither does the profile."""
+        d = synthetic()
+        d.loc[d["contract"] == "C3", "stage"] = 3
+        p = pd_profile(d, "stage").set_index("group")
+        assert p.loc["3", "pd_w"] == pytest.approx(1.0)
+        assert p.loc["3", "pd_mean"] == pytest.approx(1.0)
+
+    @real_only
+    def test_the_real_book_has_stage_3_at_one(self, rep):
+        p = pd_profile(rep, "stage").set_index("group")
+        if "3" in p.index:
+            assert p.loc["3", "pd_w"] == pytest.approx(1.0)
+
+
+class TestPdByScale:
+    def test_the_scales_are_kept_apart(self):
+        from ifrs9qdb.analytics import pd_by_scale
+        d = synthetic()
+        d["rating_type"] = ["Internal", "Internal", "Internal", "External"]
+        t = pd_by_scale(d)
+        assert set(t["scale"]) == {"Internal", "External"}
+        assert t["contracts"].sum() == len(d)
+
+    @needs_inputs
+    def test_ratings_run_best_first(self, rep, inputs):
+        from ifrs9qdb.analytics import pd_by_scale
+        t = pd_by_scale(rep, inputs)
+        for _, g in t.groupby("scale"):
+            assert g["order"].is_monotonic_increasing
+
+
+class TestPdCurvesByRating:
+    def _inputs(self, same=True):
+        from types import SimpleNamespace
+        from ifrs9qdb.inputs import RatingScale
+        a = np.array([0.0, 0.01, 0.02])
+        b = a if same else a * 2
+        return SimpleNamespace(
+            pd_curves={"Business Finance|1": a, "Off BS|1": b,
+                       "Investments|1": a / 2},
+            rating_type_of_portfolio={"Business Finance": 1, "Off BS": 1,
+                                      "Investments": 2},
+            scales={1: RatingScale(1, "Internal Rating", ["QDB 1+"], [1]),
+                    2: RatingScale(2, "External Rating", ["Aaa", "AAA"],
+                                   [1, 1])})
+
+    def test_one_curve_per_rating_named_by_rating(self):
+        from ifrs9qdb.analytics import pd_curves_by_rating
+        t = pd_curves_by_rating(self._inputs())
+        names = t.drop_duplicates(["scale", "rating"])
+        assert sorted(names["rating"]) == ["Aaa / AAA", "QDB 1+"]
+        assert len(t) == 4
+
+    def test_differing_portfolios_are_kept_and_named(self):
+        from ifrs9qdb.analytics import pd_curves_by_rating
+        t = pd_curves_by_rating(self._inputs(same=False))
+        internal = set(t.loc[t["scale"] == "Internal", "rating"])
+        assert internal == {"QDB 1+ (Business Finance)", "QDB 1+ (Off BS)"}
+
+    @needs_inputs
+    def test_the_real_curves_climb(self, inputs):
+        from ifrs9qdb.analytics import pd_curves_by_rating
+        t = pd_curves_by_rating(inputs, max_month=60)
+        assert len(t) > 0
+        assert t["marginal_pd"].min() >= -1e-9
+
+
 class TestPdTermStructure:
     @needs_inputs
     def test_the_curves_only_ever_climb(self, inputs):

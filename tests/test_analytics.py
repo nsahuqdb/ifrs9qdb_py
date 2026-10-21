@@ -130,7 +130,7 @@ class TestStaging:
 
     def test_triggers_cover_tasdeer_and_watchlist(self):
         t = stage2_triggers(synthetic(), dpd_threshold=60)
-        any_rows = t[t.basis == "any"].set_index("trigger")
+        any_rows = t.set_index("trigger")
         assert any_rows.loc["Tasdeer (collective)", "contracts"] == 1
         assert any_rows.loc["Watchlist", "contracts"] == 1
 

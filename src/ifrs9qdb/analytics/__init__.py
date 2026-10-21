@@ -13,12 +13,14 @@ from .profile import (  # noqa: F401
     data_quality, data_quality_detail, dpd_profile, exposure_bands, hhi,
     hhi_band, hhi_equivalent_n, lgd_distribution, lorenz_curve,
     maturity_profile,
-    normalise, pd_by_rating, pd_distribution, run_profile,
-    stage2_triggers, staging_distribution, top_contributors, vintage_profile,
+    effective_pd, normalise, pd_by_rating, pd_distribution, run_profile,
+    stage2_reasons, stage2_triggers, staging_distribution, top_contributors,
+    vintage_profile,
 )
 from .risk import (  # noqa: F401
     collateral_analysis, ead_runoff, lgd_floor_stats, lgd_vs_collateral,
-    pd_profile, pd_term_structure, report_total, segment_matrix,
+    pd_by_scale, pd_curves_by_rating, pd_profile, pd_term_structure,
+    report_total, segment_matrix,
 )
 from .scenarios import (  # noqa: F401
     scenario_comparison, scenario_ecl_from_outputs, scenario_files,

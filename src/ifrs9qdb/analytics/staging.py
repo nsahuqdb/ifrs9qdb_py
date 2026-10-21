@@ -10,7 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .profile import classify_stage, customer_view
+from .profile import (_stage_override_set, classify_stage,
+                      customer_view, stage2_reasons)
 
 __all__ = ["dpd_by_stage", "stage2_trigger_overlap", "stage3_drivers",
            "rating_migration", "migration_summary", "customer_stage_migration",
@@ -59,38 +60,22 @@ def dpd_by_stage(d: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def stage2_trigger_overlap(d: pd.DataFrame,
-                           dpd_threshold: float = 60) -> pd.DataFrame:
-    """Which COMBINATIONS of triggers put contracts into Stage 2.
+def stage2_trigger_overlap(d: pd.DataFrame, dpd_threshold: float = 60,
+                           stage_overrides=None) -> pd.DataFrame:
+    """Which COMBINATIONS of reasons put contracts into Stage 2.
 
-    Distinct from the per-trigger view, which double-counts: a name that is
+    Distinct from the per-reason view, which double-counts: a name that is
     both watchlisted and restructured appears under each. Here it appears once,
     under "Watchlist + Restructured", so the rows are additive and the overlaps
-    are visible.
-
-    A Stage 2 contract with no trigger at all is not an error -- it is there by
-    contagion from another of the customer's facilities, or by an override --
-    and it gets its own row rather than being dropped.
+    are visible. The reasons are stage2_reasons(), so the two views agree.
     """
-    if d is None or len(d) == 0:
+    r = stage2_reasons(d, dpd_threshold, stage_overrides)
+    if len(r) == 0:
         return pd.DataFrame()
-    s2 = d[pd.to_numeric(d["stage"], errors="coerce") == 2]
-    if len(s2) == 0:
-        return pd.DataFrame()
-
-    dpd = pd.to_numeric(s2.get("dpd"), errors="coerce")
-    tests = [
-        ("Tasdeer", s2["portfolio"].astype("string").fillna("") == "Tasdeer"),
-        ("Watchlist", _flag(s2, "watchlist") == 1),
-        ("Restructured", _flag(s2, "restructured") == 1),
-        ("Other flag", _local_any(s2)),
-        ("DPD", (dpd > dpd_threshold) & (dpd <= 90)),
-    ]
-    marks = pd.DataFrame({name: flag.fillna(False).to_numpy()
-                          for name, flag in tests}, index=s2.index)
-    combo = marks.apply(
-        lambda r: " + ".join(marks.columns[r.to_numpy()])
-        or "Contagion or override", axis=1)
+    s2 = d.loc[r.index]
+    names = np.array(r.columns)
+    vals = r.to_numpy()
+    combo = [" + ".join(names[row]) or "No reason in the report" for row in vals]
 
     out = (s2.assign(_c=combo).groupby("_c")
            .agg(contracts=("contract", "size"),
@@ -101,12 +86,20 @@ def stage2_trigger_overlap(d: pd.DataFrame,
                            kind="stable").reset_index(drop=True)
 
 
-def stage3_drivers(d: pd.DataFrame) -> pd.DataFrame:
-    """What is behind Stage 3, at customer level.
+def stage3_drivers(d: pd.DataFrame, stage_overrides=None) -> pd.DataFrame:
+    """Why each Stage 3 customer is in Stage 3. Customer level, additive.
 
-    The shares do NOT add to 100%: a defaulted customer is usually over 90 days
-    AND flagged, and each driver counts them. That is the point -- the question
-    is which signals are present, not how to partition them.
+        DPD over 90       the customer's worst facility is more than 90 days
+                          past due
+        Stage override    not over 90 days, but a reviewed override put the
+                          customer in Stage 3
+
+    The default flag is not counted as a driver of its own: the ETL sets it
+    exactly when the customer's worst DPD exceeds 90, or when a Stage 3
+    override is applied, so on its own it restates the two rows above. A
+    default flag WITHOUT DPD over 90 is how an override shows when the run's
+    override file is not to hand. The insolvency flag is blank in QDB's
+    extract.
     """
     cv = customer_view(d)
     if cv is None or len(cv) == 0:
@@ -115,18 +108,22 @@ def stage3_drivers(d: pd.DataFrame) -> pd.DataFrame:
     if len(s3) == 0:
         return pd.DataFrame()
 
+    over90 = (pd.to_numeric(s3.get("dpd"), errors="coerce") > 90).fillna(False)
+    in_file = s3["customer"].astype(str).isin(
+        _stage_override_set(stage_overrides, "Stage 3"))
+    ovr = ~over90 & ((_flag(s3, "default_flag") == 1).fillna(False) | in_file)
+    other = ~over90 & ~ovr
+
     def row(label: str, sel: pd.Series) -> dict:
-        sel = sel.fillna(False)
         return {"driver": label, "customers": int(sel.sum()),
                 "pct_customers": 100 * float(sel.sum()) / len(s3),
-                "exposure": float(s3.loc[sel, "exposure"].sum())}
+                "exposure": float(s3.loc[sel, "exposure"].sum()),
+                "ecl": float(s3.loc[sel, "ecl"].sum())}
 
-    return pd.DataFrame([
-        row("DPD over 90", pd.to_numeric(s3.get("dpd"), errors="coerce") > 90),
-        row("Default flag", _flag(s3, "default_flag") > 0),
-        row("Insolvency flag", _flag(s3, "insolvency") > 0),
-        row("Watchlist", _flag(s3, "watchlist") > 0),
-    ])
+    rows = [row("DPD over 90", over90), row("Stage override", ovr)]
+    if other.any():
+        rows.append(row("No reason in the report", other))
+    return pd.DataFrame(rows)
 
 
 # ------------------------------------------------------------ migration ----

@@ -994,3 +994,24 @@ the PD curve is named ("Business Finance | bucket 11") on Lines and on the PD
 tab and looked up by that name. Every figure unchanged: the 72-customer check
 on the Q2 2026 LIC-config run still matches on every position, and R 1.3.2
 writes the same workbook.
+
+## Staging and PD read plainly (0.33.0, R 1.4.0)
+
+Same change in both engines, checked against each other on the June 2026 run
+(run_00001): identical Stage 2 reasons, combinations, Stage 3 drivers, PD by
+stage and by scale, and 5,040 curve rows (21 internal + 21 external ratings
+x 120 months).
+
+* `stage2_reasons()` names why each Stage 2 contract is there: Tasdeer, DPD
+  61-90, Watchlist, Restructured (Local Flag 1), Stage override, Another
+  facility of the customer. Local Flag 3 is not a reason: the ETL sets it on
+  every Stage 2 customer and every Stage 2 override, so it is read as an
+  override only where none of the rule's triggers explains it. The app passes
+  the run's `overrides/stage_overrides.csv` too.
+* `stage3_drivers()` is additive -- DPD over 90 / Stage override. The default
+  flag is derived from worst DPD > 90 (or a Stage 3 override) in
+  `derive_customer_flags()` / `_apply_overrides()`, so it is not counted
+  again.
+* `effective_pd()`: Stage 3 at 100% in every PD profile.
+* `pd_by_scale()` and `pd_curves_by_rating()` for the by-rating view and the
+  term structure, one scale at a time.

@@ -15,7 +15,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-__all__ = ["report_total", "pd_profile", "pd_term_structure",
+from .profile import effective_pd
+
+__all__ = ["report_total", "pd_profile", "pd_by_scale", "pd_term_structure",
+           "pd_curves_by_rating",
            "lgd_floor_stats", "lgd_vs_collateral",
            "collateral_analysis", "ead_runoff", "segment_matrix"]
 
@@ -63,11 +66,15 @@ def pd_profile(d: pd.DataFrame, by: str = "stage") -> pd.DataFrame:
     Both, because the gap between them is the finding: a weighted PD far above
     the mean says the large exposures sit in the worse grades, which is a
     different book from one where the two agree.
+
+    The PD is the one the provision is priced on (effective_pd): 100% for a
+    Stage 3 contract, not the curve value the report carries beside it.
     """
     if by not in _PD_BY:
         raise ValueError(f"by must be one of {_PD_BY}, not {by!r}")
     if not _has(d, "pd"):
         return pd.DataFrame()
+    d = d.assign(pd=effective_pd(d))
     g = _group(d[by])
     rows = []
     for k, idx in d.assign(_g=g).groupby("_g").groups.items():
@@ -281,3 +288,121 @@ def pd_term_structure(inputs, portfolio: str | None = None,
             "marginal_pd": 100 * np.diff(v[:n + 1]),
         }))
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+_SCALES = {1: "Internal", 2: "External"}
+
+
+def _scale_code(v) -> int | None:
+    t = str(v)
+    if t.startswith("External"):
+        return 2
+    if t.startswith("Internal"):
+        return 1
+    try:
+        return int(float(t))
+    except (TypeError, ValueError):
+        return None
+
+
+def pd_by_scale(d: pd.DataFrame, inputs=None) -> pd.DataFrame:
+    """Exposure-weighted lifetime PD and coverage by rating, one scale at a
+    time.
+
+    The internal (QDB 1+ ... QDB 9) and external (Aaa ... C) scales reuse the
+    hierarchy numbers 1-21, so a single by-rating list mixes two different
+    things. Each row carries its ``scale`` ("Internal" / "External") and its
+    ``order`` along that scale (best first, from the run's Ratings.csv when
+    ``inputs`` are given), so a chart can draw each scale on its own axis.
+    The PD is effective_pd: 100% in Stage 3.
+    """
+    if not _has(d, "pd") or "rating" not in d.columns:
+        return pd.DataFrame()
+    x = d[d["rating"].notna() & (d["rating"].astype(str) != "")]
+    if len(x) == 0:
+        return pd.DataFrame()
+    x = x.assign(pd=effective_pd(x),
+                 _scale=(x["rating_type"].map(lambda v: _SCALES.get(
+                     _scale_code(v), str(v)))
+                     if "rating_type" in x.columns else "Internal"))
+    scales = getattr(inputs, "scales", None) or {}
+    rows = []
+    for (sc, rating), s in x.groupby(["_scale", "rating"]):
+        code = next((k for k, v in _SCALES.items() if v == sc), None)
+        sc_ = scales.get(code)
+        lv = dict(zip(sc_.ratings, sc_.hierarchy)) if sc_ is not None else {}
+        exp = float(s["exposure"].sum())
+        ecl = float(s["ecl"].sum())
+        rows.append({
+            "scale": sc, "rating": str(rating),
+            "order": lv.get(str(rating), 999),
+            "contracts": len(s), "exposure": exp,
+            "pd_w": _wmean(s["pd"], s["exposure"]),
+            "pd_mean": float(pd.to_numeric(s["pd"], errors="coerce").mean()),
+            "ecl": ecl,
+            "coverage": 100 * ecl / exp if exp > 0 else float("nan"),
+        })
+    out = pd.DataFrame(rows)
+    return out.sort_values(["scale", "order", "rating"],
+                           kind="stable").reset_index(drop=True)
+
+
+def pd_curves_by_rating(inputs, max_month: int = 120) -> pd.DataFrame:
+    """The PD curves a run priced on, by rating scale and rating.
+
+    StPD.csv carries one curve per portfolio and rating bucket, but every
+    portfolio on a scale shares the same curves -- QDB has ONE set for the
+    internally rated book and ONE for the externally rated -- so listing them
+    per portfolio and bucket number repeats each curve four or two times
+    under a label nobody reads. Here each curve appears once, named by its
+    rating: "QDB 3+", or "Baa1 / BBB+" where two agency codes share a bucket.
+
+    Should the portfolios on a scale ever carry different curves for a
+    bucket, each distinct curve is kept and its label names the portfolios.
+
+    Columns: scale, bucket, rating, portfolios, month, cum_pd, marginal_pd
+    (percent).
+    """
+    curves = getattr(inputs, "pd_curves", None) if inputs is not None else None
+    if not curves:
+        return pd.DataFrame()
+    rt_of = dict(getattr(inputs, "rating_type_of_portfolio", None) or {})
+    scales = getattr(inputs, "scales", None) or {}
+    by_key: dict[tuple, list] = {}
+    for k in curves:
+        pf, _, b = k.rpartition("|")
+        try:
+            bucket = int(float(b))
+        except ValueError:
+            continue
+        code = rt_of.get(pf, 1)
+        by_key.setdefault((code, bucket), []).append(pf)
+    rows = []
+    for (code, bucket), pfs in sorted(by_key.items()):
+        sc = scales.get(code)
+        names = [r for r, h in zip(sc.ratings, sc.hierarchy) if h == bucket] \
+            if sc is not None else []
+        label = " / ".join(names) if names else f"Bucket {bucket}"
+        groups: list[tuple[np.ndarray, list]] = []
+        for pf in sorted(pfs):
+            v = np.asarray(curves[f"{pf}|{bucket}"], dtype=float)
+            for g in groups:
+                if len(g[0]) == len(v) and np.allclose(g[0], v, equal_nan=True):
+                    g[1].append(pf)
+                    break
+            else:
+                groups.append((v, [pf]))
+        for v, members in groups:
+            n = min(len(v) - 1, int(max_month))
+            if n < 1:
+                continue
+            name = label if len(groups) == 1 else f"{label} ({', '.join(members)})"
+            rows.append(pd.DataFrame({
+                "scale": _SCALES.get(code, f"Type {code}"), "bucket": bucket,
+                "rating": name, "portfolios": ", ".join(members),
+                "month": np.arange(1, n + 1),
+                "cum_pd": 100 * v[1:n + 1],
+                "marginal_pd": 100 * np.diff(v[:n + 1]),
+            }))
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+

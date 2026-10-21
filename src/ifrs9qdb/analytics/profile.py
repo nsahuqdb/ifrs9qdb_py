@@ -26,6 +26,8 @@ __all__ = [
     "run_profile",
     "staging_distribution",
     "stage2_triggers",
+    "stage2_reasons",
+    "effective_pd",
     "classify_stage",
     "concentration",
     "lorenz_curve",
@@ -279,38 +281,110 @@ def staging_distribution(d: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def stage2_triggers(d: pd.DataFrame, dpd_threshold: float = 60) -> pd.DataFrame:
-    """Why each Stage 2 contract is in Stage 2.
+def _stage_override_set(stage_overrides, stage: str) -> set:
+    """Customers a reviewed override put in ``stage`` ("Stage 2" / "Stage 3").
 
-    Reported two ways because the triggers overlap: "has trigger" shares add to
-    more than 100%, "sole reason" shares are additive. Contract level, because
-    Tasdeer and contagion act per contract.
+    Takes the run's ``overrides/stage_overrides.csv`` as a frame (customer_id,
+    value) or a {customer: value} dict; None for none."""
+    if stage_overrides is None:
+        return set()
+    if isinstance(stage_overrides, pd.DataFrame):
+        if len(stage_overrides) == 0 or "customer_id" not in stage_overrides:
+            return set()
+        pairs = zip(stage_overrides["customer_id"], stage_overrides["value"])
+    else:
+        pairs = dict(stage_overrides).items()
+    want = re.sub(r"[^0-9]", "", stage)
+    return {str(c) for c, v in pairs
+            if re.sub(r"[^0-9]", "", str(v)) == want}
+
+
+def stage2_reasons(d: pd.DataFrame, dpd_threshold: float = 60,
+                   stage_overrides=None) -> pd.DataFrame:
+    """One row per Stage 2 contract, one True/False column per reason.
+
+    The reasons are the ones the staging actually acts on, named:
+
+        Tasdeer (collective)  the portfolio is assessed as Stage 2 outright
+        DPD <thr+1>-90        this contract is past due beyond the threshold
+        Watchlist             the customer is on the watchlist
+        Restructured          Local Flag 1 -- QDB's restructuring flag,
+                              including restructuring overrides
+        Stage override        a reviewed override put the customer in Stage 2
+        Another facility of the customer
+                              nothing on this contract, but another facility
+                              of the same customer is in Stage 2 or 3
+
+    Local Flag 3 is NOT a reason of its own. The ETL sets it on every customer
+    its rule puts in Stage 2 (watchlist, restructured, worst DPD over the
+    threshold) and on every Stage 2 override, so it restates the outcome.
+    What it adds is the override: a customer carrying it with none of the
+    rule's triggers is there by override, which is how an override is found
+    when the run's override file is not to hand. Local Flags 2, 4, 5 and 6
+    are blank or FALSE in QDB's extract.
     """
     if d is None or len(d) == 0:
         return pd.DataFrame()
-    s2 = d[d["stage"] == 2]
+    st = pd.to_numeric(d["stage"], errors="coerce")
+    s2 = d[st == 2]
     if len(s2) == 0:
         return pd.DataFrame()
 
-    t_tas = (s2["portfolio"] == "Tasdeer").fillna(False)
-    t_dpd = ((s2["dpd"] > dpd_threshold) & (s2["dpd"] <= 90)).fillna(False)
-    t_watch = (s2["watchlist"] == 1).fillna(False)
-    t_restr = (s2["restructured"] == 1).fillna(False)
-    t_other = pd.Series(False, index=s2.index)
-    for c in ("local2", "local3", "local4", "local5", "local6"):
-        t_other |= (s2[c] == 1).fillna(False)
+    def flag(frame, key):
+        if key not in frame.columns:
+            return pd.Series(False, index=frame.index)
+        return (pd.to_numeric(frame[key], errors="coerce") == 1).fillna(False)
 
-    own = t_dpd | t_watch | t_restr | t_other | t_tas
-    worst = d.groupby("customer")["stage"].transform("max").reindex(s2.index)
-    t_cont = (~own) & (worst >= 2) & (~t_tas)
-    n_own = (t_dpd.astype(int) + t_watch.astype(int) + t_restr.astype(int)
-             + t_other.astype(int) + t_tas.astype(int))
+    cust = d["customer"].astype(str)
+    dpd_all = pd.to_numeric(d["dpd"], errors="coerce")
+    worst_dpd = dpd_all.groupby(cust).transform("max").reindex(s2.index)
+    worst_stage = st.groupby(cust).transform("max").reindex(s2.index)
 
+    dpd = dpd_all.reindex(s2.index)
+    t_tas = (s2["portfolio"].astype(str) == "Tasdeer")
+    t_dpd = ((dpd > dpd_threshold) & (dpd <= 90)).fillna(False)
+    t_watch = flag(s2, "watchlist")
+    t_restr = flag(s2, "restructured")
+    # the ETL's own Stage 2 reasons for the customer: what Local Flag 3
+    # restates, so a Local Flag 3 beyond them is an override
+    rule = (t_watch | t_restr
+            | ((worst_dpd > dpd_threshold) & (worst_dpd <= 90)).fillna(False))
+    in_file = s2["customer"].astype(str).isin(
+        _stage_override_set(stage_overrides, "Stage 2"))
+    t_ovr = in_file | (flag(s2, "local3") & ~rule)
+    own = t_tas | t_dpd | t_watch | t_restr | t_ovr
+    t_cust = ~own & (worst_stage >= 2).fillna(False)
+
+    return pd.DataFrame({
+        "Tasdeer (collective)": t_tas.to_numpy(),
+        f"DPD {int(dpd_threshold) + 1}-90": t_dpd.to_numpy(),
+        "Watchlist": t_watch.to_numpy(),
+        "Restructured": t_restr.to_numpy(),
+        "Stage override": t_ovr.to_numpy(),
+        "Another facility of the customer": t_cust.to_numpy(),
+    }, index=s2.index)
+
+
+def stage2_triggers(d: pd.DataFrame, dpd_threshold: float = 60,
+                    stage_overrides=None) -> pd.DataFrame:
+    """Why each Stage 2 contract is in Stage 2, reason by reason.
+
+    A contract counts under every reason it has, so the shares add to more
+    than 100%; the trigger combinations (stage2_trigger_overlap) are the
+    additive view. Contract level, because Tasdeer and contagion act per
+    contract. A last row counts any Stage 2 contract the report gives no
+    reason for -- normally none.
+    """
+    r = stage2_reasons(d, dpd_threshold, stage_overrides)
+    if len(r) == 0:
+        return pd.DataFrame()
+    s2 = d.loc[r.index]
     total_ecl = max(s2["ecl"].sum(), 1)
 
-    def row(label, sel, basis):
+    def row(label, sel):
+        sel = pd.Series(np.asarray(sel, dtype=bool), index=s2.index)
         return {
-            "trigger": label, "basis": basis,
+            "trigger": label,
             "contracts": int(sel.sum()),
             "customers": int(s2.loc[sel, "customer"].nunique()),
             "pct_contracts": 100 * sel.sum() / len(s2),
@@ -319,23 +393,10 @@ def stage2_triggers(d: pd.DataFrame, dpd_threshold: float = 60) -> pd.DataFrame:
             "pct_ecl": 100 * s2.loc[sel, "ecl"].sum() / total_ecl,
         }
 
-    dpd_lab = f"DPD {int(dpd_threshold)}-90"
-    rows = [
-        row("Tasdeer (collective)", t_tas, "any"),
-        row("Watchlist", t_watch, "any"),
-        row("Restructured", t_restr, "any"),
-        row("Other local flag", t_other, "any"),
-        row(dpd_lab, t_dpd, "any"),
-        row("Contagion from another facility", t_cont, "any"),
-        row("Tasdeer (collective)", t_tas & (n_own == 1), "sole"),
-        row("Watchlist", t_watch & (n_own == 1), "sole"),
-        row("Restructured", t_restr & (n_own == 1), "sole"),
-        row("Other local flag", t_other & (n_own == 1), "sole"),
-        row(dpd_lab, t_dpd & (n_own == 1), "sole"),
-        row("Contagion from another facility", t_cont, "sole"),
-        row("More than one trigger", n_own > 1, "sole"),
-        row("Stage override", (~own) & (~t_cont), "sole"),
-    ]
+    rows = [row(c, r[c]) for c in r.columns]
+    none = ~r.any(axis=1)
+    if none.any():
+        rows.append(row("No reason in the report", none))
     return pd.DataFrame(rows)
 
 
@@ -511,12 +572,27 @@ def vintage_profile(d: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values("vintage").reset_index(drop=True)
 
 
+def effective_pd(d: pd.DataFrame) -> pd.Series:
+    """The lifetime PD a contract is provisioned on: 100% in Stage 3.
+
+    A Stage 3 contract has defaulted, so its PD is 1 and its provision is the
+    full outstanding. The report's "PD Lifetime Value" column still carries
+    the rating curve's lifetime PD for those rows -- LIC writes it, the
+    provision does not use it -- and averaging that figure made Stage 3 look
+    like a PD of about 0.8.
+    """
+    p = pd.to_numeric(d["pd"], errors="coerce")
+    if "stage" in d.columns:
+        p = p.where(pd.to_numeric(d["stage"], errors="coerce") != 3, 1.0)
+    return p
+
+
 def pd_distribution(d: pd.DataFrame, bins: int = 20) -> pd.DataFrame:
     if d is None or len(d) == 0 or d["pd"].isna().all():
         return pd.DataFrame()
     edges = np.linspace(0, 1, bins + 1)
     labels = [f"{100*edges[i]:.0f}-{100*edges[i+1]:.0f}%" for i in range(bins)]
-    return _banded(d.assign(pd=d["pd"].clip(0, 1)), "pd", edges, labels)
+    return _banded(d.assign(pd=effective_pd(d).clip(0, 1)), "pd", edges, labels)
 
 
 def pd_by_rating(d: pd.DataFrame) -> pd.DataFrame:
@@ -527,7 +603,7 @@ def pd_by_rating(d: pd.DataFrame) -> pd.DataFrame:
     """
     if d is None or len(d) == 0:
         return pd.DataFrame()
-    x = d[d["rating"].notna()]
+    x = d[d["rating"].notna()].assign(pd=lambda f: effective_pd(f))
     if len(x) == 0:
         return pd.DataFrame()
     g = x.groupby("rating")
