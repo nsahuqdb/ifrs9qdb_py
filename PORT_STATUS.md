@@ -1026,3 +1026,11 @@ machine: the "Methodology change" there is the Al Dhameen payment type 4
 repayment shape, Bullet in the 26q2-lic snapshot and Equal instalments in
 26q3-lic -- about -5.1m on run 14's Al Dhameen book. Same engine for both
 runs, so no engine change.
+
+## Stress testing made plainer (0.34.0, R 1.5.0)
+
+Largest N default skips customers already in Stage 3; `mev_stress` takes a
+GCC shift for the externally rated book and holds both scales' weights on
+"hold" (external year by year, via `explicit_weights_per_year`); external
+weights can be set alone. R and Python agree on the June 2026 run: GCC −2
+points with weights held, +1,196,968 on Investments and zero elsewhere.

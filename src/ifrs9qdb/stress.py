@@ -495,18 +495,21 @@ def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
         stage[sc] = int(spec.stage_to)
         notes.append(f"Moved to Stage {int(spec.stage_to)}")
 
-    # largest N forced to default: rank by EXPOSURE, and keep every one picked.
-    # Ranking by ECL puts customers already in Stage 3 at the top -- they carry
-    # a 100% provision by construction -- so the lever quietly delivered fewer
-    # defaults than asked for.
+    # largest N forced to default: the N largest customers by EXPOSURE that
+    # are not in default already. A customer already in Stage 3 carries its
+    # full outstanding, so picking one would add nothing and the lever would
+    # deliver fewer new defaults than asked for.
     defaulted: list[str] = []
     if spec.default_top_n and spec.default_top_n > 0:
-        elig = ing[scoped & (ing["exposure"] > 0)]
+        cust = ing["customer"].astype(str)
+        worst = pd.Series(stage, index=ing.index).groupby(cust).transform("max")
+        elig = ing[scoped & (ing["exposure"] > 0) & (worst < 3)]
         rank = elig.groupby("customer")["exposure"].sum().sort_values(ascending=False)
         defaulted = [str(c) for c in rank.head(spec.default_top_n).index]
         hit = scoped & ing["customer"].astype(str).isin(defaulted)
         stage[hit.to_numpy()] = 3
-        notes.append(f"{len(defaulted)} largest customers by exposure forced to Stage 3")
+        notes.append(f"{len(defaulted)} largest performing customers by "
+                     "exposure forced to Stage 3")
 
     rating = ing["rating"].astype(str).to_numpy().copy()
     if spec.rating_notches:
@@ -636,7 +639,7 @@ REVERSE_LEVERS = {
                        "unit": " notches", "integer": True},
     "collateral_pct": {"label": "Collateral value", "lo": 100.0, "hi": 0.0, "unit": "%"},
     "exposure_pct": {"label": "Exposure", "lo": 100.0, "hi": 300.0, "unit": "%"},
-    "lgd_base": {"label": "LGD base", "lo": 0.45, "hi": 1.0, "unit": ""},
+    "lgd_base": {"label": "Maximum LGD (unsecured)", "lo": 0.45, "hi": 1.0, "unit": ""},
     "default_top_n": {"label": "Largest customers defaulting", "lo": 0, "hi": 100,
                       "unit": " customers", "integer": True},
 }
@@ -800,12 +803,10 @@ TORNADO_LEVERS = [
     {"key": "collateral_pct", "label": "Collateral -25%", "value": 75},
     {"key": "collateral_pct", "label": "Collateral -50%", "value": 50},
     {"key": "exposure_pct", "label": "Exposure +20%", "value": 120},
-    {"key": "lgd_base", "label": "LGD base 0.45 to 0.55", "value": 0.55},
-    {"key": "lgd_floor", "label": "LGD floor 0.5 to 0.7", "value": 0.7},
+    {"key": "lgd_base", "label": "Maximum LGD 0.45 to 0.55", "value": 0.55},
+    {"key": "lgd_floor", "label": "Minimum LGD 0.225 to 0.315", "value": 0.7},
     {"key": "dpd_threshold", "label": "DPD threshold 60 to 30", "value": 30},
     {"key": "default_top_n", "label": "Largest 5 default", "value": 5},
-    {"key": "contagion", "label": "Contagion off", "value": False},
-    {"key": "tasdeer_collective", "label": "Tasdeer not collective", "value": False},
 ]
 
 
@@ -1018,7 +1019,8 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
                weight_mode: str = "auto",
                weights: dict | None = None,
                cfg: EclConfig | None = None,
-               external_weights: dict | None = None) -> dict:
+               external_weights: dict | None = None,
+               gcc_shock: float = 0.0) -> dict:
     """Reprice the book on a different macroeconomic path.
 
     The whole PD chain is rebuilt from the run's OWN frozen config with the
@@ -1028,7 +1030,10 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
 
     ``mev_new`` sets individual cells -- a frame of ``year``, ``idx``, ``value``
     -- and ``shock`` adds a delta to one MEV across every year, keyed by its
-    1-based index. Both may be given; the cells are set first.
+    1-based index. Both may be given; the cells are set first. ``gcc_shock``
+    adds a delta, in percentage points, to every GCC country's growth in
+    every forecast year -- the path the externally rated book (Investments,
+    Banks and FIs) is priced on.
 
     ``weight_mode`` decides what happens to the scenario weights, and it is a
     genuine choice rather than a detail. The internal weights run on
@@ -1036,8 +1041,8 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
     very matrix, so editing non-oil GDP moves the weights AND the curves:
 
         auto    leave the config alone; the weights follow the new path
-        hold    pin the internal weights to what the unedited config gives,
-                isolating the PD effect
+        hold    pin both scales' weights to what the unedited config gives
+                (the external one year by year), isolating the PD effect
         custom  use the weights supplied: ``weights`` for the internal
                 scale, normalised; the external scale keeps its own (set per
                 year from GCC growth, which this screen does not edit)
@@ -1104,6 +1109,11 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
             if 0 <= i < len(fc[y]):
                 fc[y][i] += delta
     raw["mev_forecasts"]["forecasts"] = fc
+    if gcc_shock:
+        g = raw.get("external_gcc_country_growth") or {}
+        raw["external_gcc_country_growth"] = {
+            c: [float(v) + float(gcc_shock) for v in np.atleast_1d(vals)]
+            for c, vals in g.items()}
 
     # "This run's" weights: what the unedited config gives on this engine --
     # the baseline's. The config's explicit_weights are a rounded snapshot,
@@ -1116,16 +1126,28 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
         held = None
     base_internal = held or (raw.get("internal_scenario_weights") or {}).get("explicit_weights")
     if weight_mode == "hold":
-        # Pin exactly those, so only the PD effect of the edit moves. The
-        # external weights follow GCC growth, which this screen does not edit.
+        # Pin exactly those, so only the PD effect of the edit moves -- the
+        # external weights too, year by year, as the run's GCC path gave them.
         if held is None:
             return {"ok": False,
                     "reason": "The run's scenario weights could not be resolved."}
         raw["internal_scenario_weights"] = {
             **(raw.get("internal_scenario_weights") or {}),
             "mode": "explicit", "explicit_weights": held}
-    elif weight_mode == "custom" and weights:
-        names = list(base_internal or weights)
+        try:
+            from .etl.macro import resolve_scenario_weights
+            _, ext0 = resolve_scenario_weights(static, model, raw0)
+            raw["external_scenario_weights"] = {
+                **(raw.get("external_scenario_weights") or {}),
+                "mode": "explicit",
+                "explicit_weights": {k: float(v) for k, v in ext0["average"].items()},
+                "explicit_weights_per_year": [
+                    {k: float(v) for k, v in row.items()}
+                    for _, row in ext0["per_year"].iterrows()]}
+        except Exception:
+            pass        # no external block: the internal scale alone is held
+    elif weight_mode == "custom" and (weights or external_weights):
+        names = list(base_internal or weights or external_weights)
         for node, given in (("internal_scenario_weights", weights),
                             ("external_scenario_weights", external_weights)):
             if not given:
@@ -1272,9 +1294,16 @@ def run_scenario_weights(run_path) -> dict:
                 "reason": f"The run's scenario weights could not be resolved: {exc}"}
     names = list(static["scenario_severity"]["scenario"])
     ext = external["average"]
+    try:                       # the GCC path the external weights come from
+        from .etl.macro import _gcc_inputs, _n_forecasts
+        _, gcc = _gcc_inputs(static, raw, _n_forecasts(model, raw))
+        gcc = [float(v) for v in np.atleast_1d(gcc)] if gcc is not None else []
+    except Exception:
+        gcc = []
     return {"ok": True,
             "internal": {k: float(internal[k]) for k in names if k in internal},
-            "external": {k: float(ext[k]) for k in names if k in ext.index}}
+            "external": {k: float(ext[k]) for k in names if k in ext.index},
+            "gcc_forecast": gcc}
 
 
 def scenario_weights_sensitivity(inputs, report, run_path,

@@ -84,36 +84,32 @@ class TestStressOnTheRealBook:
         assert (r["delta"] > 1) if direction == "up" else (r["delta"] < -1)
 
     def test_asking_for_n_defaults_picks_n_customers(self, book):
-        """The lever picks N CUSTOMERS by exposure, and keeps every one.
-
-        Ranking by ECL put already-defaulted customers at the top -- they carry
-        a 100% provision by construction -- so the lever delivered fewer
-        defaults than asked for. Ranking by exposure fixed that.
-
-        Fewer than N may actually MOVE, and that is correct: a customer already
-        in Stage 3 is genuinely among the largest and stays in the list rather
-        than being hidden, which is what the R does. What must not happen is
-        the list itself being short.
-        """
+        """The lever picks the N largest customers by exposure that are not
+        in default already, so asking for five gives five new defaults. A
+        customer already in Stage 3 carries its full outstanding; picking one
+        added nothing and the lever delivered fewer defaults than asked for."""
         inp, rep, internal = book
         r = apply_stress(inp, rep,
                          StressSpec(name="d", portfolios=internal, default_top_n=5))
         assert len(r["defaulted"]) == 5
         assert len(set(r["defaulted"])) == 5, "the same customer picked twice"
-
-        scoped = rep[rep["portfolio"].isin(internal)]
-        picked = scoped[scoped["customer"].isin(r["defaulted"])]
-        already = picked.groupby("customer")["stage"].min().eq(3).sum()
-        assert r["customers_moved"] == 5 - already
+        # none is in default already, so every one is a new default
+        assert r["customers_moved"] == 5
 
     def test_the_customers_picked_are_the_largest_by_exposure(self, book):
         inp, rep, internal = book
         r = apply_stress(inp, rep,
                          StressSpec(name="d", portfolios=internal, default_top_n=5))
         scoped = rep[rep["portfolio"].isin(internal) & (rep["exposure"] > 0)]
-        biggest = (scoped.groupby("customer")["exposure"].sum()
+        performing = scoped.groupby("customer")["stage"].max() < 3
+        biggest = (scoped.groupby("customer")["exposure"].sum()[performing]
                    .sort_values(ascending=False).head(5).index)
         assert set(r["defaulted"]) == set(biggest)
+
+    def test_no_staging_policy_lever_in_the_standard_moves(self):
+        from ifrs9qdb.stress import TORNADO_LEVERS
+        keys = {lv["key"] for lv in TORNADO_LEVERS}
+        assert not keys & {"contagion", "tasdeer_collective"}
 
     def test_scope_confines_the_change(self, book):
         inp, rep, _ = book

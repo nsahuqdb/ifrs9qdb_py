@@ -228,3 +228,36 @@ class TestScenarioWeights:
         down = sv.set_index("scenario").loc["Significant Downturn", "change"]
         up = sv.set_index("scenario").loc["Significant Uptrend", "change"]
         assert down > 0 > up
+
+
+class TestTheExternalBook:
+    """GCC growth drives the externally rated book (Investments, Banks and
+    FIs) only; holding the weights holds the external ones year by year."""
+
+    @needs_frozen
+    def test_a_gcc_shock_moves_only_the_external_book(self, book):
+        inp, _ = book
+        r = mev_stress(*book, OUT, gcc_shock=-2.0, weight_mode="hold")
+        assert r["ok"], r.get("reason")
+        bp = r["by_portfolio"].set_index("portfolio")["change"]
+        ext = set(inp.external_portfolios())
+        assert bp[[p for p in bp.index if p not in ext]].abs().max() < 1e-6
+        assert bp[[p for p in bp.index if p in ext]].sum() > 0, \
+            "slower GCC growth must raise the external provision"
+
+    @needs_frozen
+    def test_holding_with_no_edit_moves_nothing(self, book):
+        r = mev_stress(*book, OUT, weight_mode="hold")
+        assert r["delta"] == pytest.approx(0.0, abs=1e-4)
+
+    @needs_frozen
+    def test_external_weights_alone_leave_the_internal_book(self, book):
+        from ifrs9qdb.stress import run_scenario_weights
+        inp, _ = book
+        we = dict(run_scenario_weights(OUT)["external"])
+        we["Significant Downturn"] += 0.1
+        r = mev_stress(*book, OUT, weight_mode="custom", external_weights=we)
+        assert r["ok"], r.get("reason")
+        bp = r["by_portfolio"].set_index("portfolio")["change"]
+        ext = set(inp.external_portfolios())
+        assert bp[[p for p in bp.index if p not in ext]].abs().max() < 1e-6

@@ -898,13 +898,28 @@ def resolve_external_scenario_weights(model_inputs, static, gcc_history,
     """The external weights, as ``{"per_year": ..., "average": ...}``.
 
     ``explicit`` repeats one vector across every year, which is what the R does
-    when the block is written out by hand; ``auto_gcc_cdf`` derives a vector
-    per year from the regional forecast.
+    when the block is written out by hand, or takes one vector per year from
+    ``explicit_weights_per_year``; ``auto_gcc_cdf`` derives a vector per year
+    from the regional forecast.
     """
     block = (model_inputs.get("external_scenario_weights") or {})
     mode = block.get("mode", "explicit")
     names = list(static["scenario_severity"]["scenario"])
     n_years = len(np.atleast_1d(np.asarray(gcc_forecasts, dtype=float)))
+
+    if mode == "explicit" and block.get("explicit_weights_per_year"):
+        # one vector per forecast year -- how a stress holds the weights a
+        # run's own GCC path gave while the path itself is shocked
+        rows = []
+        for i, given in enumerate(block["explicit_weights_per_year"]):
+            w = pd.Series({k: float(v) for k, v in dict(given).items()}).reindex(names)
+            if w.isna().any():
+                raise ValueError(f"external explicit_weights_per_year[{i}] is "
+                                 f"missing entries for: {sorted(w.index[w.isna()])}")
+            rows.append(w)
+        per_year = pd.DataFrame(rows, columns=names)
+        per_year.index = [f"year_{i}" for i in range(1, len(per_year) + 1)]
+        return {"per_year": per_year, "average": per_year.mean(axis=0)}
 
     if mode == "explicit":
         explicit = block.get("explicit_weights")
