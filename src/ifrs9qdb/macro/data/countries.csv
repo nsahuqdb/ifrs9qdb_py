@@ -1,0 +1,15 @@
+code,iso2,name,role
+QAT,QA,Qatar,home
+SAU,SA,Saudi Arabia,gcc
+ARE,AE,United Arab Emirates,gcc
+KWT,KW,Kuwait,gcc
+OMN,OM,Oman,gcc
+BHR,BH,Bahrain,gcc
+USA,US,United States,rates
+CHN,CN,China,partner
+JPN,JP,Japan,partner
+KOR,KR,Korea,partner
+IND,IN,India,partner
+GBR,GB,United Kingdom,partner
+G163,U2,Euro area,partner
+G001,W00,World,aggregate

@@ -1,0 +1,29 @@
+series_id,source,dataset,country,indicator,freq,name,unit,last_actual,release
+FRED:FEDFUNDS::FEDFUNDS:M,FRED,FEDFUNDS,,FEDFUNDS,M,Federal Funds Effective Rate,Percent,,fixture
+IMF:FSI:QAT:FSANL_PT:Q,IMF,FSI,QAT,FSANL_PT,Q,Nonperforming loans to total gross loans,Percent,,fixture
+IMF:PCPS:W00:PNGASJP.USD:M,IMF,PCPS,W00,PNGASJP.USD,M,"Natural gas, LNG, Japan · US dollars",US dollars,,fixture
+IMF:PCPS:W00:POILBRE.USD:M,IMF,PCPS,W00,POILBRE.USD,M,"Crude Oil (petroleum), Brent · US dollars",US dollars,,fixture
+IMF:REO_MCD:QAT:NGDP_NOIL_RPCH:A,IMF,REO_MCD,QAT,NGDP_NOIL_RPCH,A,Non-oil real GDP growth,Percent change,2025,fixture
+IMF:WEO:ARE:NGDPD:A,IMF,WEO,ARE,NGDPD,A,"Gross domestic product, current prices","U.S. dollars, billions",2025,fixture
+IMF:WEO:ARE:NGDP_RPCH:A,IMF,WEO,ARE,NGDP_RPCH,A,"Gross domestic product, constant prices",Percent change,2025,fixture
+IMF:WEO:BHR:NGDPD:A,IMF,WEO,BHR,NGDPD,A,"Gross domestic product, current prices","U.S. dollars, billions",2025,fixture
+IMF:WEO:BHR:NGDP_RPCH:A,IMF,WEO,BHR,NGDP_RPCH,A,"Gross domestic product, constant prices",Percent change,2025,fixture
+IMF:WEO:CHN:NGDPD:A,IMF,WEO,CHN,NGDPD,A,"Gross domestic product, current prices","U.S. dollars, billions",2025,fixture
+IMF:WEO:CHN:NGDP_RPCH:A,IMF,WEO,CHN,NGDP_RPCH,A,"Gross domestic product, constant prices",Percent change,2025,fixture
+IMF:WEO:G001:NGDPD:A,IMF,WEO,G001,NGDPD,A,"Gross domestic product, current prices","U.S. dollars, billions",2025,fixture
+IMF:WEO:G001:NGDP_RPCH:A,IMF,WEO,G001,NGDP_RPCH,A,"Gross domestic product, constant prices",Percent change,2025,fixture
+IMF:WEO:KWT:NGDPD:A,IMF,WEO,KWT,NGDPD,A,"Gross domestic product, current prices","U.S. dollars, billions",2025,fixture
+IMF:WEO:KWT:NGDP_RPCH:A,IMF,WEO,KWT,NGDP_RPCH,A,"Gross domestic product, constant prices",Percent change,2025,fixture
+IMF:WEO:OMN:NGDPD:A,IMF,WEO,OMN,NGDPD,A,"Gross domestic product, current prices","U.S. dollars, billions",2025,fixture
+IMF:WEO:OMN:NGDP_RPCH:A,IMF,WEO,OMN,NGDP_RPCH,A,"Gross domestic product, constant prices",Percent change,2025,fixture
+IMF:WEO:QAT:GGX:A,IMF,WEO,QAT,GGX,A,General government total expenditure,"National currency, billions",2025,fixture
+IMF:WEO:QAT:GGXCNL_NGDP:A,IMF,WEO,QAT,GGXCNL_NGDP,A,General government net lending/borrowing,Percent of GDP,2025,fixture
+IMF:WEO:QAT:NGDPD:A,IMF,WEO,QAT,NGDPD,A,"Gross domestic product, current prices","U.S. dollars, billions",2025,fixture
+IMF:WEO:QAT:NGDP_RPCH:A,IMF,WEO,QAT,NGDP_RPCH,A,"Gross domestic product, constant prices",Percent change,2025,fixture
+IMF:WEO:QAT:PCPIPCH:A,IMF,WEO,QAT,PCPIPCH,A,"Inflation, average consumer prices",Percent change,2025,fixture
+IMF:WEO:SAU:NGDPD:A,IMF,WEO,SAU,NGDPD,A,"Gross domestic product, current prices","U.S. dollars, billions",2025,fixture
+IMF:WEO:SAU:NGDP_RPCH:A,IMF,WEO,SAU,NGDP_RPCH,A,"Gross domestic product, constant prices",Percent change,2025,fixture
+NPC:VISITORS:QAT:ARRIVALS:A,NPC,VISITORS,QAT,ARRIVALS,A,Visitor arrivals,Thousands,,fixture
+QCB:CREDIT_PRIVATE:QAT:LEVEL:A,QCB,CREDIT_PRIVATE,QAT,LEVEL,A,Credit to the private sector,QAR billions,,fixture
+QCB:QMR:QAT:DEPOSIT:A,QCB,QMR,QAT,DEPOSIT,A,QCB deposit rate (QMR),Percent,,fixture
+QCB:REPI:QAT:INDEX:Q,QCB,REPI,QAT,INDEX,Q,Real estate price index,Index,,fixture

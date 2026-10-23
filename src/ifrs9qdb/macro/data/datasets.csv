@@ -1,0 +1,29 @@
+group,dataset,candidates,label,frequency,country_dim,start,forecast,fetch,notes
+Outlook,WEO,WEO,World Economic Outlook,A,COUNTRY,1980,yes,yes,April and October releases; five-year projections
+Outlook,FM,FM,Fiscal Monitor,A,COUNTRY,1990,yes,yes,Fiscal balance and debt; five-year projections
+Outlook,REO_MCD,MCDREO|REO_MCD|MCD_REO,Regional Economic Outlook: Middle East and Central Asia,A,COUNTRY,2000,yes,yes,Non-oil GDP for the GCC
+National accounts,ANEA,ANEA,National accounts (annual),A,COUNTRY,1990,no,yes,GDP by activity and by spending
+National accounts,QNEA,QNEA,National accounts (quarterly),Q,COUNTRY,2000,no,yes,
+Prices and markets,PCPS,PCPS,Primary commodity prices,M,REF_AREA=W00,1990,no,yes,Brent; LNG; metals; fertiliser
+Prices and markets,CTOT,CTOT|PCTOT,Commodity terms of trade,A,COUNTRY,1990,no,yes,
+Prices and markets,CPI,CPI,Consumer prices,M,COUNTRY,2000,no,yes,
+Prices and markets,PPI,PPI,Producer prices,M,COUNTRY,2000,no,no,
+Prices and markets,ER,ER,Exchange rates,M,COUNTRY,2000,no,yes,
+Prices and markets,EER,EER,Effective exchange rates,M,COUNTRY,2000,no,yes,
+Prices and markets,MFS_IR,MFS_IR,Interest rates,M,COUNTRY,2000,no,yes,Policy; interbank; lending and deposit rates
+Money and banks,MFS_MA,MFS_MA,Monetary aggregates,M,COUNTRY,2000,no,yes,
+Money and banks,MFS_ODC,MFS_ODC|MFS_DC,Banks (other depository corporations),M,COUNTRY,2000,no,yes,Credit to the private sector
+Money and banks,MFS_CBS,MFS_CBS,Central bank survey,M,COUNTRY,2000,no,no,
+Money and banks,FSI,FSIC|FSI,Financial soundness indicators,Q,COUNTRY,2005,no,yes,Bank NPL ratio; capital; profitability; liquidity
+Money and banks,FAS,FAS,Financial access survey,A,COUNTRY,2004,no,no,
+Government,GFS_SOO,GFS_SOO,Government finance: operations,A,COUNTRY,1990,no,yes,Revenue and expense
+Government,GFS_COFOG,GFS_COFOG,Government finance: spending by function,A,COUNTRY,1990,no,yes,
+Government,GFS_BS,GFS_BS,Government finance: balance sheet,A,COUNTRY,1990,no,no,
+Government,HPDD,HPDD,Historical public debt,A,COUNTRY,1950,no,no,
+External,BOP,BOP,Balance of payments,Q,COUNTRY,2000,no,yes,
+External,IIP,IIP,International investment position,Q,COUNTRY,2000,no,yes,
+External,IMTS,IMTS|DOT,Merchandise trade by partner,A,COUNTRY,1990,no,yes,Annual only to keep it small
+External,CDIS,CDIS,Direct investment positions,A,COUNTRY,2009,no,no,
+External,CPIS,CPIS,Portfolio investment positions,A,COUNTRY,2001,no,no,
+External,IRFCL,IRFCL,Reserves and foreign currency liquidity,M,COUNTRY,2000,no,yes,
+Labour,LS,LS,Labour statistics,A,COUNTRY,1990,no,yes,Employment and wages

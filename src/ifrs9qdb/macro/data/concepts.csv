@@ -1,0 +1,32 @@
+concept,label,unit,transform,candidates,model_variable,core,persistence,default_sd
+NONOIL_GDP_QAT,Qatar non-oil real GDP growth,% change,none,IMF:REO_MCD:QAT:*NOIL*RPCH*|IMF:REO_MCD:QAT:*NHG*RPCH*|FRED:QATNGDPXORPCHPT:*|STATIC:NONOIL:QAT:*|name~[Nn]on-?oil.*[Rr]eal@IMF:REO_MCD:QAT:*,VAR_NON_OIL_GDP_GROWTH,yes,0.3,3.0
+GDP_QAT,Qatar real GDP growth,% change,none,IMF:WEO:QAT:NGDP_RPCH*|DM:WEO:QAT:NGDP_RPCH:*|STATIC:GCC_GDP:QAT:*,GCC:Qatar,yes,0.2,4.0
+GDP_SAU,Saudi Arabia real GDP growth,% change,none,IMF:WEO:SAU:NGDP_RPCH*|DM:WEO:SAU:NGDP_RPCH:*|STATIC:GCC_GDP:SAU:*,GCC:Saudi Arabia,yes,0.2,4.0
+GDP_ARE,UAE real GDP growth,% change,none,IMF:WEO:ARE:NGDP_RPCH*|DM:WEO:ARE:NGDP_RPCH:*|STATIC:GCC_GDP:ARE:*,GCC:United Arab Emirates,yes,0.2,4.0
+GDP_KWT,Kuwait real GDP growth,% change,none,IMF:WEO:KWT:NGDP_RPCH*|DM:WEO:KWT:NGDP_RPCH:*|STATIC:GCC_GDP:KWT:*,GCC:Kuwait,yes,0.2,4.0
+GDP_OMN,Oman real GDP growth,% change,none,IMF:WEO:OMN:NGDP_RPCH*|DM:WEO:OMN:NGDP_RPCH:*|STATIC:GCC_GDP:OMN:*,GCC:Oman,yes,0.2,4.0
+GDP_BHR,Bahrain real GDP growth,% change,none,IMF:WEO:BHR:NGDP_RPCH*|DM:WEO:BHR:NGDP_RPCH:*|STATIC:GCC_GDP:BHR:*,GCC:Bahrain,yes,0.2,4.0
+NGDPD_QAT,Qatar nominal GDP (USD bn),USD bn,none,IMF:WEO:QAT:NGDPD*|DM:WEO:QAT:NGDPD:*|STATIC:GCC_NGDPD:QAT:*,GCCW:Qatar,no,0.9,
+NGDPD_SAU,Saudi Arabia nominal GDP (USD bn),USD bn,none,IMF:WEO:SAU:NGDPD*|DM:WEO:SAU:NGDPD:*|STATIC:GCC_NGDPD:SAU:*,GCCW:Saudi Arabia,no,0.9,
+NGDPD_ARE,UAE nominal GDP (USD bn),USD bn,none,IMF:WEO:ARE:NGDPD*|DM:WEO:ARE:NGDPD:*|STATIC:GCC_NGDPD:ARE:*,GCCW:United Arab Emirates,no,0.9,
+NGDPD_KWT,Kuwait nominal GDP (USD bn),USD bn,none,IMF:WEO:KWT:NGDPD*|DM:WEO:KWT:NGDPD:*|STATIC:GCC_NGDPD:KWT:*,GCCW:Kuwait,no,0.9,
+NGDPD_OMN,Oman nominal GDP (USD bn),USD bn,none,IMF:WEO:OMN:NGDPD*|DM:WEO:OMN:NGDPD:*|STATIC:GCC_NGDPD:OMN:*,GCCW:Oman,no,0.9,
+NGDPD_BHR,Bahrain nominal GDP (USD bn),USD bn,none,IMF:WEO:BHR:NGDPD*|DM:WEO:BHR:NGDPD:*|STATIC:GCC_NGDPD:BHR:*,GCCW:Bahrain,no,0.9,
+OIL_PRICE,Brent crude price,% change,pct_change,IMF:PCPS:W00:POILBRE*USD*|IMF:PCPS:W00:POILAPSP*USD*|FRED:DCOILBRENTEU:*|FRED:POILBREUSDM:*,,yes,0.0,30.0
+LNG_PRICE,LNG price (Japan),% change,pct_change,IMF:PCPS:W00:PNGASJP*USD*|FRED:PNGASJPUSDM:*,,yes,0.0,30.0
+US_RATE,US policy rate,points,none,FRED:FEDFUNDS:*|IMF:MFS_IR:USA:*POLICY*|name~[Pp]olicy.*[Rr]ate@IMF:MFS_IR:USA:*,,yes,0.8,1.5
+QA_RATE,Qatar policy rate (QMR deposit),points,none,QCB:QMR:QAT:*|IMF:MFS_IR:QAT:*POLICY*|name~[Pp]olicy.*[Rr]ate@IMF:MFS_IR:QAT:*,,no,0.8,1.5
+QIBOR_3M,QIBOR 3 month,points,none,QCB:QIBOR3M:QAT:*|name~[Ii]nterbank@IMF:MFS_IR:QAT:*,,no,0.8,1.5
+GOV_SPEND_QAT,Qatar government spending growth,% change,pct_change,IMF:WEO:QAT:GGX:*|DM:WEO:QAT:GGX:*|MOF:EXPENDITURE:QAT:*,,yes,0.2,10.0
+GOV_BALANCE_QAT,Qatar fiscal balance (% of GDP),% of GDP,none,IMF:WEO:QAT:GGXCNL_NGDP*|DM:WEO:QAT:GGXCNL_NGDP:*|IMF:FM:QAT:*GGXCNL_G01_GDP*,,no,0.6,6.0
+CPI_QAT,Qatar inflation,% change,none,IMF:WEO:QAT:PCPIPCH*|DM:WEO:QAT:PCPIPCH:*,,yes,0.3,2.0
+CREDIT_QAT,Qatar private credit growth,% change,pct_change,QCB:CREDIT_PRIVATE:QAT:*|name~[Cc]laims on (the )?[Pp]rivate [Ss]ector@IMF:MFS_ODC:QAT:*,VAR_QATAR_DOMESTIC_CREDIT_GROWTH,yes,0.3,6.0
+PROPERTY_QAT,Qatar real estate price index,% change,pct_change,QCB:REPI:QAT:*|NPC:REPI:QAT:*|name~[Rr]eal [Ee]state@*:*:QAT:*,VAR_QATAR_REAL_ESTATE_INDEX_GROWTH,yes,0.3,8.0
+EQUITY_QAT,Qatar stock market index,% change,pct_change,MARKET:QE_INDEX:QAT:*|QCB:QE_INDEX:QAT:*,,no,0.0,20.0
+VISITORS_QAT,Qatar visitor arrivals,% change,pct_change,NPC:VISITORS:QAT:*,,no,0.2,20.0
+GDP_CHN,China real GDP growth,% change,none,IMF:WEO:CHN:NGDP_RPCH*|DM:WEO:CHN:NGDP_RPCH:*,,yes,0.3,2.0
+GDP_IND,India real GDP growth,% change,none,IMF:WEO:IND:NGDP_RPCH*|DM:WEO:IND:NGDP_RPCH:*,,no,0.3,2.0
+GDP_JPN,Japan real GDP growth,% change,none,IMF:WEO:JPN:NGDP_RPCH*|DM:WEO:JPN:NGDP_RPCH:*,,no,0.3,2.0
+GDP_KOR,Korea real GDP growth,% change,none,IMF:WEO:KOR:NGDP_RPCH*|DM:WEO:KOR:NGDP_RPCH:*,,no,0.3,2.0
+GDP_WLD,World real GDP growth,% change,none,IMF:WEO:G001:NGDP_RPCH*|DM:WEO:WEOWORLD:NGDP_RPCH:*,,no,0.3,1.5
+NPL_QAT,Qatar bank NPL ratio,% of loans,none,QCB:NPL:QAT:*|name~[Nn]on-?performing loans.*gross loans@IMF:FSI:QAT:*,,no,0.8,

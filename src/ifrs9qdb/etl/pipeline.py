@@ -412,6 +412,7 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
                                  industry=src["IndustryCode"], static=static,
                                  reporting_date=lend_ref)
         st.view = view
+        _write_customer_sectors(run_dir, view, src["IndustryCode"], static)
         tables["AccountMaster_1.csv"] = build_account_master(view, extract_date)
         result.steps.append({"step": "Lending accounts", "ok": True,
                              "detail": f"{len(view):,} contracts"})
@@ -909,6 +910,25 @@ def run_etl_phase2(state: PhaseState, overrides: dict | None = None) -> RunResul
         result.seconds = time.time() - started
     result.overrides_applied = applied
     return result
+
+
+def _write_customer_sectors(run_dir: Path, view, industry, static) -> None:
+    """Each lending customer's sector, for the stress screens' credit factor.
+
+    Written beside the run (``stress/customer_sectors.csv``), not in
+    ``Output/``: the LIC file set and everything priced from it are
+    unchanged, and a failure here can never fail a run."""
+    try:
+        from .lending import _customer_sector
+        ids = view["customer_id"].astype(str).drop_duplicates()
+        sec = _customer_sector(ids, industry, static.get("industry_sector_mapping"))
+        d = Path(run_dir) / "stress"
+        d.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"CustomerId": ids.to_numpy(),
+                      "Sector": sec.fillna("").to_numpy()}).to_csv(
+            d / "customer_sectors.csv", index=False)
+    except Exception:
+        pass
 
 
 def _code_sha() -> str | None:

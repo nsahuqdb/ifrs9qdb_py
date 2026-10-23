@@ -1,0 +1,129 @@
+# Stress testing parameters: how a macro scenario reaches the provision.
+#
+# Read by the stress screens only. The booked provision never reads this
+# file, so nothing here can change a run's ECL. A copy in the project's
+# config/ folder (config/stress.yml) overrides this default and is frozen
+# with the config like any other file, so a stress result can always be
+# traced to the parameters that produced it.
+#
+# Units: a "per sd" figure is per one standard deviation of the variable's
+# yearly history in the macro store.
+schema_version: '1.0'
+
+# Forecast years a scenario covers: the PD model's forecast years. Later
+# years revert as the PD chain reverts.
+horizon_years: 5
+
+# The macro model that fills in a scenario's knock-on effects.
+macro_model:
+  min_years: 12          # history a variable needs to be estimated jointly
+  tightness: 0.2         # Minnesota prior: overall tightness
+  cross: 0.5             # Minnesota prior: weight on the other variables' lags
+  start_year: 1990
+
+# 2. Credit factor by segment. For variables the PD model does not use, each
+# segment's systematic factor moves by the sum of (loading x the variable's
+# move in sd). A loading is in standard deviations of the factor per one sd
+# of the variable: 0.2 means a 1 sd fall in the variable lowers the factor
+# by 0.2 sd. A PD then moves through the Vasicek formula,
+#   probit(PD') = probit(PD) - sqrt(rho / (1 - rho)) x factor move,
+# with rho the Basel asset correlation at the contract's PD (as the external
+# PD chain uses) unless a number is given.
+#
+# Segments are sectors (from the customer's industry) where the run has
+# them, else the portfolio. A key may name one segment or several spellings
+# separated by | (Manufacturing|Industry). "default" applies to every internal segment;
+# a named segment's loadings are added to it. The variables the PD model
+# already uses (non-oil GDP for the internal book, GCC growth for the
+# external book) are left out, so nothing is counted twice. Qatar's rate
+# carries the rate effect; a scenario on the US rate alone reaches it
+# through the peg (rates: follows).
+factor:
+  rho: basel
+  segments:
+    default:
+      OIL_PRICE: 0.10
+      LNG_PRICE: 0.05
+      GOV_SPEND_QAT: 0.15
+      QA_RATE: -0.15
+      PROPERTY_QAT: 0.10
+      CREDIT_QAT: 0.10
+      CPI_QAT: -0.05
+      GDP_CHN: 0.05
+    Construction services|Construction|Contruction:
+      GOV_SPEND_QAT: 0.20
+      PROPERTY_QAT: 0.20
+    Tourism:
+      VISITORS_QAT: 0.30
+    Services:
+      VISITORS_QAT: 0.05
+    Manufacturing|Industry:
+      LNG_PRICE: 0.05
+      GDP_CHN: 0.05
+      GDP_IND: 0.05
+    Medical|Health:
+      GOV_SPEND_QAT: 0.05
+    Agriculture:
+      CPI_QAT: -0.05
+    Fisheries:
+      CPI_QAT: -0.05
+    Livestock:
+      CPI_QAT: -0.05
+    External book:
+      OIL_PRICE: 0.15
+      GOV_BALANCE_QAT: 0.05
+      GDP_WLD: 0.10
+  # the external book's own factor ignores "default"
+  external_segment: External book
+
+# 3. Ratings and stages. A stressed 12-month PD maps to the grade with the
+# nearest TTC PD on the contract's own scale; a Stage 1 contract implied to
+# have fallen this many notches or more moves to Stage 2 (significant
+# increase in credit risk).
+staging:
+  sicr_notches: 3
+
+# 4. Direct channels.
+collateral:
+  # A collateral type moves with a variable when its description matches.
+  # The move is the variable's largest cumulative level change over the
+  # horizon (a 15% fall then a 10% fall is about -23.5%).
+  PROPERTY_QAT: "(?i)property|land|real estate|building|villa|mortgage"
+  EQUITY_QAT: "(?i)share|equity|stock"
+
+rates:
+  # Floating-rate debt service: notches per point of the highest rate rise
+  # over the horizon, on the portfolios listed. Qatar's rate follows the US
+  # rate through the peg when a scenario sets only the US rate.
+  variable: QA_RATE
+  follows: US_RATE
+  notches_per_point: 0.5
+  portfolios: [Business Finance, Al Dhameen]
+  discount: false          # true: the EIR resets by the first year's rise
+
+ead:
+  # Drawdown on undrawn limits when credit tightens: per cent more drawn per
+  # sd fall in credit growth (its worst year), on the portfolios listed.
+  variable: CREDIT_QAT
+  drawdown_per_sd: 5.0
+  portfolios: [Off BS]
+
+external:
+  # Sovereign and bank ratings in the external book: notches per sd move of
+  # each variable in its worst year (a fall for these is a downgrade).
+  notches_per_sd:
+    OIL_PRICE: 0.5
+    GOV_BALANCE_QAT: 0.5
+  max_notches: 6
+
+# ECL at risk. Each path is priced from the book's own decomposition (the
+# provision is linear in each year's default probability), with the PD
+# chain rebuilt on a grid of driver moves; the named scenarios are checked
+# against full repricing every time.
+risk:
+  paths: 2000
+  seed: 20261023
+  percentiles: [95, 99]
+  bootstrap: true          # resample history's shocks (keeps the fat tails)
+  default_draws: true      # draw customer defaults in each path (concentration)
+  driver_grid: [-10.0, -8.0, -6.0, -5.0, -4.0, -3.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 3.0, 4.0]

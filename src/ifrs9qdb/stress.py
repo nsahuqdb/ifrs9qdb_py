@@ -42,6 +42,8 @@ __all__ = [
     "mev_stress", "MEV_WEIGHT_MODES", "stpd_to_curves",
     "run_scenario_weights", "scenario_weights_sensitivity",
     "filter_rating_type", "order_by_rating", "scenario_ecl_single_run",
+    "pd_chain", "frozen_config", "shift_curve", "spec_levers",
+    "summarise_repricing", "REPRICE_KEYS",
 ]
 
 
@@ -325,6 +327,34 @@ def _ctx_curves(curves) -> dict:
             np.asarray(v, dtype=float) for k, v in curves.items()}
 
 
+def shift_curve(cum, shifts) -> np.ndarray:
+    """A cumulative PD curve with each year's default probability moved in
+    probit space: year y's increment m(y) = cum(12y) - cum(12(y-1)) becomes
+    Phi(Phi^-1(m(y)) + shifts[y-1]), every month of the year scaled alike, so
+    the curve keeps its within-year shape and the running-sum convention
+    the StPD is built on. Years beyond ``shifts`` are unchanged; the curve
+    is capped at 1. ``cum`` is the engine's zero-prepended curve."""
+    from scipy.stats import norm
+    c = np.asarray(cum, dtype=float)
+    s = np.asarray(shifts, dtype=float)
+    if c.size < 2 or not np.any(s != 0):
+        return c
+    inc = np.diff(c)                         # month t's increment, t = 1..
+    out = inc.copy()
+    for y, sh in enumerate(s):
+        if sh == 0:
+            continue
+        lo, hi = 12 * y, min(12 * (y + 1), inc.size)
+        if lo >= inc.size:
+            break
+        m = float(inc[lo:hi].sum())
+        if not np.isfinite(m) or m <= 0:
+            continue
+        m2 = float(norm.cdf(norm.ppf(min(m, 1 - 1e-12)) + sh))
+        out[lo:hi] = inc[lo:hi] * (m2 / m)
+    return np.minimum(np.concatenate([[c[0]], c[0] + np.cumsum(out)]), 1.0)
+
+
 def reprice(
     inputs: EngineInputs,
     report: pd.DataFrame,
@@ -337,6 +367,8 @@ def reprice(
     pd_curves=None,
     pd_multiplier: float = 1.0,
     cfg: EclConfig | None = None,
+    pd_shift=None,
+    eir_shift=None,
 ) -> pd.DataFrame:
     """Price every contract with ``etl.report.compute_ecl``, with any input
     substituted -- one value per report row for each:
@@ -353,6 +385,11 @@ def reprice(
                                rebuilt chain's
         pd_multiplier          every PD curve scaled, capped at 1
         cfg                    LGD base and unsecured floor
+        pd_shift               a probit shift of each year's PD, one row of
+                               yearly shifts per report row (``shift_curve``)
+                               -- a stress scenario's credit factor
+        eir_shift              added to each contract's EIR (a fraction):
+                               the discount rate a floating loan resets to
 
     The run's own Stage 3 method, exposure cap and EAD fallback rules come
     with its context. Returns one row per report row with the ECL and the
@@ -410,12 +447,33 @@ def reprice(
         changes["lgd_floor"] = cfg.lgd_unsecured_floor
     if changes:
         ctx = ctx.copy(**changes)
+    if eir_shift is not None:
+        frame["eir"] = pd.to_numeric(frame["eir"], errors="coerce") + \
+            pd.to_numeric(vec(eir_shift), errors="coerce").fillna(0.0).to_numpy()
 
     ecl = np.full(n, np.nan)
     lgd = np.full(n, np.nan)
     have = cid.notna().to_numpy()
     if have.any():
-        res = compute_ecl(ctx, frame[have])
+        cum = None
+        if pd_shift is not None:
+            sh = np.asarray(pd_shift, dtype=float)
+            if sh.ndim == 1:
+                sh = sh[:, None]
+            sub = frame[have]
+            cum = []
+            memo: dict = {}           # rows on one curve with one shift share it
+            for r, s in zip(sub[["portfolio", "rating", "rating_type"]]
+                            .itertuples(index=False), sh[have]):
+                cm = ctx.pd_curve(r.portfolio, r.rating, r.rating_type)
+                if cm is None or not np.any(s != 0):
+                    cum.append(cm)
+                    continue
+                key = (id(cm), s.tobytes())
+                if key not in memo:
+                    memo[key] = shift_curve(cm, s)
+                cum.append(memo[key])
+        res = compute_ecl(ctx, frame[have], cum=cum)
         ecl[have] = res["ecl"].to_numpy()
         lgd[have] = res["lgd"].to_numpy()
 
@@ -429,12 +487,13 @@ def reprice(
 
 
 # ------------------------------------------------------------ apply stress --
-def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
-                 spec, cfg: EclConfig | None = None) -> dict:
-    """Apply one stress and reprice -- a package, a what-if on named
-    customers or a staging-policy change; there is no other.
-
-    Every lever reaches the scope only (``stress_scope``), in this order:
+def spec_levers(inputs: EngineInputs, ing: pd.DataFrame, spec: "StressSpec",
+                scoped: pd.Series, start: dict | None = None,
+                cfg: EclConfig | None = None) -> dict:
+    """What one stress changes, as ``reprice`` inputs -- one value per
+    contract for the facts, plus the curves and parameters -- starting from
+    ``start`` (another layer's inputs, a stress scenario's) or the run's
+    own. Every lever reaches the scope only, in this order:
 
       staging     the policy re-stages the scope, when it differs from the
                   run's own -- a stress that leaves it alone keeps the
@@ -451,28 +510,18 @@ def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
                   named, times the multiplier, and on the LGD base and floor
                   given; the rest of the book on the run's own
 
-    Both sides are priced with ``etl.report.compute_ecl`` (``reprice``), so
-    an empty stress is the run's report. As R's stress_apply().
+    Returns the inputs, the notes saying what was done, the customers
+    forced into default, or ``{"ok": False, "reason"}``.
     """
-    if not inputs.ok:
-        return {"ok": False, "reason": f"Engine inputs missing: {', '.join(inputs.missing)}"}
-    if not isinstance(spec, StressSpec):
-        spec = StressSpec.from_dict(spec)
-    ing = _ingredients(inputs, report)
-    if len(ing) == 0:
-        return {"ok": False, "reason": "The report could not be matched to the inputs."}
-
-    scoped = stress_scope(ing, spec)
+    st = start or {}
     sc = scoped.to_numpy()
-    if not sc.any():
-        return {"ok": False, "reason": "No contract is in this stress's scope."}
-    before = reprice(inputs, report, cfg=cfg)
     notes: list[str] = []
 
     # staging policy: re-staged only when it is not the run's own
     run_thr = staging_threshold(inputs.out_dir)
     thr = run_thr if spec.dpd_threshold is None else float(spec.dpd_threshold)
-    stage = ing["stage"].fillna(2).astype(int).to_numpy().copy()
+    stage = (np.asarray(st["stage"]).copy() if "stage" in st else
+             ing["stage"].fillna(2).astype(int).to_numpy().copy())
     if (thr != run_thr or not spec.contagion or not spec.tasdeer_collective
             or not spec.watchlist_triggers or not spec.local_triggers):
         local_any = pd.Series(False, index=ing.index)
@@ -511,26 +560,30 @@ def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
         notes.append(f"{len(defaulted)} largest performing customers by "
                      "exposure forced to Stage 3")
 
-    rating = ing["rating"].astype(str).to_numpy().copy()
+    rating = (np.asarray(st["rating"]).astype(object).copy() if "rating" in st else
+              ing["rating"].astype(str).to_numpy().copy())
     if spec.rating_notches:
         for i in np.where(sc)[0]:
             scale = inputs.scale_for(ing.iloc[i].get("rating_type"))
             if scale:
                 rating[i] = scale.notch(rating[i], spec.rating_notches)
 
-    on_balance = ing["on_balance"].to_numpy().copy()
+    on_balance = (np.asarray(st["on_balance"], dtype=float).copy() if "on_balance" in st
+                  else ing["on_balance"].to_numpy().copy())
     if spec.exposure_pct != 100:
         on_balance[sc] *= spec.exposure_pct / 100
 
-    cnet = ing["collateral_net"].fillna(0.0).to_numpy().copy()
+    cnet = (np.asarray(st["collateral_net"], dtype=float).copy() if "collateral_net" in st
+            else ing["collateral_net"].fillna(0.0).to_numpy().copy())
     if spec.collateral_pct != 100:
         cnet[sc] *= spec.collateral_pct / 100
 
-    shift = np.zeros(len(ing))
+    shift = (np.asarray(st["maturity_shift_months"], dtype=float).copy()
+             if "maturity_shift_months" in st else np.zeros(len(ing)))
     if spec.maturity_years:
         shift[sc] = spec.maturity_years * 12
 
-    curves = None
+    curves = st.get("pd_curves")
     if spec.pd_scenario:
         from .analytics.model_view import read_scenario_stpd
         curves = read_scenario_stpd(inputs.out_dir, spec.pd_scenario)
@@ -540,22 +593,33 @@ def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
         notes.append(f"Priced on the {spec.pd_scenario} PD curves")
     if spec.pd_multiplier != 1.0:
         notes.append(f"PD curves scaled by {spec.pd_multiplier:g}x (capped at 1)")
-    lgd_cfg = cfg
+    lgd_cfg = st.get("cfg", cfg)
     if spec.lgd_base is not None or spec.lgd_floor is not None:
         lgd_cfg = EclConfig(
             lgd_base=inputs.ctx.lgd_base if spec.lgd_base is None else spec.lgd_base,
             lgd_unsecured_floor=(inputs.ctx.lgd_floor if spec.lgd_floor is None
                                  else spec.lgd_floor))
+    out = {"ok": True, "stage": stage, "rating": rating, "on_balance": on_balance,
+           "collateral_net": cnet, "maturity_shift_months": shift,
+           "pd_curves": curves,
+           "pd_multiplier": float(st.get("pd_multiplier", 1.0)) * spec.pd_multiplier,
+           "cfg": lgd_cfg, "notes": notes, "defaulted": defaulted}
+    for k in ("pd_shift", "eir_shift"):
+        if k in st:
+            out[k] = st[k]
+    return out
 
-    after = reprice(
-        inputs, report, stage=stage, rating=rating, on_balance=on_balance,
-        collateral_net=cnet, maturity_shift_months=shift, pd_curves=curves,
-        pd_multiplier=spec.pd_multiplier, cfg=lgd_cfg)
-    # The PD curves and the LGD parameters are the context's, so they reach
-    # every contract priced on it: outside the scope the run's own price
-    # stands. Everything else outside the scope is unchanged already.
-    after.loc[~scoped, ["ecl", "lgd"]] = before.loc[~scoped, ["ecl", "lgd"]].to_numpy()
 
+REPRICE_KEYS = ("stage", "rating", "on_balance", "collateral_net",
+                "maturity_shift_months", "pd_curves", "pd_multiplier", "cfg",
+                "pd_shift", "eir_shift")
+
+
+def summarise_repricing(before: pd.DataFrame, after: pd.DataFrame) -> dict:
+    """Before against after, contract by contract, rolled up the way every
+    stress screen shows it: the totals, by customer, by portfolio, the stage
+    moves, and the detail largest change first. ``before`` and ``after`` are
+    ``reprice`` results on the same report."""
     ok = before["ecl"].notna() & after["ecl"].notna()
     d = before[["contract", "customer", "portfolio", "rating", "stage"]].copy()
     d["ecl_before"] = before["ecl"]
@@ -587,7 +651,7 @@ def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
     mv = priced[moved]
     migration = pd.DataFrame()
     if len(mv):
-        migration = (mv.assign(move=[f"Stage {int(x)} \u2192 Stage {int(y)}"
+        migration = (mv.assign(move=[f"Stage {int(x)} → Stage {int(y)}"
                                      for x, y in zip(mv["stage"], mv["stage_after"])])
                      .groupby("move")
                      .agg(contracts=("contract", "size"),
@@ -598,23 +662,58 @@ def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
         migration = migration.reindex(migration["ecl_change"].abs()
                                       .sort_values(ascending=False).index)
     return {
-        "ok": True,
-        "name": spec.name,
         "before": float(priced["ecl_before"].sum()),
         "after": float(priced["ecl_after"].sum()),
         "delta": float(priced["change"].sum()),
         "priced": int(ok.sum()),
-        "scoped": int(sc.sum()),
         "moved": int(moved.sum()),
         "customers_moved": int(priced.loc[moved, "customer"].nunique()),
-        "defaulted": defaulted,
-        "notes": notes,
         "by_customer": by_cust,
         "by_portfolio": by_pf.sort_values("change", key=abs, ascending=False),
         "migration": migration,
         "detail": priced.reindex(priced["change"].abs()
                                  .sort_values(ascending=False).index),
     }
+
+
+def apply_stress(inputs: EngineInputs, report: pd.DataFrame,
+                 spec, cfg: EclConfig | None = None) -> dict:
+    """Apply one stress and reprice -- a package, a what-if on named
+    customers or a staging-policy change; there is no other.
+
+    The levers are ``spec_levers``; both sides are priced with
+    ``etl.report.compute_ecl`` (``reprice``), so an empty stress is the
+    run's report. As R's stress_apply().
+    """
+    if not inputs.ok:
+        return {"ok": False, "reason": f"Engine inputs missing: {', '.join(inputs.missing)}"}
+    if not isinstance(spec, StressSpec):
+        spec = StressSpec.from_dict(spec)
+    ing = _ingredients(inputs, report)
+    if len(ing) == 0:
+        return {"ok": False, "reason": "The report could not be matched to the inputs."}
+
+    scoped = stress_scope(ing, spec)
+    sc = scoped.to_numpy()
+    if not sc.any():
+        return {"ok": False, "reason": "No contract is in this stress's scope."}
+    before = reprice(inputs, report, cfg=cfg)
+    lev = spec_levers(inputs, ing, spec, scoped, cfg=cfg)
+    if not lev["ok"]:
+        return lev
+    after = reprice(inputs, report, **{k: lev[k] for k in REPRICE_KEYS if k in lev})
+    # The PD curves and the LGD parameters are the context's, so they reach
+    # every contract priced on it: outside the scope the run's own price
+    # stands. Everything else outside the scope is unchanged already.
+    after.loc[~scoped, ["ecl", "lgd"]] = before.loc[~scoped, ["ecl", "lgd"]].to_numpy()
+    out = summarise_repricing(before, after)
+    return {"ok": True, "name": spec.name, "before": out["before"],
+            "after": out["after"], "delta": out["delta"], "priced": out["priced"],
+            "scoped": int(sc.sum()), "moved": out["moved"],
+            "customers_moved": out["customers_moved"],
+            "defaulted": lev["defaulted"], "notes": lev["notes"],
+            "by_customer": out["by_customer"], "by_portfolio": out["by_portfolio"],
+            "migration": out["migration"], "detail": out["detail"]}
 
 
 def compare_packages(inputs, report, specs: Iterable[StressSpec]) -> pd.DataFrame:
@@ -1013,62 +1112,14 @@ def stpd_to_curves(stpd: pd.DataFrame) -> dict[str, np.ndarray]:
             for (p, b), g in t.groupby(["pf", "bk"])}
 
 
-def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
-               mev_new: pd.DataFrame | None = None,
-               shock: dict | None = None,
-               weight_mode: str = "auto",
-               weights: dict | None = None,
-               cfg: EclConfig | None = None,
-               external_weights: dict | None = None,
-               gcc_shock: float = 0.0) -> dict:
-    """Reprice the book on a different macroeconomic path.
-
-    The whole PD chain is rebuilt from the run's OWN frozen config with the
-    forecast edited, so the shift factors, the scenario curves and the monthly
-    StPD all follow from the new path exactly as they would in a real run.
-    Nothing is adjusted afterwards.
-
-    ``mev_new`` sets individual cells -- a frame of ``year``, ``idx``, ``value``
-    -- and ``shock`` adds a delta to one MEV across every year, keyed by its
-    1-based index. Both may be given; the cells are set first. ``gcc_shock``
-    adds a delta, in percentage points, to every GCC country's growth in
-    every forecast year -- the path the externally rated book (Investments,
-    Banks and FIs) is priced on.
-
-    ``weight_mode`` decides what happens to the scenario weights, and it is a
-    genuine choice rather than a detail. The internal weights run on
-    ``auto_non_oil_gdp_cdf``, derived from the first forecast years of this
-    very matrix, so editing non-oil GDP moves the weights AND the curves:
-
-        auto    leave the config alone; the weights follow the new path
-        hold    pin both scales' weights to what the unedited config gives
-                (the external one year by year), isolating the PD effect
-        custom  use the weights supplied: ``weights`` for the internal
-                scale, normalised; the external scale keeps its own (set per
-                year from GCC growth, which this screen does not edit)
-                unless ``external_weights`` are given too
-
-    ``before`` is the run rebuilt from its own config with no edit, so the
-    change is the edit's alone. For a run priced by this version of the
-    calculation that is the run's own provision; for one priced by an earlier
-    version (scenario weights before 0.29, say) it is not, and ``provision``
-    and ``note`` say by how much -- measured from the run's own curves, that
-    change of method would have been counted as stress.
-
-    Returns before, after and the split, or ``{"ok": False, "reason": ...}``
-    naming what was missing -- a macro screen that goes blank explains nothing.
-    """
+def frozen_config(run_path) -> dict:
+    """A run's frozen config as the PD chain reads it: ``static``,
+    ``model`` and ``raw`` (model_inputs), or ``{"ok": False, "reason"}``."""
     from .analytics.model_view import config_used
-    from .etl.macro import build_stpd_from_static
     from .etl.static_ref import load_static_reference
 
     import yaml
 
-    if weight_mode not in MEV_WEIGHT_MODES:
-        raise ValueError(f"weight_mode must be one of {MEV_WEIGHT_MODES}")
-    if inputs is None or not inputs.ok:
-        return {"ok": False,
-                "reason": "The run's engine inputs could not be read."}
     cu = config_used(run_path)
     if cu is None:
         return {"ok": False,
@@ -1081,6 +1132,53 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
                              .read_text(encoding="utf-8"))
     except Exception as exc:
         return {"ok": False, "reason": f"The frozen config could not be read: {exc}"}
+    return {"ok": True, "static": static, "model": model, "raw": raw}
+
+
+def pd_chain(inputs: EngineInputs, report: pd.DataFrame, run_path,
+             mev_new: pd.DataFrame | None = None,
+             shock: dict | None = None,
+             weight_mode: str = "auto",
+             weights: dict | None = None,
+             external_weights: dict | None = None,
+             gcc_shock: float = 0.0,
+             mev_deltas: dict | None = None,
+             gcc_deltas: dict | None = None,
+             scenario_weights: dict | None = None) -> dict:
+    """The run's PD chain rebuilt from its frozen config with the macro
+    inputs edited -- the one rebuild every macro repricing uses (the macro
+    screen, a stress scenario's model drivers, the scenario-weight
+    sensitivity).
+
+    The edits, applied in this order:
+
+        mev_new      cells of the forecast matrix (year, idx, value)
+        shock        a delta on one MEV in every year, keyed by its 1-based
+                     index
+        mev_deltas   a delta per forecast year on one MEV: {idx: [d1..dn]}
+        gcc_shock    a delta on every GCC country's growth in every year
+        gcc_deltas   a delta per year on named countries' growth:
+                     {country: [d1..dn]}
+
+    ``weight_mode`` decides the scenario weights (``mev_stress``);
+    ``scenario_weights`` instead puts the weights given on the internal
+    chain outright (one-hot for one IFRS 9 scenario alone).
+
+    Returns the rebuilt curves, the baseline curves when the run's own were
+    priced by another version of the calculation (else None), the edited
+    forecast, the StPD and the weights.
+    """
+    from .etl.macro import build_stpd_from_static
+
+    if weight_mode not in MEV_WEIGHT_MODES:
+        raise ValueError(f"weight_mode must be one of {MEV_WEIGHT_MODES}")
+    if inputs is None or not inputs.ok:
+        return {"ok": False,
+                "reason": "The run's engine inputs could not be read."}
+    fz = frozen_config(run_path)
+    if not fz["ok"]:
+        return fz
+    static, model, raw = fz["static"], fz["model"], fz["raw"]
 
     import copy
     raw0 = copy.deepcopy(raw)          # the run's config, unedited
@@ -1108,11 +1206,25 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
         for y in fc:
             if 0 <= i < len(fc[y]):
                 fc[y][i] += delta
+    years_sorted = sorted(fc, key=lambda y: int(y))
+    for k, ds in (mev_deltas or {}).items():
+        i = int(k) - 1
+        for j, y in enumerate(years_sorted):
+            d = float(ds[j]) if j < len(ds) else 0.0
+            if d and 0 <= i < len(fc[y]):
+                fc[y][i] += d
     raw["mev_forecasts"]["forecasts"] = fc
     if gcc_shock:
         g = raw.get("external_gcc_country_growth") or {}
         raw["external_gcc_country_growth"] = {
             c: [float(v) + float(gcc_shock) for v in np.atleast_1d(vals)]
+            for c, vals in g.items()}
+    if gcc_deltas:
+        g = raw.get("external_gcc_country_growth") or {}
+        raw["external_gcc_country_growth"] = {
+            c: [float(v) + (float(gcc_deltas[c][j]) if c in gcc_deltas
+                            and j < len(gcc_deltas[c]) else 0.0)
+                for j, v in enumerate(np.atleast_1d(vals))]
             for c, vals in g.items()}
 
     # "This run's" weights: what the unedited config gives on this engine --
@@ -1183,8 +1295,9 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
         else ""
     try:
         from .etl.model_registry import run_model_id
+        kw = {"scenario_weights": scenario_weights} if scenario_weights else {}
         stpd_new = build_stpd_from_static(static, model, raw, extract,
-                                          model_id=run_model_id(run_path))
+                                          model_id=run_model_id(run_path), **kw)
     except Exception as exc:
         return {"ok": False, "reason": f"Rebuilding the PD chain failed: {exc}"}
     curves = _ctx_curves(stpd_new)
@@ -1204,6 +1317,62 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
             base_curves = bc
     except Exception:
         base_curves = None
+    return {"ok": True, "curves": curves, "base_curves": base_curves,
+            "forecast": fc, "stpd": stpd_new, "weights_base": base_internal,
+            "weights_used": used_internal}
+
+
+def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
+               mev_new: pd.DataFrame | None = None,
+               shock: dict | None = None,
+               weight_mode: str = "auto",
+               weights: dict | None = None,
+               cfg: EclConfig | None = None,
+               external_weights: dict | None = None,
+               gcc_shock: float = 0.0) -> dict:
+    """Reprice the book on a different macroeconomic path.
+
+    The whole PD chain is rebuilt from the run's OWN frozen config with the
+    forecast edited (``pd_chain``), so the shift factors, the scenario curves
+    and the monthly StPD all follow from the new path exactly as they would
+    in a real run. Nothing is adjusted afterwards.
+
+    ``mev_new`` sets individual cells -- a frame of ``year``, ``idx``, ``value``
+    -- and ``shock`` adds a delta to one MEV across every year, keyed by its
+    1-based index. Both may be given; the cells are set first. ``gcc_shock``
+    adds a delta, in percentage points, to every GCC country's growth in
+    every forecast year -- the path the externally rated book (Investments,
+    Banks and FIs) is priced on.
+
+    ``weight_mode`` decides what happens to the scenario weights, and it is a
+    genuine choice rather than a detail. The internal weights run on
+    ``auto_non_oil_gdp_cdf``, derived from the first forecast years of this
+    very matrix, so editing non-oil GDP moves the weights AND the curves:
+
+        auto    leave the config alone; the weights follow the new path
+        hold    pin both scales' weights to what the unedited config gives
+                (the external one year by year), isolating the PD effect
+        custom  use the weights supplied: ``weights`` for the internal
+                scale, normalised; the external scale keeps its own (set per
+                year from GCC growth, which this screen does not edit)
+                unless ``external_weights`` are given too
+
+    ``before`` is the run rebuilt from its own config with no edit, so the
+    change is the edit's alone. For a run priced by this version of the
+    calculation that is the run's own provision; for one priced by an earlier
+    version (scenario weights before 0.29, say) it is not, and ``provision``
+    and ``note`` say by how much -- measured from the run's own curves, that
+    change of method would have been counted as stress.
+
+    Returns before, after and the split, or ``{"ok": False, "reason": ...}``
+    naming what was missing -- a macro screen that goes blank explains nothing.
+    """
+    ch = pd_chain(inputs, report, run_path, mev_new=mev_new, shock=shock,
+                  weight_mode=weight_mode, weights=weights,
+                  external_weights=external_weights, gcc_shock=gcc_shock)
+    if not ch["ok"]:
+        return ch
+    curves, base_curves, fc = ch["curves"], ch["base_curves"], ch["forecast"]
     own = reprice(inputs, report, cfg=cfg)
     before = own if base_curves is None else \
         reprice(inputs, report, pd_curves=base_curves, cfg=cfg)
@@ -1252,14 +1421,14 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
         "note": note,
         "priced": int(ok.sum()),
         "weight_mode": weight_mode,
-        "weights_base": base_internal,
-        "weights_used": used_internal,
+        "weights_base": ch["weights_base"],
+        "weights_used": ch["weights_used"],
         "by_portfolio": by_pf.reindex(
             by_pf["change"].abs().sort_values(ascending=False).index
         ).reset_index(drop=True),
         "movers": customer_rows(priced, n=500),
         "path": path,
-        "stpd": stpd_new,
+        "stpd": ch["stpd"],
     }
 
 

@@ -90,6 +90,23 @@ src/ifrs9qdb/
                   path, scenario weights; every one prices with
                   etl/report.py's compute_ecl, as the report and the
                   bridge do
+  macro/          the macro store: every IMF dataset in the catalogue
+                  (macro/data/*.csv) for Qatar, the GCC, partners and the US,
+                  FRED and files from QCB, the Planning and Statistics
+                  Authority and the Ministry of Finance, as dated vintages;
+                  quarter.py fills a new quarter's forecasts into a draft
+                  config version (five years from the first unconfirmed
+                  year); var.py the macro model (a Bayesian VAR) that gives
+                  a shock its knock-on effects and its severity
+  stresstest/     macro scenarios: shocks on any variable, several at once
+                  (scenarios.py, with a library), their path into the
+                  provision -- PD model drivers, a credit factor by sector,
+                  ratings and stages, collateral, rates, drawn exposure, the
+                  external book (transmission.py, stresstest/data/stress.yml)
+                  -- and the risk measures (risk.py): the split by shock,
+                  sensitivities, ECL at risk over simulated paths with
+                  customer default draws, reverse stress. Prices through
+                  stress.py's reprice, so an empty scenario is the run
   validation/     148 run checks with the R engine's ids -- input,
                   transform, derived, pricing readiness (READY) and report
                   -- plus 15 pre-flight checks on the config and static
