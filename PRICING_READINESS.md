@@ -173,7 +173,7 @@ auto_p_value`.
 
 - **Pre-run check** (84 checks: config, static, input): identical pass/fail
   and identical messages, R against Python, on all seven datasets.
-- **Full runs**: all 148 run checks, `readiness.csv`, `readiness_funnel.csv`
+- **Full runs**: all 153 run checks, `readiness.csv`, `readiness_funnel.csv`
   and all 29 output files identical, R against Python, on every dataset and
   config variant above.
 - **Stray rows** price exactly as the clean book (1,916,701,233.09 in both

@@ -19,13 +19,15 @@ import pandas as pd
 
 from .catalogue import countries as _countries
 from .catalogue import datasets as _datasets
-from .sources import (FRED_DEFAULT, DataMapper, DBnomics, Fred, ImfSdmx,
-                      empty_frames, read_file, static_seed)
+from .catalogue import read_table
+from .sources import (FRED_DEFAULT, PAUSE, BisSdmx, DataMapper, DBnomics, Fred,
+                      ImfSdmx, WorldBank, _sleep, empty_frames, read_file, static_seed)
 from .store import MacroStore
 
 __all__ = ["refresh", "import_file", "SOURCES"]
 
-SOURCES = ("IMF", "DM", "DBNOMICS", "FRED", "STATIC")
+SOURCES = ("IMF", "BIS", "WB", "DM", "DBNOMICS", "FRED", "STATIC")
+DEFAULT_SOURCES = ("IMF", "BIS", "WB", "FRED", "STATIC")
 
 
 def _static_dir(project_root=None) -> Path:
@@ -35,7 +37,7 @@ def _static_dir(project_root=None) -> Path:
 
 
 def refresh(store: MacroStore, project_root=None, groups=None, datasets=None,
-            country_codes=None, sources=("IMF", "DM", "FRED", "STATIC"),
+            country_codes=None, sources=DEFAULT_SOURCES,
             fred_key: str | None = None, fred_ids=None, transport=None,
             label: str = "", progress: Callable[[str], None] | None = None,
             only_default: bool = True) -> dict:
@@ -63,20 +65,33 @@ def refresh(store: MacroStore, project_root=None, groups=None, datasets=None,
         keep(s, o, {"dataset": "Package history files", "source": "STATIC",
                     "status": "ok"})
 
-    imf = ImfSdmx(transport=transport) if "IMF" in sources else None
+    apis = {"IMF": ImfSdmx(transport=transport) if "IMF" in sources else None,
+            "BIS": BisSdmx(transport=transport) if "BIS" in sources else None}
     dm_done = False
-    for _, r in rows.iterrows():
+    for n, (_, r) in enumerate(rows.iterrows()):
         r = r.to_dict()
+        src = str(r.get("source") or "IMF").upper()
+        if src not in apis:
+            continue
         say(f"{r['dataset']}: {r['label']}")
         entry = {"dataset": r["dataset"], "label": r["label"], "group": r["group"]}
         err = None
-        if imf is not None:
-            try:
-                s, o, info = imf.fetch(r, codes3)
-                keep(s, o, {**entry, "source": "IMF", "status": "ok", **info})
-                continue
-            except Exception as e:
-                err = str(e)
+        api = apis[src]
+        if api is None:
+            continue
+        if n:
+            _sleep(PAUSE)
+        try:
+            s, o, info = api.fetch(r, codes3)
+            keep(s, o, {**entry, "source": src, "status": "ok" if len(s) else "empty", **info})
+            continue
+        except Exception as e:
+            err = str(e)
+        if src != "IMF":
+            log.append({**entry, "source": src, "status": "failed", "error": err,
+                        "series": 0, "observations": 0, "fetched": stamp,
+                        "note": "the previous vintage's copy is kept"})
+            continue
         if "DM" in sources and r["dataset"] in ("WEO", "FM") and not dm_done:
             try:
                 s, o, info = DataMapper(transport=transport).fetch(codes3)
@@ -104,9 +119,36 @@ def refresh(store: MacroStore, project_root=None, groups=None, datasets=None,
                     "observations": 0, "fetched": stamp,
                     "note": "the previous vintage's copy is kept"})
 
+    if "WB" in sources:
+        say("World Bank: development indicators")
+        try:
+            wb = read_table("wb.csv", project_root)
+            s, o, info = WorldBank(transport=transport).fetch(wb)
+            keep(s, o, {"dataset": "WDI", "label": "World Bank development indicators",
+                        "group": "World Bank", "source": "WB",
+                        "status": "ok" if len(s) else "failed",
+                        "error": "; ".join(info.get("failed", []))})
+        except Exception as e:
+            log.append({"dataset": "WDI", "source": "WB", "status": "failed", "error": str(e),
+                        "series": 0, "observations": 0, "fetched": stamp,
+                        "note": "the previous vintage's copy is kept"})
+
     if "FRED" in sources:
+        say("FRED")
         key = fred_key or os.environ.get("FRED_API_KEY", "")
+        cat = read_table("fred.csv", project_root)
+        if not key:
+            try:
+                s, o, info = Fred(transport=transport).fetch_csv(cat)
+                keep(s, o, {"dataset": "FRED", "label": "FRED series (CSV download)",
+                            "source": "FRED", "status": "ok" if len(s) else "failed",
+                            "missing": ", ".join(info.get("missing", []))})
+            except Exception as e:
+                log.append({"dataset": "FRED", "source": "FRED", "status": "failed",
+                            "error": str(e), "series": 0, "observations": 0,
+                            "fetched": stamp})
         if key:
+            fred_ids = fred_ids or list(cat["series"]) or FRED_DEFAULT
             try:
                 s, o, info = Fred(key, transport=transport).fetch(list(fred_ids or FRED_DEFAULT))
                 keep(s, o, {"dataset": "FRED", "label": "FRED series", "source": "FRED",
@@ -115,10 +157,6 @@ def refresh(store: MacroStore, project_root=None, groups=None, datasets=None,
                 log.append({"dataset": "FRED", "source": "FRED", "status": "failed",
                             "error": str(e), "series": 0, "observations": 0,
                             "fetched": stamp})
-        else:
-            log.append({"dataset": "FRED", "source": "FRED", "status": "skipped",
-                        "error": "no FRED key", "series": 0, "observations": 0,
-                        "fetched": stamp})
 
     s = pd.concat(sers, ignore_index=True) if sers else empty_frames()[0]
     o = pd.concat(obss, ignore_index=True) if obss else empty_frames()[1]

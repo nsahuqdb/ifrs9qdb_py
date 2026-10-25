@@ -1,0 +1,22 @@
+indicator,label,unit
+NY.GDP.MKTP.KD.ZG,GDP growth,% change
+NY.GDP.MKTP.CD,GDP,current USD
+NY.GDP.PCAP.CD,GDP per capita,current USD
+FP.CPI.TOTL.ZG,Inflation (consumer prices),% change
+FR.INR.LEND,Lending interest rate,percent
+FR.INR.RINR,Real interest rate,percent
+FS.AST.PRVT.GD.ZS,Domestic credit to the private sector,% of GDP
+FB.AST.NPER.ZS,Bank non-performing loans to gross loans,% of loans
+FB.BNK.CAPA.ZS,Bank capital to assets,percent
+SL.UEM.TOTL.ZS,Unemployment,% of labour force
+BN.CAB.XOKA.GD.ZS,Current account balance,% of GDP
+NE.EXP.GNFS.ZS,Exports of goods and services,% of GDP
+NY.GDP.PETR.RT.ZS,Oil rents,% of GDP
+NY.GDP.NGAS.RT.ZS,Natural gas rents,% of GDP
+GC.DOD.TOTL.GD.ZS,Central government debt,% of GDP
+NE.GDI.TOTL.ZS,Gross capital formation,% of GDP
+BX.KLT.DINV.WD.GD.ZS,Foreign direct investment net inflows,% of GDP
+PX.REX.REER,Real effective exchange rate,index
+FM.LBL.BMNY.ZG,Broad money growth,% change
+CM.MKT.LCAP.GD.ZS,Stock market capitalisation,% of GDP
+SP.POP.TOTL,Population,people

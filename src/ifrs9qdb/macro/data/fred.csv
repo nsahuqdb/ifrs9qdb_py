@@ -1,0 +1,26 @@
+series,label,unit,freq,country
+QATNGDPXORPCHPT,Qatar non-oil real GDP growth (IMF REO),% change,A,QAT
+FEDFUNDS,Federal funds effective rate,percent,M,USA
+SOFR,Secured overnight financing rate,percent,M,USA
+DGS3MO,US Treasury 3-month yield,percent,M,USA
+DGS2,US Treasury 2-year yield,percent,M,USA
+DGS10,US Treasury 10-year yield,percent,M,USA
+T10Y2Y,US 10-year less 2-year yield,points,M,USA
+DFII10,US 10-year real yield (TIPS),percent,M,USA
+BAMLC0A0CM,US investment-grade corporate spread,points,M,USA
+BAMLH0A0HYM2,US high-yield corporate spread,points,M,USA
+VIXCLS,VIX volatility index,index,M,USA
+SP500,S&P 500 index,index,M,USA
+DTWEXBGS,US dollar broad index,index,M,USA
+DCOILBRENTEU,Brent crude price (daily average),USD per barrel,M,
+DCOILWTICO,WTI crude price (daily average),USD per barrel,M,
+POILBREUSDM,Brent crude price (IMF),USD per barrel,M,
+DHHNGSP,Henry Hub natural gas price,USD per MMBtu,M,
+PNGASJPUSDM,LNG price Japan (IMF),USD per MMBtu,M,
+PNGASEUUSDM,Natural gas price Europe (IMF),USD per MMBtu,M,
+CPIAUCSL,US consumer prices,index,M,USA
+UNRATE,US unemployment rate,percent,M,USA
+GDPC1,US real GDP,USD bn (2017),Q,USA
+INDPRO,US industrial production,index,M,USA
+UMCSENT,US consumer sentiment,index,M,USA
+MORTGAGE30US,US 30-year mortgage rate,percent,M,USA

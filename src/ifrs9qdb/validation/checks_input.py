@@ -254,6 +254,159 @@ def _v_rs_dates_plausible(inputs):
                    + ", ".join(ex), examples=ex)
 
 
+# ---- schedule completeness -------------------------------------------------
+# A repayment schedule runs off: its last row's BALANCE is zero. Rows missing
+# at the end leave a balance on the last row present, whatever the maturity
+# date says; rows missing in the middle leave a gap longer than the contract's
+# payment frequency. Tested on the June and September 2026 schedules: no
+# finding on either as corrected, every contract with 19xx dates found on the
+# June file as delivered, and on synthetic damage 99-100% of tails, holes and
+# truncations found where the readiness check (READY_ead_curve_complete) found
+# 0-77%.
+RS_BALANCE_LEFT = 1.0          # QAR left on the last row
+RS_MATURITY_SLACK_MONTHS = 3   # last payment this long before maturity
+RS_GAP_FACTOR = 1.5            # a gap longer than this many payment periods...
+RS_GAP_SLACK_MONTHS = 1        # ...plus a month
+RS_TYPE_SCHEDULED_SHARE = 0.5  # an account type is scheduled when this share has one
+
+_RS_CACHE: dict = {}
+
+
+def _rs_profile(inputs):
+    """Per contract in AccountMaster with schedule rows after the reporting
+    date: the last row's date and balance, the longest gap between payments,
+    the maturity and payment frequency. None when a file is missing."""
+    if not (has(inputs, "RepaymentSchedule") and has(inputs, "AccountMaster")):
+        return None
+    rs, am = inputs["RepaymentSchedule"], inputs["AccountMaster"]
+    key = (id(rs), len(rs), id(am), len(am))
+    if key in _RS_CACHE:
+        return _RS_CACHE[key]
+    ref = _anchor_date(inputs)
+    cid = col(rs, "contract_id", "KEY_1")
+    sd = col(rs, "start_date", "START_DAT", "START_DATE")
+    if cid is None or sd is None or ref is None:
+        return None
+    bal = col(rs, "balance", "BALANCE")
+    r = pd.DataFrame({"c": as_id(cid), "d": parse_any_date(sd),
+                      "bal": pd.to_numeric(text(bal), errors="coerce") if bal is not None
+                      else float("nan")})
+    a_id = col(am, "contract_id", "CONTRACTID")
+    a = pd.DataFrame({
+        "c": as_id(a_id),
+        "mat": parse_any_date(col(am, "maturity_date", "MATURITYDATE", "MATURITYDAT")),
+        "freq": pd.to_numeric(text(col(am, "payment_frequency", "PAYMENTFREQUENCY")),
+                              errors="coerce") if col(am, "payment_frequency", "PAYMENTFREQUENCY")
+        is not None else float("nan"),
+        "onb": pd.to_numeric(text(col(am, "on_balance", "ONBALANCE")), errors="coerce"),
+        "type": text(col(am, "account_type", "ACCOUNTTYPE")) if col(am, "account_type", "ACCOUNTTYPE")
+        is not None else "",
+    }).drop_duplicates("c")
+    dup = r.duplicated(keep=False)
+    fut = (r[(r.d > ref) & r.c.isin(set(a.c))]
+           .drop_duplicates().sort_values(["c", "d"]))
+    g = fut.groupby("c", sort=False)
+    prof = pd.DataFrame({"last": g["d"].max(), "bal_last": g["bal"].last(),
+                         "rows": g["d"].size()})
+    gap = fut.assign(gap=g["d"].diff().dt.days / 30.4375).groupby("c")["gap"].max()
+    prof["max_gap"] = gap.reindex(prof.index).fillna(0.0)
+    prof = prof.reset_index().merge(a, on="c", how="left")
+    out = {"ref": ref, "profile": prof, "accounts": a, "dup_rows": r[dup],
+           "future_contracts": set(fut.c)}
+    _RS_CACHE.clear()
+    _RS_CACHE[key] = out
+    return out
+
+
+def _v_rs_runs_off(inputs):
+    p = _rs_profile(inputs)
+    if p is None:
+        return ok()
+    f = p["profile"]
+    bad = f[f.bal_last.abs() > RS_BALANCE_LEFT]
+    if bad.empty:
+        return ok()
+    tot = float(bad.bal_last.sum())
+    return fail(len(bad), f"{len(bad)} contract(s) have a balance left on their last "
+                          f"schedule row ({tot:,.0f} QAR in all): the rows after it are "
+                          "missing, so the EAD curve stops there and lifetime ECL is "
+                          "understated. e.g. " + ", ".join(bad.c.head(5)),
+                examples=bad.c.head(10).tolist())
+
+
+def _v_rs_ends_at_maturity(inputs):
+    p = _rs_profile(inputs)
+    if p is None:
+        return ok()
+    f = p["profile"]
+    short = (f.mat - f["last"]).dt.days / 30.4375
+    bad = f[short > RS_MATURITY_SLACK_MONTHS]
+    if bad.empty:
+        return ok()
+    return fail(len(bad), f"{len(bad)} contract(s) have their last scheduled payment "
+                          f"more than {RS_MATURITY_SLACK_MONTHS} months before the "
+                          "AccountMaster maturity (up to "
+                          f"{short[bad.index].max():.0f} months): the schedule or the "
+                          "maturity is wrong. e.g. " + ", ".join(bad.c.head(5)),
+                examples=bad.c.head(10).tolist())
+
+
+def _v_rs_no_gaps(inputs):
+    p = _rs_profile(inputs)
+    if p is None:
+        return ok()
+    f = p["profile"]
+    allowed = f.freq.fillna(1).clip(lower=1) * RS_GAP_FACTOR + RS_GAP_SLACK_MONTHS
+    bad = f[f.max_gap > allowed]
+    if bad.empty:
+        return ok()
+    return fail(len(bad), f"{len(bad)} contract(s) have a gap between two scheduled "
+                          "payments longer than their payment frequency allows (up to "
+                          f"{bad.max_gap.max():.0f} months): instalments are missing in "
+                          "the middle, so the EAD curve holds the next instalment's "
+                          "balance through the gap. e.g. " + ", ".join(bad.c.head(5)),
+                examples=bad.c.head(10).tolist())
+
+
+def _v_rs_scheduled_types_covered(inputs):
+    p = _rs_profile(inputs)
+    if p is None:
+        return ok()
+    a = p["accounts"]
+    live = a[(a.onb.fillna(0) > 0) & (a.mat.isna() | (a.mat > p["ref"]))].copy()
+    if live.empty:
+        return ok()
+    live["sched"] = live.c.isin(p["future_contracts"])
+    share = live.groupby("type")["sched"].mean()
+    scheduled = set(share[share >= RS_TYPE_SCHEDULED_SHARE].index) - {""}
+    bad = live[live.type.isin(scheduled) & ~live.sched]
+    if bad.empty:
+        return ok()
+    by = bad.groupby("type").size().sort_values(ascending=False)
+    return fail(len(bad), f"{len(bad)} live contract(s) of account types that are "
+                          "otherwise scheduled have no repayment-schedule rows after "
+                          "the reporting date ("
+                          + ", ".join(f"{t} {n}" for t, n in by.items())
+                          + "), so they are priced on the fallback EAD shape. e.g. "
+                          + ", ".join(bad.c.head(5)),
+                examples=bad.c.head(10).tolist())
+
+
+def _v_rs_no_duplicate_rows(inputs):
+    p = _rs_profile(inputs)
+    if p is None:
+        return ok()
+    d = p["dup_rows"]
+    if d.empty:
+        return ok()
+    k = d.c.nunique()
+    return fail(len(d), f"{len(d)} repayment-schedule rows across {k} contract(s) are "
+                        "exact duplicates. The EAD curve reads the balance at each date "
+                        "and is not affected; anything that sums the schedule counts "
+                        "these contracts twice. e.g. " + ", ".join(d.c.drop_duplicates().head(5)),
+                examples=d.c.drop_duplicates().head(10).tolist())
+
+
 def _scale_labels(static):
     """Every label on the master rating scale, internal and external -- the
     list the ETL's rating chain matches a customer rating against."""
@@ -828,6 +981,47 @@ INPUT_STAGE_VALIDATORS: list[Validator] = _presence_validators() + [
        "repairing them raises Stage 2 ECL by 6.8%.",
        "Re-extract the schedule with four-digit years. Until then, suppress "
        "with a reason only if the understatement is accepted for this run."),
+    _v("INPUT_RS_runs_off", Severity.ERROR,
+       "Every repayment schedule runs off: its last row's balance is zero",
+       _v_rs_runs_off, "RepaymentSchedule",
+       "A schedule ends at a zero balance. A balance left on the last row means "
+       "the rows after it are missing -- absent from the extract, or dated "
+       "19xx -- so the contract's EAD curve stops there and its lifetime ECL is "
+       "understated, whatever the maturity date says.",
+       "Re-extract the schedule for the contracts listed and check that the "
+       "rows after the last one present come through."),
+    _v("INPUT_RS_ends_at_maturity", Severity.WARN,
+       "Every schedule's last payment is within 3 months of the contract's maturity",
+       _v_rs_ends_at_maturity, "RepaymentSchedule",
+       "The schedule and AccountMaster should agree on when a contract ends. A "
+       "last payment well before maturity is a truncated schedule or a wrong "
+       "maturity date; either one changes the lifetime horizon.",
+       "Compare the contract's schedule with its maturity at source and correct "
+       "whichever is wrong."),
+    _v("INPUT_RS_no_gaps", Severity.WARN,
+       "No schedule has a gap between payments longer than its payment frequency allows",
+       _v_rs_no_gaps, "RepaymentSchedule",
+       "Instalments missing in the middle of a schedule leave a gap longer than "
+       "the payment frequency. The EAD curve holds the next instalment's balance "
+       "through the gap, so exposure over those months is understated.",
+       "Re-extract the schedule for the contracts listed; if the gap is real (a "
+       "grace period), accept it for the run with a reason."),
+    _v("INPUT_RS_scheduled_types_covered", Severity.WARN,
+       "Every live contract of a scheduled account type has a repayment schedule",
+       _v_rs_scheduled_types_covered, "RepaymentSchedule",
+       "Financing products (Murabaha, Tawaraq, Ijara and the like) come with a "
+       "schedule; guarantees and letters of credit do not. A financing contract "
+       "with no schedule rows after the reporting date -- dropped from the "
+       "extract, or with every row dated 19xx -- is priced on the fallback EAD "
+       "shape instead of its contractual run-off.",
+       "Ask IT why the contracts listed have no schedule and re-extract them."),
+    _v("INPUT_RS_no_duplicate_rows", Severity.WARN,
+       "No repayment-schedule row is repeated",
+       _v_rs_no_duplicate_rows, "RepaymentSchedule",
+       "A repeated row does not change the EAD curve, which reads the balance at "
+       "each date, but doubles anything that sums the schedule and signals a "
+       "join that ran twice in the extract.",
+       "De-duplicate the schedule extract."),
     _v("INPUT_AccountMaster_eir_present", Severity.WARN,
        "Every AccountMaster contract has a non-zero EIR",
        _v_am_eir_present, "AccountMaster",

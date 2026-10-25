@@ -89,6 +89,18 @@ def to_concept_unit(annual: pd.Series, transform: str) -> pd.Series:
     return annual.astype(float)
 
 
+def last_actual_guess(years) -> int:
+    """The last actual year of a yearly series that does not say: the year
+    before the current one when the series runs into the current year or
+    later (a year in progress is never actual), else its last year."""
+    import datetime as _dt
+    y = pd.Series(years).dropna().astype(int)
+    if y.empty:
+        return _dt.date.today().year - 1
+    this = _dt.date.today().year
+    return this - 1 if y.max() >= this else int(y.max())
+
+
 class MacroStore:
     """A folder of vintages. ``MacroStore(root).series()`` is the latest."""
 
@@ -272,7 +284,9 @@ class MacroStore:
         """A concept's yearly values in its own unit -- year, value, actual
         -- from the series it resolves to (or ``series_id``). ``actual`` is
         the year being at or before the series' last actual year where the
-        source says one (the WEO does), else every year."""
+        source says one (the WEO does); where it does not (a projection
+        republished on FRED), the years from the current one on are taken as
+        projections."""
         c = _concepts(project_root)
         row = c[c["concept"] == cid]
         if row.empty:
@@ -288,7 +302,7 @@ class MacroStore:
         la = s.loc[s["series_id"] == sid, "last_actual"]
         la = period_year(la.iloc[0]) if len(la) and str(la.iloc[0]).strip() else None
         out = pd.DataFrame({"year": a.index.astype(int), "value": a.to_numpy()})
-        out["actual"] = True if la is None else out["year"] <= la
+        out["actual"] = out["year"] <= (la if la is not None else last_actual_guess(out["year"]))
         out.attrs["series_id"] = sid
         return out.reset_index(drop=True)
 

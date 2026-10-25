@@ -92,8 +92,12 @@ src/ifrs9qdb/
                   bridge do
   macro/          the macro store: every IMF dataset in the catalogue
                   (macro/data/*.csv) for Qatar, the GCC, partners and the US,
-                  FRED and files from QCB, the Planning and Statistics
-                  Authority and the Ministry of Finance, as dated vintages;
+                  and the WEO's key indicators for every country; BIS policy
+                  rates, property prices and credit; the World Bank's
+                  development indicators for every country; FRED (with or
+                  without a key); and files from QCB, the Planning and
+                  Statistics Authority and the Ministry of Finance -- as dated
+                  vintages;
                   quarter.py fills a new quarter's forecasts into a draft
                   config version (five years from the first unconfirmed
                   year); var.py the macro model (a Bayesian VAR) that gives
@@ -107,7 +111,7 @@ src/ifrs9qdb/
                   sensitivities, ECL at risk over simulated paths with
                   customer default draws, reverse stress. Prices through
                   stress.py's reprice, so an empty scenario is the run
-  validation/     148 run checks with the R engine's ids -- input,
+  validation/     153 run checks with the R engine's ids -- input,
                   transform, derived, pricing readiness (READY) and report
                   -- plus 15 pre-flight checks on the config and static
                   reference, and the suppressions file (reason, approver,

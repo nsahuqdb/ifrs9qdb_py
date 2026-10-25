@@ -2,6 +2,7 @@
 macro model. Everything here runs on the synthetic store in
 ``fixtures/macro/store`` (no real data) and on fake network answers."""
 import gzip
+import io
 import json
 import shutil
 from pathlib import Path
@@ -77,8 +78,106 @@ class TestSdmx:
             {"dataset": "WEO", "candidates": "WEO", "frequency": "A",
              "country_dim": "COUNTRY", "start": "2000"}, ["QAT", "SAU"])
         assert "/data/dataflow/IMF.RES/WEO/~/A.QAT+SAU.*" in seen[-1]
-        assert "c%5BTIME_PERIOD%5D=ge%3A2000" in seen[-1] or "c[TIME_PERIOD]=ge:2000" in seen[-1]
+        # the IMF answers an unencoded time filter with 400 and ignores an
+        # encoded one: none is sent, the years are cut after reading
+        assert "TIME_PERIOD" not in seen[-1]
         assert len(s) == 1 and len(o) == 2
+
+    # the real API's answer (October 2026): labels with ": ", a STRUCTURE[;]
+    # header, a quoted STRUCTURE_ID, frequency labels that are not the
+    # frequency's, empty values, and the last actual year only when asked for
+    REAL = ('STRUCTURE[;],STRUCTURE_ID,ACTION,COUNTRY: Country,INDICATOR: Indicator,'
+            'FREQUENCY: Frequency,TIME_PERIOD: Time Period,OBS_VALUE: Observation value,'
+            'SCALE: Scale,LATEST_ACTUAL_ANNUAL_DATA: Latest Actual Annual Data \n'
+            'dataflow,IMF.RES:WEO(9.0.0): World Economic Outlook (WEO),R,QAT: Qatar,'
+            '"NGDP_RPCH: Gross domestic product (GDP), Constant prices, Percent change",'
+            'A: Annual,1980,-1.016417,0,2025\n'
+            'dataflow,IMF.RES:WEO(9.0.0): World Economic Outlook (WEO),R,QAT: Qatar,'
+            '"NGDP_RPCH: Gross domestic product (GDP), Constant prices, Percent change",'
+            'A: Assets,2030,5.239668,0,2025\n'
+            'dataflow,IMF.RES:WEO(9.0.0): World Economic Outlook (WEO),R,QAT: Qatar,'
+            '"NGDP_RPCH: Gross domestic product (GDP), Constant prices, Percent change",'
+            'A: Assets,2031,,0,2025\n')
+
+    def _imf(self, dims, seen, answers=None):
+        def fake(url, headers):
+            seen.append(url)
+            if "/structure/" in url:
+                return 200, json.dumps({"data": {
+                    "dataflows": [{"id": "WEO", "agencyID": "IMF.RES", "version": "9.0.0"}],
+                    "dataStructures": [{"dataStructureComponents": {"dimensionList": {
+                        "dimensions": [{"id": d, "position": i} for i, d in enumerate(dims)]}}}]
+                }}).encode()
+            for k, v in (answers or {}).items():
+                if k in url:
+                    return v
+            return 200, self.REAL.encode()
+        return ImfSdmx(transport=fake)
+
+    def test_the_real_answer_reads_with_its_last_actual_year(self):
+        seen = []
+        s, o, _ = self._imf(["COUNTRY", "INDICATOR", "FREQUENCY"], seen).fetch(
+            {"dataset": "WEO", "candidates": "WEO", "frequency": "A", "country_dim": "COUNTRY",
+             "start": "1990", "forecast": "yes"}, ["QAT"])
+        assert "attributes=LATEST_ACTUAL_ANNUAL_DATA" in seen[-1]
+        assert s["series_id"].tolist() == ["IMF:WEO:QAT:NGDP_RPCH:A"]
+        assert s["last_actual"].iloc[0] == "2025"
+        assert o["period"].tolist() == ["2030"]      # 1980 is before the start, 2031 empty
+
+    def test_a_dataset_without_the_attribute_is_asked_again_plainly(self):
+        seen = []
+        s, o, _ = self._imf(["COUNTRY", "INDICATOR", "FREQUENCY"], seen,
+                            {"attributes=": (400, b"<html>Bad Request</html>")}).fetch(
+            {"dataset": "FM", "candidates": "FM", "frequency": "A", "country_dim": "COUNTRY",
+             "start": "1990", "forecast": "yes"}, ["QAT"])
+        assert "attributes=" not in seen[-1] and len(s) == 1
+
+    def test_a_fixed_area_lands_on_the_country_dimension(self):
+        """PCPS: world prices, in US dollars and as indices."""
+        seen = []
+        self._imf(["COUNTRY", "INDICATOR", "DATA_TRANSFORMATION", "FREQUENCY"], seen).fetch(
+            {"dataset": "PCPS", "candidates": "PCPS", "frequency": "M",
+             "country_dim": "REF_AREA=G001;DATA_TRANSFORMATION=USD+INDEX", "start": ""},
+            ["QAT", "SAU"])
+        assert seen[-1].endswith("/~/G001.*.USD+INDEX.M")
+
+    def test_key_indicators_for_every_country(self):
+        seen = []
+        self._imf(["COUNTRY", "INDICATOR", "FREQUENCY"], seen).fetch(
+            {"dataset": "WEO", "candidates": "WEO", "frequency": "A", "country_dim": "COUNTRY",
+             "start": "", "world_indicators": "NGDP_RPCH+PCPIPCH"}, ["QAT"])
+        data = [u for u in seen if "/data/" in u]
+        assert data[0].endswith("/~/QAT.*.A") and data[1].endswith("/~/*.NGDP_RPCH+PCPIPCH.A")
+
+    def test_a_throttled_answer_is_asked_again(self, monkeypatch):
+        import ifrs9qdb.macro.sources as src
+        calls = []
+
+        class R:
+            status, headers = 200, {}
+            def read(self): return b"ok"
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def urlopen(req, timeout, context):
+            calls.append(req.full_url)
+            if len(calls) == 1:
+                raise src.urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, io.BytesIO(b""))
+            return R()
+        monkeypatch.setattr(src.urllib.request, "urlopen", urlopen)
+        monkeypatch.setattr(src, "_sleep", lambda s: None)
+        assert src.default_transport("https://api.imf.org/x") == (200, b"ok")
+        assert len(calls) == 2
+
+    def test_bis_labels_without_a_space(self):
+        csv = ("STRUCTURE,STRUCTURE_ID,ACTION,FREQ:Frequency,REF_AREA:Reference area,"
+               "TIME_PERIOD:Time period or range,OBS_VALUE:Observation Value,"
+               "UNIT_MEASURE:Unit of measure\n"
+               "dataflow,BIS:WS_CBPOL(1.0): Central bank policy rates,I,M: Monthly,"
+               "SA: Saudi Arabia,2026-09,4.5,368: Per cent per year\n")
+        s, o = parse_sdmx_csv(csv, "CBPOL", source="BIS")
+        assert s["series_id"].tolist() == ["BIS:CBPOL:SA:VALUE:M"]
+        assert s["unit"].iloc[0] == "Per cent per year" and o["period"].tolist() == ["2026-09"]
 
     def test_a_renamed_dataflow_is_found_by_its_next_candidate(self):
         def fake(url, headers):

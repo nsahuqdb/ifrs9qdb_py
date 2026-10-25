@@ -20,8 +20,15 @@ The sources:
                latest release only. The fallback when the SDMX API is blocked.
     DBNOMICS   DBnomics' mirror of the IMF datasets, for a network that can
                reach it but not the IMF.
-    FRED       the St. Louis Fed (free key): US rates, and the IMF REO non-oil
-               GDP projections it republishes.
+    BIS        the Bank for International Settlements' SDMX API (no key):
+               policy rates, property prices, credit to the private sector,
+               credit gaps, debt service ratios.
+    WB         the World Bank's indicators API (no key): the development
+               indicators for every country and aggregate.
+    FRED       the St. Louis Fed: US rates and yields, oil and gas prices,
+               volatility, and the IMF REO non-oil GDP projections it
+               republishes. With a free key through its API; without one,
+               one series at a time through its CSV download.
     files      a long or wide CSV, an SDMX-CSV file downloaded from the
                portal, or a DataMapper JSON file: for QCB, the Planning
                Council, the Ministry of Finance, or any source with no API.
@@ -38,6 +45,7 @@ CA settings, and the tests pass their own.
 from __future__ import annotations
 
 import csv
+import gzip
 import io
 import json
 import os
@@ -56,7 +64,8 @@ from .catalogue import countries as _countries
 from .catalogue import series_id
 
 __all__ = ["SERIES_COLS", "OBS_COLS", "norm_period", "period_year",
-           "default_transport", "ImfSdmx", "DataMapper", "DBnomics", "Fred",
+           "default_transport", "ImfSdmx", "BisSdmx", "WorldBank", "DataMapper",
+           "DBnomics", "Fred",
            "parse_sdmx_csv", "parse_datamapper", "read_long_csv",
            "read_wide_csv", "read_file", "static_seed", "empty_frames",
            "FRED_DEFAULT"]
@@ -69,6 +78,15 @@ FRED_DEFAULT = ["QATNGDPXORPCHPT", "FEDFUNDS", "SOFR", "DGS2", "DGS10",
                 "DCOILBRENTEU"]
 
 Transport = Callable[[str, dict], "tuple[int, bytes]"]
+
+USER_AGENT = "ifrs9qdb (IFRS 9 macro store; Qatar Development Bank)"
+RETRY_WAITS = (10, 30, 60)       # seconds before asking a throttled API again
+PAUSE = 1.0                      # seconds between two datasets from one API
+
+
+def _sleep(seconds: float) -> None:
+    import time
+    time.sleep(seconds)
 
 
 def empty_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -147,14 +165,27 @@ def default_transport(url: str, headers: dict | None = None,
     ca = next((os.environ[k] for k in ("IFRS9_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
                                        "SSL_CERT_FILE") if os.environ.get(k)), None)
     ctx = ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
-    req = urllib.request.Request(url, headers={"User-Agent": "ifrs9qdb", **(headers or {})})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-            return r.status, r.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read() if hasattr(e, "read") else b""
-    except Exception as e:                       # DNS, proxy refusal, TLS
-        return 0, str(e).encode()
+    h = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip", **(headers or {})}
+    for wait in (*RETRY_WAITS, None):
+        req = urllib.request.Request(url, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                body = r.read()
+                if (r.headers.get("Content-Encoding") or "").lower() == "gzip":
+                    body = gzip.decompress(body)
+                return r.status, body
+        except urllib.error.HTTPError as e:
+            body = e.read() if hasattr(e, "read") else b""
+            # the IMF API answers a burst of requests with an empty 403 (or a
+            # 429): wait and ask again
+            throttled = e.code in (429, 503) or (e.code == 403 and not body.strip())
+            if throttled and wait is not None:
+                _sleep(wait)
+                continue
+            return e.code, body
+        except Exception as e:                   # DNS, proxy refusal, TLS
+            return 0, str(e).encode()
+    return 0, b"no answer"
 
 
 def _get(transport, url, headers=None) -> bytes:
@@ -168,8 +199,14 @@ def _get(transport, url, headers=None) -> bytes:
 def _split_label(v) -> tuple[str, str]:
     """``QAT: Qatar`` -> (QAT, Qatar); a bare code is its own label."""
     s = "" if v is None or (isinstance(v, float) and not np.isfinite(v)) else str(v)
-    code, sep, label = s.partition(": ")
-    return (code.strip(), label.strip()) if sep else (s.strip(), s.strip())
+    m = _LABELLED.match(s)
+    if m:
+        return m.group(1), m.group(2).strip()
+    return s.strip(), s.strip()
+
+
+# a code is one word (the BIS writes "FREQ:Frequency", the IMF "QAT: Qatar")
+_LABELLED = re.compile(r"^\s*([A-Za-z0-9_.@$#\-]+):\s?(.*)$", re.S)
 
 
 # ------------------------------------------------------------------- SDMX ---
@@ -191,7 +228,7 @@ def parse_sdmx_csv(text: str, dataset: str, dims: list[str] | None = None,
     if not text or not text.strip():
         return empty_frames()
     raw = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
-    raw.columns = [_split_label(c)[0] for c in raw.columns]
+    raw.columns = [re.sub(r"\[.*\]$", "", _split_label(c)[0]) for c in raw.columns]
     if "TIME_PERIOD" not in raw.columns or "OBS_VALUE" not in raw.columns:
         raise ValueError("Not an SDMX-CSV table: no TIME_PERIOD / OBS_VALUE columns.")
     cols = list(raw.columns)
@@ -301,41 +338,181 @@ class ImfSdmx:
               ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
         """One dataset of ``datasets.csv`` for the countries given."""
         meta = self.resolve(row["candidates"] or row["dataset"])
-        cdim_spec = str(row.get("country_dim") or "COUNTRY")
-        fixed = {}
-        if "=" in cdim_spec:                       # REF_AREA=W00: a fixed area
-            k, v = cdim_spec.split("=", 1)
-            fixed[k.strip()] = v.strip()
-            cdim = k.strip()
-        else:
-            cdim = cdim_spec.strip()
         dims = meta["dims"]
-        if dims and cdim not in dims:
-            cdim = next((d for d in _COUNTRY_DIMS if d in dims), cdim)
+        # country_dim: the country dimension's name, or fixed values for any
+        # dimensions ("COUNTRY=G001;DATA_TRANSFORMATION=USD")
+        spec = str(row.get("country_dim") or "COUNTRY")
+        fixed, cdim = {}, None
+        for part in [p.strip() for p in spec.split(";") if p.strip()]:
+            if "=" in part:
+                k, v = (x.strip() for x in part.split("=", 1))
+                if dims and k not in dims and k in _COUNTRY_DIMS:
+                    k = next((d for d in _COUNTRY_DIMS if d in dims), k)
+                fixed[k] = v
+            else:
+                cdim = part
+        if cdim is None or (dims and cdim not in dims):
+            cdim = next((d for d in _COUNTRY_DIMS if d in dims), cdim or "COUNTRY")
+        codes = self.country_codes(country_codes)
+        y0 = start or (int(row["start"]) if str(row.get("start") or "").isdigit() else None)
+        forecast = str(row.get("forecast") or "").lower() in ("yes", "true", "1")
+        keys = [self._key(dims, fixed, cdim, "+".join(codes), row)]
+        world = str(row.get("world_indicators") or "").strip()
+        if world:                                  # every country, key indicators
+            idim = next((d for d in ("INDICATOR", "CONCEPT") if d in dims), None)
+            if idim:
+                keys.append(self._key(dims, {**fixed, idim: world.replace("|", "+")},
+                                      cdim, "*", row))
+        sers, obss, urls = [], [], []
+        for key in keys:
+            body, url = self._data(meta, key, forecast)
+            ser, obs = parse_sdmx_csv(body.decode("utf-8-sig", "replace"), row["dataset"],
+                                      dims=dims or None, country_dim=cdim,
+                                      source=self.SOURCE,
+                                      release=str(meta.get("version", "")))
+            sers.append(ser)
+            obss.append(obs)
+            urls.append(url)
+        ser = pd.concat(sers, ignore_index=True).drop_duplicates("series_id", keep="first")
+        obs = pd.concat(obss, ignore_index=True).drop_duplicates(["series_id", "period"])
+        if y0:
+            yr = pd.to_numeric(obs["period"].str[:4], errors="coerce")
+            obs = obs[yr >= y0]
+            ser = ser[ser["series_id"].isin(set(obs["series_id"]))]
+        return (ser.reset_index(drop=True), obs.reset_index(drop=True),
+                {"dataflow": f"{meta['agency']}:{meta['id']}({meta['version']})",
+                 "url": " ; ".join(urls)})
+
+    SOURCE = "IMF"
+
+    def country_codes(self, codes3: list[str]) -> list[str]:
+        return list(codes3)
+
+    @staticmethod
+    def _key(dims, fixed, cdim, countries, row) -> str:
         parts = []
         for d in dims:
             if d in fixed:
                 parts.append(fixed[d])
             elif d == cdim:
-                parts.append("+".join(country_codes))
+                parts.append(countries)
             elif d in _FREQ_DIMS and row.get("frequency"):
                 parts.append(str(row["frequency"]))
             else:
                 parts.append("*")
-        key = ".".join(parts) if parts else "*"
-        q = {}
-        y0 = start or (int(row["start"]) if str(row.get("start") or "").isdigit() else None)
-        if y0:
-            q["c[TIME_PERIOD]"] = f"ge:{y0}"
-        url = (f"{self.base}/data/dataflow/{meta['agency']}/{meta['id']}/~/{key}"
-               + ("?" + urllib.parse.urlencode(q, safe="[]:") if q else ""))
-        body = _get(self.transport, url, self._headers(
-            "application/vnd.sdmx.data+csv;version=2.0.0;labels=both"))
-        ser, obs = parse_sdmx_csv(body.decode("utf-8-sig", "replace"), row["dataset"],
-                                  dims=dims or None, country_dim=cdim,
-                                  release=str(meta.get("version", "")))
-        return ser, obs, {"dataflow": f"{meta['agency']}:{meta['id']}({meta['version']})",
-                          "url": url}
+        return ".".join(parts) if parts else "*"
+
+    def _data(self, meta, key, forecast=False) -> tuple[bytes, str]:
+        """The data for one key, as SDMX-CSV with labels. The time filter is
+        not sent (the IMF API refuses it unencoded and ignores it encoded);
+        the years are cut after reading. A forecast dataset also asks for its
+        last-actual-year attribute, without which history and projection
+        cannot be told apart."""
+        url = f"{self.base}/data/dataflow/{meta['agency']}/{meta['id']}/~/{key}"
+        accept = self._headers("application/vnd.sdmx.data+csv;version=2.0.0;labels=both")
+        if forecast:
+            try:
+                u = url + "?attributes=LATEST_ACTUAL_ANNUAL_DATA,SCALE,UNIT"
+                return _get(self.transport, u, accept), u
+            except IOError:
+                pass                               # not in this dataset: plain
+        return _get(self.transport, url, accept), url
+
+
+class BisSdmx(ImfSdmx):
+    """The BIS statistics SDMX API (``stats.bis.org/api/v2``): the same
+    protocol as the IMF's, two-letter country codes, the euro area as XM."""
+
+    BASE = "https://stats.bis.org/api/v2"
+    SOURCE = "BIS"
+    _ISO2 = {"G163": "XM", "G001": "5J"}
+
+    def __init__(self, transport: Transport | None = None, base: str | None = None):
+        super().__init__(transport=transport, base=base or os.environ.get("IFRS9_BIS_SDMX")
+                         or self.BASE)
+
+    def country_codes(self, codes3: list[str]) -> list[str]:
+        c = _countries(None).set_index("code")["iso2"].to_dict()
+        out = [self._ISO2.get(x) or c.get(x) or x for x in codes3]
+        return [x for x in out if x and x != "5J"]
+
+    def _data(self, meta, key, forecast=False) -> tuple[bytes, str]:
+        url = f"{self.base}/data/dataflow/{meta['agency']}/{meta['id']}/~/{key}"
+        return _get(self.transport, url, self._headers(
+            "application/vnd.sdmx.data+csv;version=2.0.0;labels=both")), url
+
+    def fetch(self, row, country_codes, start=None):
+        """As the IMF's, with the BIS's two-letter countries written as the
+        store's three-letter ones, so a country's series sit together."""
+        ser, obs, info = super().fetch(row, country_codes, start)
+        back = {v: k for k, v in _countries(None).set_index("code")["iso2"].items() if v}
+        back.update({"XM": "G163"})
+        if ser.empty:
+            return ser, obs, info
+        new = ser["country"].map(lambda c: back.get(c, c))
+        ids = {old: series_id(self.SOURCE, d, c, i, f) for old, d, c, i, f in
+               zip(ser["series_id"], ser["dataset"], new, ser["indicator"], ser["freq"])}
+        ser = ser.assign(country=new, series_id=ser["series_id"].map(ids))
+        obs = obs.assign(series_id=obs["series_id"].map(ids))
+        return ser, obs, info
+
+
+# ------------------------------------------------------------- World Bank --
+class WorldBank:
+    """The World Bank indicators API (``api.worldbank.org/v2``, no key): the
+    World Development Indicators for every country and aggregate, several
+    indicators per request."""
+
+    BASE = "https://api.worldbank.org/v2"
+
+    def __init__(self, transport: Transport | None = None, base: str | None = None):
+        self.transport = transport or default_transport
+        self.base = (base or self.BASE).rstrip("/")
+
+    def fetch(self, indicators: pd.DataFrame, start: int = 1980, end: int | None = None,
+              countries: str = "all", batch: int = 8
+              ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+        import datetime as _dt
+        end = end or _dt.date.today().year
+        units = dict(zip(indicators["indicator"], indicators.get("unit", "")))
+        ids = list(indicators["indicator"])
+        srows, orows, failed = {}, [], []
+        for i in range(0, len(ids), batch):
+            chunk = ids[i:i + batch]
+            page, pages = 1, 1
+            while page <= pages:
+                url = (f"{self.base}/country/{countries}/indicator/{';'.join(chunk)}"
+                       f"?source=2&format=json&per_page=20000&page={page}"
+                       f"&date={start}:{end}")
+                try:
+                    j = json.loads(_get(self.transport, url))
+                except Exception as e:
+                    failed.append(f"{','.join(chunk)}: {e}")
+                    break
+                head = j[0] if isinstance(j, list) and j else {}
+                if isinstance(head, dict) and head.get("message"):
+                    failed.append(f"{','.join(chunk)}: {head['message']}")
+                    break
+                pages = int(head.get("pages", 1) or 1)
+                for r in (j[1] if len(j) > 1 and j[1] else []):
+                    v = r.get("value")
+                    iso = r.get("countryiso3code") or (r.get("country") or {}).get("id", "")
+                    if v is None or not iso:
+                        continue
+                    ind = (r.get("indicator") or {}).get("id", "")
+                    sid = series_id("WB", "WDI", iso, ind, "A")
+                    if sid not in srows:
+                        srows[sid] = {"series_id": sid, "source": "WB", "dataset": "WDI",
+                                      "country": iso, "indicator": ind, "freq": "A",
+                                      "name": (r.get("indicator") or {}).get("value", ind),
+                                      "unit": units.get(ind, "") or r.get("unit", ""),
+                                      "last_actual": "", "release": head.get("lastupdated", "")}
+                    orows.append({"series_id": sid, "period": norm_period(r.get("date"), "A"),
+                                  "value": float(v)})
+                page += 1
+                _sleep(PAUSE / 4)
+        s, o = _frame(list(srows.values()), orows)
+        return s, o, {"failed": failed}
 
 
 # -------------------------------------------------------------- DataMapper --
@@ -476,6 +653,43 @@ class Fred:
     def __init__(self, key: str | None = None, transport: Transport | None = None):
         self.key = key or os.environ.get("FRED_API_KEY", "")
         self.transport = transport or default_transport
+
+    GRAPH = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+
+    def fetch_csv(self, catalogue: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+        """Without a key: each series' CSV download (one series a request;
+        several at once come back zipped), named and typed from the
+        catalogue (``macro/data/fred.csv``)."""
+        srows, orows, missing = [], [], []
+        for _, c in catalogue.iterrows():
+            sid0, freq = str(c["series"]), str(c.get("freq") or "M")[:1].upper()
+            try:
+                body = _get(self.transport, f"{self.GRAPH}?id={urllib.parse.quote(sid0)}")
+                df = pd.read_csv(io.BytesIO(body))
+            except Exception:
+                missing.append(sid0)
+                continue
+            if df.shape[1] < 2:
+                missing.append(sid0)
+                continue
+            d = pd.DataFrame({"period": [norm_period(x, freq) for x in df.iloc[:, 0]],
+                              "value": pd.to_numeric(df.iloc[:, 1], errors="coerce")}).dropna()
+            if d.empty:
+                missing.append(sid0)
+                continue
+            # daily and weekly series are averaged to the month
+            d = d.groupby("period", as_index=False)["value"].mean()
+            sid = series_id("FRED", sid0, "", sid0, freq)
+            srows.append({"series_id": sid, "source": "FRED", "dataset": sid0,
+                          "country": str(c.get("country") or ""), "indicator": sid0,
+                          "freq": freq, "name": str(c.get("label") or sid0),
+                          "unit": str(c.get("unit") or ""), "last_actual": "",
+                          "release": "csv"})
+            orows += [{"series_id": sid, "period": p, "value": v}
+                      for p, v in zip(d["period"], d["value"])]
+            _sleep(PAUSE / 4)
+        s, o = _frame(srows, orows)
+        return s, o, {"missing": missing}
 
     def fetch(self, ids: list[str]) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
         if not self.key:

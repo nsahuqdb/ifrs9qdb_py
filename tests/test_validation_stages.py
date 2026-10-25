@@ -28,14 +28,14 @@ def static():
 
 class TestTheCatalogue:
     def test_the_run_suite_has_the_same_shape_as_the_r_report(self):
-        """R's validation.csv on a phased run: 148 checks -- INPUT 69,
+        """R's validation.csv on a phased run: 153 checks -- INPUT 74,
         TRANSFORM 28, DERIVED 29, READY 20, REPORT 2."""
         from ifrs9qdb.validation.readiness import (READY_STAGE_VALIDATORS,
                                                    REPORT_STAGE_VALIDATORS)
-        assert len(V.INPUT_STAGE) == 69
+        assert len(V.INPUT_STAGE) == 74
         assert len(V.TRANSFORM_STAGE) == 28
         assert len(V.DERIVED_STAGE) == 29
-        assert len(V.STAGE_VALIDATORS) == 126
+        assert len(V.STAGE_VALIDATORS) == 131
         assert len(READY_STAGE_VALIDATORS) == 20
         assert len(REPORT_STAGE_VALIDATORS) == 2
 
@@ -288,3 +288,63 @@ class TestAgainstTheReferenceRun:
     def test_the_preflight_suite_passes_on_the_packaged_static(self, static):
         res = V.validate_preflight(static=static)
         assert res.summary()["errors"] == 0
+
+
+class TestScheduleCompleteness:
+    """The repayment schedule runs to maturity, without holes, for every
+    financing contract. Tested on the June and September 2026 extracts; these
+    are the same cases on a book small enough to read."""
+
+    @staticmethod
+    def _inputs(drop=(), duplicate=False, extra_account=False):
+        class FakeInputs:
+            tables = {}
+            missing = []
+
+            def __getitem__(self, k):
+                return self.tables.get(k, pd.DataFrame())
+        months = pd.date_range("2026-07-31", periods=24, freq="ME")
+        rows = []
+        for c in (1, 2):
+            for i, d in enumerate(months):
+                if (c, i) in drop:
+                    continue
+                rows.append({"KEY_1": c, "POST_DATE": "2024-01-01",
+                             "START_DAT": d.strftime("%Y-%m-%d"),
+                             "PRINCE_DUE": 100.0, "BALANCE": 100.0 * (23 - i)})
+        rs = pd.DataFrame(rows)
+        if duplicate:
+            rs = pd.concat([rs, rs.head(3)], ignore_index=True)
+        am = pd.DataFrame({"EXTRACTDA": "30-JUN-2026", "CONTRACTID": [1, 2],
+                           "ACCOUNTTYPE": "Murabaha", "ONBALANCE": [2400.0, 2400.0],
+                           "MATURITYDAT": "30-JUN-2028", "PAYMENTFREQUENCY": 1})
+        if extra_account:
+            am = pd.concat([am, am.head(1).assign(CONTRACTID=3)], ignore_index=True)
+        inp = FakeInputs()
+        inp.tables = {"RepaymentSchedule": rs, "AccountMaster": am}
+        return inp
+
+    def _bad(self, inp):
+        res = run_suite("t", V.INPUT_STAGE, {"inputs": inp}, {})
+        return {i.id for i in res.issues if not i.passed and i.id.startswith("INPUT_RS_")}
+
+    def test_a_complete_schedule_passes(self):
+        assert self._bad(self._inputs()) == set()
+
+    def test_a_missing_tail_is_caught_whatever_the_maturity(self):
+        bad = self._bad(self._inputs(drop={(1, i) for i in range(18, 24)}))
+        assert {"INPUT_RS_runs_off", "INPUT_RS_ends_at_maturity"} <= bad
+
+    def test_only_the_last_instalment_missing_is_caught(self):
+        assert "INPUT_RS_runs_off" in self._bad(self._inputs(drop={(1, 23)}))
+
+    def test_a_hole_in_the_middle_is_caught(self):
+        bad = self._bad(self._inputs(drop={(2, 10), (2, 11), (2, 12)}))
+        assert bad == {"INPUT_RS_no_gaps"}
+
+    def test_a_financing_contract_with_no_schedule_is_caught(self):
+        bad = self._bad(self._inputs(extra_account=True))
+        assert "INPUT_RS_scheduled_types_covered" in bad
+
+    def test_repeated_rows_are_caught(self):
+        assert self._bad(self._inputs(duplicate=True)) == {"INPUT_RS_no_duplicate_rows"}
