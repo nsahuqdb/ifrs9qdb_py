@@ -81,6 +81,7 @@ Transport = Callable[[str, dict], "tuple[int, bytes]"]
 
 USER_AGENT = "ifrs9qdb (IFRS 9 macro store; Qatar Development Bank)"
 RETRY_WAITS = (5, 20)            # seconds before asking a throttled API again
+FRED_TIMEOUT = 20                # seconds; FRED answers a browser in under one
 PAUSE = 1.0                      # seconds between two datasets from one API
 
 
@@ -219,8 +220,12 @@ def default_transport(url: str, headers: dict | None = None,
     return 0, b"no answer"
 
 
-def _get(transport, url, headers=None) -> bytes:
-    status, body = (transport or default_transport)(url, headers or {})
+def _get(transport, url, headers=None, timeout: float | None = None) -> bytes:
+    t = transport or default_transport
+    if timeout is not None and t is default_transport:
+        status, body = default_transport(url, headers or {}, timeout=timeout)
+    else:
+        status, body = t(url, headers or {})
     if status != 200:
         msg = body[:300].decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
         raise IOError(f"HTTP {status} from {url.split('?')[0]}: {msg.strip()}")
@@ -700,13 +705,23 @@ class Fred:
         several at once come back zipped), named and typed from the
         catalogue (``macro/data/fred.csv``)."""
         srows, orows, missing = [], [], []
+        dead = 0
         for _, c in catalogue.iterrows():
             sid0, freq = str(c["series"]), str(c.get("freq") or "M")[:1].upper()
-            try:
-                body = _get(self.transport, f"{self.GRAPH}?id={urllib.parse.quote(sid0)}")
-                df = pd.read_csv(io.BytesIO(body))
-            except Exception:
+            if dead >= 2:
+                # two in a row without an answer: the site is not reachable
+                # from here (a bank network may hold such requests open
+                # rather than refuse them); do not wait on every series
                 missing.append(sid0)
+                continue
+            try:
+                body = _get(self.transport, f"{self.GRAPH}?id={urllib.parse.quote(sid0)}",
+                            timeout=FRED_TIMEOUT)
+                df = pd.read_csv(io.BytesIO(body))
+                dead = 0
+            except Exception as e:
+                missing.append(sid0)
+                dead += 1 if ("HTTP 0" in str(e) or "timed out" in str(e).lower()) else 0
                 continue
             if df.shape[1] < 2:
                 missing.append(sid0)

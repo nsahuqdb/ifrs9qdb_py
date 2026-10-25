@@ -377,3 +377,17 @@ class TestMacroModel:
         a = model.simulate(50, seed=3)
         b = model.simulate(50, seed=3)
         assert a.shape == (50, 5, len(model.concepts)) and np.array_equal(a, b)
+
+
+class TestFredUnreachable:
+    def test_two_silent_requests_and_the_rest_are_skipped(self):
+        import pandas as pd
+        from ifrs9qdb.macro.sources import Fred
+        calls = []
+
+        def fake(url, headers):
+            calls.append(url)
+            return 0, b"timed out"
+        cat = pd.DataFrame({"series": ["A", "B", "C", "D"], "label": "x", "unit": "", "freq": "M"})
+        s, o, info = Fred(transport=fake).fetch_csv(cat)
+        assert len(calls) == 2 and info["missing"] == ["A", "B", "C", "D"] and s.empty

@@ -28,6 +28,7 @@ __all__ = ["refresh", "import_file", "SOURCES"]
 
 SOURCES = ("IMF", "BIS", "WB", "DM", "DBNOMICS", "FRED", "STATIC")
 DEFAULT_SOURCES = ("IMF", "BIS", "WB", "FRED", "STATIC")
+SOURCE_BUDGET = 15 * 60          # seconds a source may take before it is left behind
 
 
 def _static_dir(project_root=None) -> Path:
@@ -71,15 +72,21 @@ def refresh(store: MacroStore, project_root=None, groups=None, datasets=None,
     lock = threading.Lock()
     stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
 
+    closed = threading.Event()        # set when the vintage is written
+
     def keep(s, o, entry):
         entry.update({"series": int(len(s)), "observations": int(len(o)), "fetched": stamp})
         with lock:
+            if closed.is_set():
+                return
             sers.append(s)
             obss.append(o)
             log.append(entry)
 
     def failed(entry, err):
         with lock:
+            if closed.is_set():
+                return
             log.append({**entry, "status": "failed", "error": err, "series": 0,
                         "observations": 0, "fetched": stamp,
                         "note": "the previous vintage's copy is kept"})
@@ -185,16 +192,29 @@ def refresh(store: MacroStore, project_root=None, groups=None, datasets=None,
 
     tasks = []
     if "IMF" in sources:
-        tasks.append(lambda: sdmx_rows("IMF"))
+        tasks.append((lambda: sdmx_rows("IMF"), "IMF"))
     if "BIS" in sources:
-        tasks.append(lambda: sdmx_rows("BIS"))
+        tasks.append((lambda: sdmx_rows("BIS"), "BIS"))
     if "WB" in sources:
-        tasks.append(world_bank)
+        tasks.append((world_bank, "WB"))
     if "FRED" in sources:
-        tasks.append(fred)
-    with ThreadPoolExecutor(max_workers=max(1, len(tasks))) as ex:
-        for f in [ex.submit(t) for t in tasks]:
-            f.result()
+        tasks.append((fred, "FRED"))
+    # each source has a time budget: one that has not finished by then is
+    # left behind (its previous copy kept) rather than holding the vintage
+    ex = ThreadPoolExecutor(max_workers=max(1, len(tasks)))
+    futs = {ex.submit(t): name for t, name in tasks}
+    deadline = time.time() + SOURCE_BUDGET
+    for f, name in futs.items():
+        try:
+            f.result(timeout=max(1.0, deadline - time.time()))
+        except Exception as e:                    # a budget overrun or a bug
+            failed({"dataset": name, "source": name}, f"not finished in "
+                   f"{SOURCE_BUDGET // 60} minutes; left behind" if
+                   isinstance(e, TimeoutError) or "Timeout" in type(e).__name__ else str(e))
+            say(f"{name}: left behind ({type(e).__name__})")
+    ex.shutdown(wait=False, cancel_futures=True)
+    with lock:
+        closed.set()
 
     say("Saving the vintage")
     s = pd.concat(sers, ignore_index=True) if sers else empty_frames()[0]
