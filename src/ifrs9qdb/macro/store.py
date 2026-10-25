@@ -89,6 +89,28 @@ def to_concept_unit(annual: pd.Series, transform: str) -> pd.Series:
     return annual.astype(float)
 
 
+_FILES: "dict[str, tuple]" = {}
+_FILES_KEEP = 4                       # two vintages' series and observations
+
+
+def _read_cached(path, read, index: str | None = None):
+    """A file's frame, read once per change of the file, and optionally an
+    index from a column's values to row positions."""
+    key = str(path)
+    st = path.stat()
+    stamp = (st.st_mtime_ns, st.st_size)
+    hit = _FILES.get(key)
+    if hit and hit[0] == stamp:
+        _FILES[key] = _FILES.pop(key)         # most recently used last
+        return hit[1], hit[2]
+    df = read()
+    idx = df.groupby(index, sort=False).indices if index else None
+    _FILES[key] = (stamp, df, idx)
+    while len(_FILES) > _FILES_KEEP:
+        _FILES.pop(next(iter(_FILES)))
+    return df, idx
+
+
 def last_actual_guess(years) -> int:
     """The last actual year of a yearly series that does not say: the year
     before the current one when the series runs into the current year or
@@ -204,22 +226,32 @@ class MacroStore:
         return vid
 
     # ---------------------------------------------------------------- read --
+    # A vintage never changes once written, so its two files are read once
+    # and kept in memory (the two vintages last used), with an index from
+    # series id to rows: a refreshed store holds about a million values and
+    # reading them for every chart took over a second each time.
     def series(self, vintage=None) -> pd.DataFrame:
         v = self._resolve(vintage)
-        if not v or not (self.vdir / v / "series.csv").is_file():
+        p = self.vdir / v / "series.csv" if v else None
+        if not v or not p.is_file():
             return empty_frames()[0]
-        return pd.read_csv(self.vdir / v / "series.csv", dtype=str,
-                           keep_default_na=False)
+        df, _ = _read_cached(p, lambda: pd.read_csv(p, dtype=str, keep_default_na=False))
+        return df.copy()
 
     def observations(self, vintage=None, ids=None) -> pd.DataFrame:
         v = self._resolve(vintage)
-        if not v or not (self.vdir / v / "observations.csv.gz").is_file():
+        p = self.vdir / v / "observations.csv.gz" if v else None
+        if not v or not p.is_file():
             return empty_frames()[1]
-        o = pd.read_csv(self.vdir / v / "observations.csv.gz", dtype={"series_id": str,
-                                                                      "period": str})
-        if ids is not None:
-            o = o[o["series_id"].isin(set(ids))]
-        return o.reset_index(drop=True)
+        o, idx = _read_cached(p, lambda: pd.read_csv(p, dtype={"series_id": str,
+                                                              "period": str}),
+                              index="series_id")
+        if ids is None:
+            return o.copy()
+        rows = [idx[i] for i in dict.fromkeys(ids) if i in idx]
+        if not rows:
+            return o.iloc[0:0].reset_index(drop=True)
+        return o.iloc[np.sort(np.concatenate(rows))].reset_index(drop=True)
 
     def search(self, text: str = "", vintage=None, limit: int = 200,
                source: str | None = None, country: str | None = None) -> pd.DataFrame:

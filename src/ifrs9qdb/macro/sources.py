@@ -216,7 +216,15 @@ def default_transport(url: str, headers: dict | None = None,
                 continue
             return e.code, body
         except Exception as e:                   # DNS, proxy refusal, TLS
-            return 0, str(e).encode()
+            msg = str(e)
+            # a dropped connection (an SSL EOF, a reset) is worth one more
+            # try; a timeout is not -- it would only wait again
+            if wait is not None and "timed out" not in msg.lower() and \
+                    any(k in msg for k in ("EOF", "reset", "Connection aborted",
+                                           "RemoteDisconnected", "IncompleteRead")):
+                _sleep(wait)
+                continue
+            return 0, msg.encode()
     return 0, b"no answer"
 
 

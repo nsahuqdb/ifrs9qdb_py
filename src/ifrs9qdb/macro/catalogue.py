@@ -95,6 +95,52 @@ def match_candidates(candidates: str, series: pd.DataFrame) -> str | None:
     answer does not depend on how the table happens to be ordered."""
     if series is None or series.empty or not candidates:
         return None
+    ids, names = _sorted_ids(series)
+    for cand in [c.strip() for c in str(candidates).split("|") if c.strip()]:
+        if cand.startswith("name~"):
+            rx, _, glob = cand[5:].partition("@")
+            glob = glob or "*"
+            try:
+                pat = re.compile(rx)
+            except re.error:
+                continue
+        else:
+            glob, pat = cand, None
+        lo, hi = _prefix_range(ids, glob)
+        for k in range(lo, hi):              # ids are sorted: the first is the answer
+            if fnmatch.fnmatchcase(ids[k], glob) and (pat is None or pat.search(names[k])):
+                return ids[k]
+    return None
+
+
+_SORTED: dict = {}
+
+
+def _sorted_ids(series: pd.DataFrame):
+    """The table's ids in sorted order, with their names, kept for the table
+    last seen (a store's series table is matched against fifty concepts at a
+    time)."""
+    key = (id(series), len(series))
+    hit = _SORTED.get("last")
+    if hit and hit[0] == key:
+        return hit[1], hit[2]
+    ids = series["series_id"].astype(str).tolist()
+    names = series["name"].astype(str).tolist() if "name" in series.columns else ids
+    order = sorted(range(len(ids)), key=ids.__getitem__)
+    ids_s, names_s = [ids[i] for i in order], [names[i] for i in order]
+    _SORTED["last"] = (key, ids_s, names_s)
+    return ids_s, names_s
+
+
+def _prefix_range(ids: list, glob: str) -> tuple[int, int]:
+    """The rows of sorted ``ids`` that can match ``glob``: those starting
+    with its literal part before the first wildcard."""
+    import bisect
+    cut = min([glob.find(c) for c in "*?[" if c in glob] or [len(glob)])
+    pre = glob[:cut]
+    if not pre:
+        return 0, len(ids)
+    return bisect.bisect_left(ids, pre), bisect.bisect_left(ids, pre + "\U0010ffff")
     ids = series["series_id"].astype(str)
     names = series["name"].astype(str) if "name" in series.columns else ids
     for cand in [c.strip() for c in str(candidates).split("|") if c.strip()]:
