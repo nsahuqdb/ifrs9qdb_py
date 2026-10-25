@@ -30,3 +30,27 @@ GDP_JPN,Japan real GDP growth,% change,none,IMF:WEO:JPN:NGDP_RPCH*|DM:WEO:JPN:NG
 GDP_KOR,Korea real GDP growth,% change,none,IMF:WEO:KOR:NGDP_RPCH*|DM:WEO:KOR:NGDP_RPCH:*,,no,0.3,2.0
 GDP_WLD,World real GDP growth,% change,none,IMF:WEO:G001:NGDP_RPCH*|DM:WEO:WEOWORLD:NGDP_RPCH:*,,no,0.3,1.5
 NPL_QAT,Qatar bank NPL ratio,% of loans,none,QCB:NPL:QAT:*|name~[Nn]on-?performing loans.*gross loans@IMF:FSI:QAT:*|WB:WDI:QAT:FB.AST.NPER.ZS:*,,no,0.8,
+GDP_USA,US real GDP growth,% change,none,IMF:WEO:USA:NGDP_RPCH*|WB:WDI:USA:NY.GDP.MKTP.KD.ZG:*,,no,0.3,2.0
+GDP_EA,Euro area real GDP growth,% change,none,IMF:WEO:G163:NGDP_RPCH*|WB:WDI:EMU:NY.GDP.MKTP.KD.ZG:*,,no,0.3,2.0
+GDP_GBR,UK real GDP growth,% change,none,IMF:WEO:GBR:NGDP_RPCH*|WB:WDI:GBR:NY.GDP.MKTP.KD.ZG:*,,no,0.3,2.0
+CPI_USA,US inflation,% change,none,IMF:WEO:USA:PCPIPCH*|WB:WDI:USA:FP.CPI.TOTL.ZG:*,,no,0.5,2.0
+CPI_SAU,Saudi Arabia inflation,% change,none,IMF:WEO:SAU:PCPIPCH*|WB:WDI:SAU:FP.CPI.TOTL.ZG:*,,no,0.4,2.0
+CPI_ARE,UAE inflation,% change,none,IMF:WEO:ARE:PCPIPCH*|WB:WDI:ARE:FP.CPI.TOTL.ZG:*,,no,0.4,2.0
+GOV_DEBT_QAT,Qatar government debt (% of GDP),% of GDP,none,IMF:WEO:QAT:GGXWDG_NGDP*|IMF:FM:QAT:*GGXWDG*,,no,0.8,10.0
+CA_QAT,Qatar current account (% of GDP),% of GDP,none,IMF:WEO:QAT:BCA_NGDPD*|WB:WDI:QAT:BN.CAB.XOKA.GD.ZS:*,,no,0.6,8.0
+US_2Y,US 2-year Treasury yield,points,none,FRED:DGS2:*,,no,0.8,1.5
+US_10Y,US 10-year Treasury yield,points,none,FRED:DGS10:*,,no,0.8,1.2
+US_HY_SPREAD,US high-yield credit spread,points,none,FRED:BAMLH0A0HYM2:*,,no,0.4,2.0
+VIX,Equity volatility (VIX),points,none,FRED:VIXCLS:*,,no,0.3,6.0
+USD_INDEX,US dollar broad index,% change,pct_change,FRED:DTWEXBGS:*,,no,0.2,5.0
+SP500,S&P 500,% change,pct_change,FRED:SP500:*,,no,0.0,15.0
+WTI_PRICE,WTI crude price,% change,pct_change,FRED:DCOILWTICO:*|IMF:PCPS:G001:POILWTI*USD*,,no,0.0,30.0
+HENRY_HUB,US natural gas price (Henry Hub),% change,pct_change,FRED:DHHNGSP:*|IMF:PCPS:G001:PNGASUS*USD*,,no,0.0,35.0
+GAS_EU,European natural gas price,% change,pct_change,FRED:PNGASEUUSDM:*|IMF:PCPS:G001:PNGASEU*USD*,,no,0.0,35.0
+SAU_RATE,Saudi Arabia policy rate,points,none,BIS:CBPOL:SAU:*|name~[Pp]olicy.*[Rr]ate@IMF:MFS_IR:SAU:*,,no,0.8,1.5
+ARE_RATE,UAE policy rate,points,none,BIS:CBPOL:ARE:*|name~[Pp]olicy.*[Rr]ate@IMF:MFS_IR:ARE:*,,no,0.8,1.5
+EA_RATE,Euro area policy rate,points,none,BIS:CBPOL:G163:*,,no,0.8,1.5
+PROPERTY_SAU,Saudi Arabia real property prices,% change,pct_change,BIS:SPP:SAU:R.628:*|name~Real.*Index@BIS:SPP:SAU:*,,no,0.3,6.0
+PROPERTY_ARE,UAE real property prices,% change,pct_change,BIS:SPP:ARE:R.628:*|name~Real.*Index@BIS:SPP:ARE:*,,no,0.3,8.0
+CREDIT_GDP_SAU,Saudi Arabia private credit (% of GDP),% of GDP,none,BIS:TC:SAU:P.A.M.770.A*|WB:WDI:SAU:FS.AST.PRVT.GD.ZS:*,,no,0.8,5.0
+CREDIT_GDP_QAT,Qatar private credit (% of GDP),% of GDP,none,WB:WDI:QAT:FS.AST.PRVT.GD.ZS:*,,no,0.8,8.0

@@ -42,122 +42,161 @@ def refresh(store: MacroStore, project_root=None, groups=None, datasets=None,
             label: str = "", progress: Callable[[str], None] | None = None,
             only_default: bool = True) -> dict:
     """Fetch and save one vintage. Returns ``{vintage, log, series,
-    observations}``; ``log`` has one row per dataset or source."""
+    observations}``; ``log`` has one row per dataset or source.
+
+    The IMF, the BIS, the World Bank and FRED are different servers, so they
+    are fetched side by side; each one's datasets one after another, with a
+    pause, so no server sees a burst. A dataset's countries are the core
+    ones (Qatar, the GCC, the US, China, the euro area, the world) or, for
+    the outlooks and the BIS's series, every major economy as well
+    (``countries.csv``, ``scope``; ``datasets.csv``, ``countries``).
+    ``progress`` hears one line per dataset as it starts and as it ends."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
     say = progress or (lambda msg: None)
     rows = _datasets(project_root, groups=groups, only_default=only_default and not datasets)
     if datasets:
         rows = rows[rows["dataset"].isin(list(datasets))]
     ctry = _countries(project_root)
-    codes3 = list(country_codes or ctry["code"])
-    codes2 = list(ctry.set_index("code").reindex(codes3)["iso2"].fillna(""))
+    if "scope" not in ctry.columns:
+        ctry["scope"] = "core"
+    if country_codes:
+        ctry = ctry[ctry["code"].isin(list(country_codes))]
+    core = list(ctry.loc[ctry["scope"] == "core", "code"]) or list(ctry["code"])
+    major = list(ctry["code"])
+    iso2 = ctry.set_index("code")["iso2"].fillna("").to_dict()
     sers, obss, log = [], [], []
+    lock = threading.Lock()
     stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
 
     def keep(s, o, entry):
-        sers.append(s)
-        obss.append(o)
-        entry.update({"series": int(len(s)), "observations": int(len(o)),
-                      "fetched": stamp})
-        log.append(entry)
+        entry.update({"series": int(len(s)), "observations": int(len(o)), "fetched": stamp})
+        with lock:
+            sers.append(s)
+            obss.append(o)
+            log.append(entry)
+
+    def failed(entry, err):
+        with lock:
+            log.append({**entry, "status": "failed", "error": err, "series": 0,
+                        "observations": 0, "fetched": stamp,
+                        "note": "the previous vintage's copy is kept"})
+
+    def timed(name, fn):
+        t0 = time.time()
+        say(f"{name}: fetching")
+        out = fn()
+        say(f"{name}: {out} ({time.time() - t0:.0f} s)")
 
     if "STATIC" in sources:
         s, o = static_seed(_static_dir(project_root))
-        keep(s, o, {"dataset": "Package history files", "source": "STATIC",
-                    "status": "ok"})
+        keep(s, o, {"dataset": "Package history files", "source": "STATIC", "status": "ok"})
 
-    apis = {"IMF": ImfSdmx(transport=transport) if "IMF" in sources else None,
-            "BIS": BisSdmx(transport=transport) if "BIS" in sources else None}
-    dm_done = False
-    for n, (_, r) in enumerate(rows.iterrows()):
-        r = r.to_dict()
-        src = str(r.get("source") or "IMF").upper()
-        if src not in apis:
-            continue
-        say(f"{r['dataset']}: {r['label']}")
-        entry = {"dataset": r["dataset"], "label": r["label"], "group": r["group"]}
-        err = None
-        api = apis[src]
-        if api is None:
-            continue
-        if n:
-            _sleep(PAUSE)
-        try:
-            s, o, info = api.fetch(r, codes3)
-            keep(s, o, {**entry, "source": src, "status": "ok" if len(s) else "empty", **info})
-            continue
-        except Exception as e:
-            err = str(e)
-        if src != "IMF":
-            log.append({**entry, "source": src, "status": "failed", "error": err,
-                        "series": 0, "observations": 0, "fetched": stamp,
-                        "note": "the previous vintage's copy is kept"})
-            continue
-        if "DM" in sources and r["dataset"] in ("WEO", "FM") and not dm_done:
-            try:
-                s, o, info = DataMapper(transport=transport).fetch(codes3)
-                keep(s, o, {**entry, "dataset": "WEO, FM", "source": "DM",
-                            "status": "ok" if len(s) else "empty",
-                            "note": (f"IMF API failed ({err}); " if err else "")
-                            + "DataMapper has the latest release only"})
-                dm_done = True
-                continue
-            except Exception as e:
-                err = f"{err}; DataMapper: {e}" if err else f"DataMapper: {e}"
-        if "DBNOMICS" in sources:
-            code = "WEO:latest" if r["dataset"] == "WEO" else \
-                str(r["candidates"] or r["dataset"]).split("|")[0]
-            try:
-                s, o, info = DBnomics(transport=transport).fetch(r["dataset"], code,
-                                                                 codes3, codes2)
-                keep(s, o, {**entry, "source": "DBNOMICS",
-                            "status": "ok" if len(s) else "empty", **info})
-                continue
-            except Exception as e:
-                err = f"{err}; DBnomics: {e}" if err else f"DBnomics: {e}"
-        log.append({**entry, "source": "-", "status": "failed",
-                    "error": err or "no source selected", "series": 0,
-                    "observations": 0, "fetched": stamp,
-                    "note": "the previous vintage's copy is kept"})
+    def sdmx_rows(src: str):
+        api = (ImfSdmx if src == "IMF" else BisSdmx)(transport=transport)
+        sel = rows[rows.get("source", pd.Series("IMF", index=rows.index))
+                   .fillna("IMF").str.upper().replace("", "IMF") == src]
+        dm_done = False
+        for n, (_, r) in enumerate(sel.iterrows()):
+            r = r.to_dict()
+            codes = major if str(r.get("countries") or "core") == "major" else core
+            entry = {"dataset": r["dataset"], "label": r["label"], "group": r["group"],
+                     "source": src}
+            if n:
+                _sleep(PAUSE)
 
+            def one():
+                nonlocal dm_done
+                try:
+                    s, o, info = api.fetch(r, codes)
+                    keep(s, o, {**entry, "status": "ok" if len(s) else "empty", **info})
+                    return f"{len(s):,} series"
+                except Exception as e:
+                    err = str(e)
+                if src == "IMF" and "DM" in sources and r["dataset"] in ("WEO", "FM") \
+                        and not dm_done:
+                    try:
+                        s, o, info = DataMapper(transport=transport).fetch(codes)
+                        keep(s, o, {**entry, "dataset": "WEO, FM", "source": "DM",
+                                    "status": "ok" if len(s) else "empty",
+                                    "note": f"IMF API failed ({err}); DataMapper has the "
+                                            "latest release only"})
+                        dm_done = True
+                        return f"{len(s):,} series from the DataMapper"
+                    except Exception as e:
+                        err = f"{err}; DataMapper: {e}"
+                if src == "IMF" and "DBNOMICS" in sources:
+                    code = "WEO:latest" if r["dataset"] == "WEO" else \
+                        str(r["candidates"] or r["dataset"]).split("|")[0]
+                    try:
+                        s, o, info = DBnomics(transport=transport).fetch(
+                            r["dataset"], code, codes, [iso2.get(c, "") for c in codes])
+                        keep(s, o, {**entry, "source": "DBNOMICS",
+                                    "status": "ok" if len(s) else "empty", **info})
+                        return f"{len(s):,} series from DBnomics"
+                    except Exception as e:
+                        err = f"{err}; DBnomics: {e}"
+                failed(entry, err)
+                return "failed: " + err[:160]
+            timed(f"{src} {r['dataset']}", one)
+
+    def world_bank():
+        def one():
+            try:
+                wb = read_table("wb.csv", project_root)
+                codes = ";".join(c for c in ctry.get("wb", ctry["code"]) if c)
+                s, o, info = WorldBank(transport=transport).fetch(wb, countries=codes)
+                entry = {"dataset": "WDI", "label": "World Bank development indicators",
+                         "group": "World Bank", "source": "WB"}
+                if len(s):
+                    keep(s, o, {**entry, "status": "ok",
+                                "error": "; ".join(info.get("failed", []))})
+                    return f"{len(s):,} series"
+                failed(entry, "; ".join(info.get("failed", [])) or "nothing returned")
+                return "failed"
+            except Exception as e:
+                failed({"dataset": "WDI", "source": "WB"}, str(e))
+                return "failed: " + str(e)[:160]
+        timed("World Bank WDI", one)
+
+    def fred():
+        def one():
+            key = fred_key or os.environ.get("FRED_API_KEY", "")
+            cat = read_table("fred.csv", project_root)
+            entry = {"dataset": "FRED", "label": "FRED series", "group": "FRED",
+                     "source": "FRED"}
+            try:
+                if key:
+                    s, o, info = Fred(key, transport=transport).fetch(
+                        list(fred_ids or cat["series"]) or FRED_DEFAULT)
+                else:
+                    s, o, info = Fred(transport=transport).fetch_csv(cat)
+            except Exception as e:
+                failed(entry, str(e))
+                return "failed: " + str(e)[:160]
+            if not len(s):
+                failed(entry, "nothing returned: " + ", ".join(info.get("missing", [])))
+                return "failed"
+            keep(s, o, {**entry, "status": "ok", "missing": ", ".join(info.get("missing", []))})
+            return f"{len(s):,} series"
+        timed("FRED", one)
+
+    tasks = []
+    if "IMF" in sources:
+        tasks.append(lambda: sdmx_rows("IMF"))
+    if "BIS" in sources:
+        tasks.append(lambda: sdmx_rows("BIS"))
     if "WB" in sources:
-        say("World Bank: development indicators")
-        try:
-            wb = read_table("wb.csv", project_root)
-            s, o, info = WorldBank(transport=transport).fetch(wb)
-            keep(s, o, {"dataset": "WDI", "label": "World Bank development indicators",
-                        "group": "World Bank", "source": "WB",
-                        "status": "ok" if len(s) else "failed",
-                        "error": "; ".join(info.get("failed", []))})
-        except Exception as e:
-            log.append({"dataset": "WDI", "source": "WB", "status": "failed", "error": str(e),
-                        "series": 0, "observations": 0, "fetched": stamp,
-                        "note": "the previous vintage's copy is kept"})
-
+        tasks.append(world_bank)
     if "FRED" in sources:
-        say("FRED")
-        key = fred_key or os.environ.get("FRED_API_KEY", "")
-        cat = read_table("fred.csv", project_root)
-        if not key:
-            try:
-                s, o, info = Fred(transport=transport).fetch_csv(cat)
-                keep(s, o, {"dataset": "FRED", "label": "FRED series (CSV download)",
-                            "source": "FRED", "status": "ok" if len(s) else "failed",
-                            "missing": ", ".join(info.get("missing", []))})
-            except Exception as e:
-                log.append({"dataset": "FRED", "source": "FRED", "status": "failed",
-                            "error": str(e), "series": 0, "observations": 0,
-                            "fetched": stamp})
-        if key:
-            fred_ids = fred_ids or list(cat["series"]) or FRED_DEFAULT
-            try:
-                s, o, info = Fred(key, transport=transport).fetch(list(fred_ids or FRED_DEFAULT))
-                keep(s, o, {"dataset": "FRED", "label": "FRED series", "source": "FRED",
-                            "status": "ok", "missing": ", ".join(info.get("missing", []))})
-            except Exception as e:
-                log.append({"dataset": "FRED", "source": "FRED", "status": "failed",
-                            "error": str(e), "series": 0, "observations": 0,
-                            "fetched": stamp})
+        tasks.append(fred)
+    with ThreadPoolExecutor(max_workers=max(1, len(tasks))) as ex:
+        for f in [ex.submit(t) for t in tasks]:
+            f.result()
 
+    say("Saving the vintage")
     s = pd.concat(sers, ignore_index=True) if sers else empty_frames()[0]
     o = pd.concat(obss, ignore_index=True) if obss else empty_frames()[1]
     vid = store.save(s, o, label=label, log=log)

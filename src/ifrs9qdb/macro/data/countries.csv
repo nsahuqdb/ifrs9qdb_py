@@ -1,23 +1,32 @@
-code,iso2,name,role
-QAT,QA,Qatar,home
-SAU,SA,Saudi Arabia,gcc
-ARE,AE,United Arab Emirates,gcc
-KWT,KW,Kuwait,gcc
-OMN,OM,Oman,gcc
-BHR,BH,Bahrain,gcc
-USA,US,United States,rates
-CHN,CN,China,partner
-JPN,JP,Japan,partner
-KOR,KR,Korea,partner
-IND,IN,India,partner
-GBR,GB,United Kingdom,partner
-G163,U2,Euro area,partner
-PAK,PK,Pakistan,partner
-THA,TH,Thailand,partner
-SGP,SG,Singapore,partner
-ITA,IT,Italy,partner
-DEU,DE,Germany,partner
-FRA,FR,France,partner
-TUR,TR,Turkiye,partner
-EGY,EG,Egypt,partner
-G001,W00,World,aggregate
+code,iso2,name,role,scope,wb
+QAT,QA,Qatar,home,core,QAT
+SAU,SA,Saudi Arabia,gcc,core,SAU
+ARE,AE,United Arab Emirates,gcc,core,ARE
+KWT,KW,Kuwait,gcc,core,KWT
+OMN,OM,Oman,gcc,core,OMN
+BHR,BH,Bahrain,gcc,core,BHR
+USA,US,United States,rates,core,USA
+CHN,CN,China,partner,core,CHN
+G163,XM,Euro area,partner,core,EMU
+G001,W00,World,aggregate,core,WLD
+JPN,JP,Japan,developed,major,JPN
+GBR,GB,United Kingdom,developed,major,GBR
+DEU,DE,Germany,developed,major,DEU
+FRA,FR,France,developed,major,FRA
+ITA,IT,Italy,developed,major,ITA
+CAN,CA,Canada,developed,major,CAN
+AUS,AU,Australia,developed,major,AUS
+KOR,KR,Korea,developed,major,KOR
+SGP,SG,Singapore,developed,major,SGP
+IND,IN,India,developing,major,IND
+BRA,BR,Brazil,developing,major,BRA
+RUS,RU,Russia,developing,major,RUS
+MEX,MX,Mexico,developing,major,MEX
+IDN,ID,Indonesia,developing,major,IDN
+TUR,TR,Turkiye,developing,major,TUR
+ZAF,ZA,South Africa,developing,major,ZAF
+ARG,AR,Argentina,developing,major,ARG
+EGY,EG,Egypt,developing,major,EGY
+PAK,PK,Pakistan,developing,major,PAK
+THA,TH,Thailand,developing,major,THA
+MYS,MY,Malaysia,developing,major,MYS

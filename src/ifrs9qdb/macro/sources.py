@@ -80,8 +80,37 @@ FRED_DEFAULT = ["QATNGDPXORPCHPT", "FEDFUNDS", "SOFR", "DGS2", "DGS10",
 Transport = Callable[[str, dict], "tuple[int, bytes]"]
 
 USER_AGENT = "ifrs9qdb (IFRS 9 macro store; Qatar Development Bank)"
-RETRY_WAITS = (10, 30, 60)       # seconds before asking a throttled API again
+RETRY_WAITS = (5, 20)            # seconds before asking a throttled API again
 PAUSE = 1.0                      # seconds between two datasets from one API
+
+
+MAX_BYTES = 150_000_000          # one answer larger than this is refused...
+MAX_SECONDS = 300                # ...and one that takes longer than this
+
+
+def _too_big(url, n) -> str:
+    return (f"the answer from {url.split('?')[0]} is over {MAX_BYTES // 1_000_000} MB "
+            f"({n // 1_000_000} MB so far): narrow its key in datasets.csv "
+            "(country_dim, e.g. SECTOR=S13)")
+
+
+def _read_capped(r, url) -> bytes:
+    """Read an answer in pieces, stopping at MAX_BYTES or MAX_SECONDS: a key
+    left open on every dimension can stream half a gigabyte for many
+    minutes (the IMF's government finance statistics do)."""
+    import time
+    t0, parts, n = time.time(), [], 0
+    while True:
+        b = r.read(1 << 20)
+        if not b:
+            return b"".join(parts)
+        parts.append(b)
+        n += len(b)
+        if n > MAX_BYTES:
+            raise IOError(_too_big(url, n))
+        if time.time() - t0 > MAX_SECONDS:
+            raise IOError(f"the answer from {url.split('?')[0]} took over {MAX_SECONDS} s "
+                          f"({n // 1_000_000} MB so far)")
 
 
 def _sleep(seconds: float) -> None:
@@ -170,9 +199,11 @@ def default_transport(url: str, headers: dict | None = None,
         req = urllib.request.Request(url, headers=h)
         try:
             with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-                body = r.read()
+                body = _read_capped(r, url)
                 if (r.headers.get("Content-Encoding") or "").lower() == "gzip":
                     body = gzip.decompress(body)
+                if len(body) > MAX_BYTES:
+                    raise IOError(_too_big(url, len(body)))
                 return r.status, body
         except urllib.error.HTTPError as e:
             body = e.read() if hasattr(e, "read") else b""
@@ -207,6 +238,7 @@ def _split_label(v) -> tuple[str, str]:
 
 # a code is one word (the BIS writes "FREQ:Frequency", the IMF "QAT: Qatar")
 _LABELLED = re.compile(r"^\s*([A-Za-z0-9_.@$#\-]+):\s?(.*)$", re.S)
+_LABELLED_VEC = r"^\s*([A-Za-z0-9_.@$#\-]+):\s?(.*)$"
 
 
 # ------------------------------------------------------------------- SDMX ---
@@ -237,13 +269,20 @@ def parse_sdmx_csv(text: str, dataset: str, dims: list[str] | None = None,
                 if c not in ("STRUCTURE", "STRUCTURE_ID", "STRUCTURE_NAME", "ACTION",
                              "DATAFLOW")]
     dims = [d for d in dims if d in raw.columns and d != "TIME_PERIOD"]
+    raw = raw[raw["OBS_VALUE"].str.strip() != ""].reset_index(drop=True)
+    if raw.empty:
+        return empty_frames()
     cdim = country_dim if country_dim in dims else next(
         (d for d in _COUNTRY_DIMS if d in dims), None)
     fdim = next((d for d in _FREQ_DIMS if d in dims), None)
     other = [d for d in dims if d not in (cdim, fdim)]
 
-    codes = {d: raw[d].map(lambda v: _split_label(v)[0]) for d in dims}
-    labels = {d: raw[d].map(lambda v: _split_label(v)[1]) for d in dims}
+    codes, labels = {}, {}
+    for d in dims:                       # vectorised: millions of cells on a big answer
+        m = raw[d].str.extract(_LABELLED_VEC)
+        has = m[0].notna()
+        codes[d] = m[0].where(has, raw[d].str.strip())
+        labels[d] = m[1].str.strip().where(has, raw[d].str.strip())
     country = codes[cdim] if cdim else pd.Series([""] * len(raw))
     freq = codes[fdim] if fdim else pd.Series([""] * len(raw))
     if other:
@@ -425,7 +464,7 @@ class BisSdmx(ImfSdmx):
 
     BASE = "https://stats.bis.org/api/v2"
     SOURCE = "BIS"
-    _ISO2 = {"G163": "XM", "G001": "5J"}
+    _ISO2 = {"G163": "XM"}
 
     def __init__(self, transport: Transport | None = None, base: str | None = None):
         super().__init__(transport=transport, base=base or os.environ.get("IFRS9_BIS_SDMX")
@@ -434,7 +473,7 @@ class BisSdmx(ImfSdmx):
     def country_codes(self, codes3: list[str]) -> list[str]:
         c = _countries(None).set_index("code")["iso2"].to_dict()
         out = [self._ISO2.get(x) or c.get(x) or x for x in codes3]
-        return [x for x in out if x and x != "5J"]
+        return [x for x in out if x and x not in ("W00", "G001")]   # no world total
 
     def _data(self, meta, key, forecast=False) -> tuple[bytes, str]:
         url = f"{self.base}/data/dataflow/{meta['agency']}/{meta['id']}/~/{key}"

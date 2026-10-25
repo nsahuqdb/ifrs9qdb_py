@@ -155,7 +155,8 @@ class TestSdmx:
 
         class R:
             status, headers = 200, {}
-            def read(self): return b"ok"
+            _left = [b"ok"]
+            def read(self, n=-1): return self._left.pop() if self._left else b""
             def __enter__(self): return self
             def __exit__(self, *a): return False
 

@@ -1,35 +1,35 @@
-group,dataset,source,candidates,label,frequency,country_dim,start,forecast,fetch,world_indicators,notes
-Outlook,WEO,IMF,WEO,World Economic Outlook,A,COUNTRY,1980,yes,yes,NGDP_RPCH+NGDPD+NGDPDPC+PPPGDP+PCPIPCH+PCPIEPCH+BCA_NGDPD+GGXCNL_NGDP+GGXWDG_NGDP+LUR+TX_RPCH+TM_RPCH+NGSD_NGDP+NID_NGDP,April and October releases; five-year projections; key indicators for every country
-Outlook,FM,IMF,FM,Fiscal Monitor,A,COUNTRY,1990,yes,yes,,Fiscal balance and debt; five-year projections
-Outlook,REO_MCD,IMF,MCDREO|REO_MCD|MCD_REO,Regional Economic Outlook: Middle East and Central Asia,A,COUNTRY,2000,yes,yes,,Non-oil GDP for the GCC
-National accounts,ANEA,IMF,ANEA,National accounts (annual),A,COUNTRY,1990,no,yes,,GDP by activity and by spending
-National accounts,QNEA,IMF,QNEA,National accounts (quarterly),Q,COUNTRY,2000,no,yes,,
-Prices and markets,PCPS,IMF,PCPS,Primary commodity prices,M,COUNTRY=G001;DATA_TRANSFORMATION=USD+INDEX,1990,no,yes,,World prices in US dollars and the commodity indices: Brent; LNG; metals; fertiliser
-Prices and markets,CTOT,IMF,CTOT|PCTOT,Commodity terms of trade,A,COUNTRY,1990,no,yes,,
-Prices and markets,CPI,IMF,CPI,Consumer prices,M,COUNTRY,2000,no,yes,,
-Prices and markets,PPI,IMF,PPI,Producer prices,M,COUNTRY,2000,no,no,,
-Prices and markets,ER,IMF,ER,Exchange rates,M,COUNTRY,2000,no,yes,,
-Prices and markets,EER,IMF,EER,Effective exchange rates,M,COUNTRY,2000,no,yes,,
-Prices and markets,MFS_IR,IMF,MFS_IR,Interest rates,M,COUNTRY,2000,no,yes,,Policy; interbank; lending and deposit rates
-Money and banks,MFS_MA,IMF,MFS_MA,Monetary aggregates,M,COUNTRY,2000,no,yes,,
-Money and banks,MFS_ODC,IMF,MFS_ODC|MFS_DC,Banks (other depository corporations),M,COUNTRY,2000,no,yes,,Credit to the private sector
-Money and banks,MFS_CBS,IMF,MFS_CBS,Central bank survey,M,COUNTRY,2000,no,no,,
-Money and banks,FSI,IMF,FSIC|FSI,Financial soundness indicators,Q,COUNTRY,2005,no,yes,,Bank NPL ratio; capital; profitability; liquidity
-Money and banks,FAS,IMF,FAS,Financial access survey,A,COUNTRY,2004,no,no,,
-Government,GFS_SOO,IMF,GFS_SOO,Government finance: operations,A,COUNTRY,1990,no,yes,,Revenue and expense
-Government,GFS_COFOG,IMF,GFS_COFOG,Government finance: spending by function,A,COUNTRY,1990,no,yes,,
-Government,GFS_BS,IMF,GFS_BS,Government finance: balance sheet,A,COUNTRY,1990,no,no,,
-Government,HPDD,IMF,HPDD,Historical public debt,A,COUNTRY,1950,no,no,,
-External,BOP,IMF,BOP,Balance of payments,Q,COUNTRY,2000,no,yes,,
-External,IIP,IMF,IIP,International investment position,Q,COUNTRY,2000,no,yes,,
-External,IMTS,IMF,IMTS|DOT,Merchandise trade by partner,A,COUNTRY,1990,no,yes,,Annual only to keep it small
-External,CDIS,IMF,CDIS,Direct investment positions,A,COUNTRY,2009,no,no,,
-External,CPIS,IMF,CPIS,Portfolio investment positions,A,COUNTRY,2001,no,no,,
-External,IRFCL,IMF,IRFCL,Reserves and foreign currency liquidity,M,COUNTRY,2000,no,yes,,
-Labour,LS,IMF,LS,Labour statistics,A,COUNTRY,1990,no,yes,,Employment and wages
-Policy and credit (BIS),CBPOL,BIS,WS_CBPOL,Central bank policy rates,M,REF_AREA,1990,no,yes,,Policy rates; Qatar not covered (QCB file)
-Policy and credit (BIS),SPP,BIS,WS_SPP,Residential property prices,Q,REF_AREA,1990,no,yes,,
-Policy and credit (BIS),TC,BIS,WS_TC,Credit to the non-financial sector,Q,BORROWERS_CTY,1990,no,yes,,"Households, corporates, government; % of GDP and amounts"
-Policy and credit (BIS),CREDIT_GAP,BIS,WS_CREDIT_GAP,Credit-to-GDP gaps,Q,BORROWERS_CTY,1990,no,yes,,
-Policy and credit (BIS),DSR,BIS,WS_DSR,Debt service ratios,Q,BORROWERS_CTY,1999,no,yes,,
-Policy and credit (BIS),EER_BIS,BIS,WS_EER,Effective exchange rates (BIS),M,REF_AREA,1994,no,yes,,
+group,dataset,source,candidates,label,frequency,country_dim,countries,start,forecast,fetch,world_indicators,notes
+Outlook,WEO,IMF,WEO,World Economic Outlook,A,COUNTRY,major,1980,yes,yes,,April and October releases; five-year projections
+Outlook,FM,IMF,FM,Fiscal Monitor,A,COUNTRY,major,1990,yes,yes,,Fiscal balance and debt; five-year projections
+Outlook,REO_MCD,IMF,MCDREO|REO_MCD|MCD_REO,Regional Economic Outlook: Middle East and Central Asia,A,COUNTRY,major,2000,yes,yes,,Non-oil GDP for the GCC
+National accounts,ANEA,IMF,ANEA,National accounts (annual),A,COUNTRY,core,1990,no,yes,,GDP by activity and by spending
+National accounts,QNEA,IMF,QNEA,National accounts (quarterly),Q,COUNTRY,core,2000,no,yes,,
+Prices and markets,PCPS,IMF,PCPS,Primary commodity prices,M,COUNTRY=G001;DATA_TRANSFORMATION=USD+INDEX,core,1990,no,yes,,World prices in US dollars and the commodity indices: Brent; LNG; metals; fertiliser
+Prices and markets,CTOT,IMF,CTOT|PCTOT,Commodity terms of trade,A,COUNTRY,core,1990,no,yes,,
+Prices and markets,CPI,IMF,CPI,Consumer prices,M,COUNTRY;COICOP_1999=_T;TYPE_OF_TRANSFORMATION=IX+YOY_PCH_PA_PT,core,2000,no,yes,,All-items index and its year-on-year change
+Prices and markets,PPI,IMF,PPI,Producer prices,M,COUNTRY,core,2000,no,no,,
+Prices and markets,ER,IMF,ER,Exchange rates,M,COUNTRY,core,2000,no,yes,,
+Prices and markets,EER,IMF,EER,Effective exchange rates,M,COUNTRY,core,2000,no,yes,,
+Prices and markets,MFS_IR,IMF,MFS_IR,Interest rates,M,COUNTRY,core,2000,no,yes,,Policy; interbank; lending and deposit rates
+Money and banks,MFS_MA,IMF,MFS_MA,Monetary aggregates,M,COUNTRY,core,2000,no,yes,,
+Money and banks,MFS_ODC,IMF,MFS_ODC|MFS_DC,Banks (other depository corporations),M,COUNTRY,core,2000,no,yes,,Credit to the private sector
+Money and banks,MFS_CBS,IMF,MFS_CBS,Central bank survey,M,COUNTRY,core,2000,no,no,,
+Money and banks,FSI,IMF,FSIC|FSI,Financial soundness indicators,Q,COUNTRY,core,2005,no,yes,,Bank NPL ratio; capital; profitability; liquidity
+Money and banks,FAS,IMF,FAS,Financial access survey,A,COUNTRY,core,2004,no,no,,
+Government,GFS_SOO,IMF,GFS_SOO,Government finance: operations,A,COUNTRY;SECTOR=S13;TYPE_OF_TRANSFORMATION=POGDP_PT,core,1990,no,yes,,"Revenue, expense and balances of general government, % of GDP"
+Government,GFS_COFOG,IMF,GFS_COFOG,Government finance: spending by function,A,COUNTRY;SECTOR=S13;TYPE_OF_TRANSFORMATION=POGDP_PT,core,1990,no,yes,,"General government spending by function, % of GDP"
+Government,GFS_BS,IMF,GFS_BS,Government finance: balance sheet,A,COUNTRY,core,1990,no,no,,
+Government,HPDD,IMF,HPDD,Historical public debt,A,COUNTRY,core,1950,no,no,,
+External,BOP,IMF,BOP,Balance of payments,Q,COUNTRY,core,2000,no,yes,,
+External,IIP,IMF,IIP,International investment position,Q,COUNTRY,core,2000,no,yes,,
+External,IMTS,IMF,IMTS|DOT,Merchandise trade by partner,A,COUNTRY,core,1990,no,yes,,Annual only to keep it small
+External,CDIS,IMF,CDIS,Direct investment positions,A,COUNTRY,core,2009,no,no,,
+External,CPIS,IMF,CPIS,Portfolio investment positions,A,COUNTRY,core,2001,no,no,,
+External,IRFCL,IMF,IRFCL,Reserves and foreign currency liquidity,M,COUNTRY,core,2000,no,no,,Large (80 MB for the core countries); fetched when asked for
+Labour,LS,IMF,LS,Labour statistics,A,COUNTRY,core,1990,no,yes,,Employment and wages
+Policy and credit (BIS),CBPOL,BIS,WS_CBPOL,Central bank policy rates,M,REF_AREA,major,1990,no,yes,,Policy rates; Qatar not covered (QCB file)
+Policy and credit (BIS),SPP,BIS,WS_SPP,Residential property prices,Q,REF_AREA,major,1990,no,yes,,
+Policy and credit (BIS),TC,BIS,WS_TC,Credit to the non-financial sector,Q,BORROWERS_CTY,major,1990,no,yes,,"Households, corporates, government; % of GDP and amounts"
+Policy and credit (BIS),CREDIT_GAP,BIS,WS_CREDIT_GAP,Credit-to-GDP gaps,Q,BORROWERS_CTY,major,1990,no,yes,,
+Policy and credit (BIS),DSR,BIS,WS_DSR,Debt service ratios,Q,BORROWERS_CTY,major,1999,no,yes,,
+Policy and credit (BIS),EER_BIS,BIS,WS_EER,Effective exchange rates (BIS),M,REF_AREA,major,1994,no,yes,,
