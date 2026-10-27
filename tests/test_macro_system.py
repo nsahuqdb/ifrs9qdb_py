@@ -56,6 +56,16 @@ class TestSimulate:
         assert abs(p["GOV_SPEND_QAT"][0]) > 0
         assert "GOV_SPEND_QAT" in r["recommended"]
 
+    def test_the_parts_add_up_to_each_filled_value(self, system):
+        given = {"OIL_PRICE": [-40.0, None, None, None, None], "GDP_WLD": [-2.0, 0, 0, 0, 0]}
+        p = system.simulate(given)["paths"]
+        ex = system.explain(given)
+        assert len(ex) and not ((ex["variable"] == "GDP_WLD").any())
+        tot = ex.groupby(["variable", "year"])["part"].sum()
+        for (v, y), x in tot.items():
+            assert x == pytest.approx(float(p[v][y - 1]), abs=1e-9), (v, y)
+        assert not ((ex["variable"] == "OIL_PRICE") & (ex["year"] == 1)).any()
+
     def test_a_variable_left_out_stays_at_baseline_and_passes_nothing_on(self, system):
         on = system.simulate({"GDP_WLD": [-3.0, 0, 0, 0, 0]})
         off = system.simulate({"GDP_WLD": [-3.0, 0, 0, 0, 0]}, linked=["OIL_PRICE"])

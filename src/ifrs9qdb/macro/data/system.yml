@@ -30,12 +30,20 @@ signs:
 variables:
   GDP_WLD:
     label: World GDP growth
+    about: >-
+      World real GDP growth (IMF WEO). Set by a scenario, never filled: it is
+      the demand side of the world economy that everything else answers to.
     unit: pp
     level: Global
     series: IMF:WEO:G001:NGDP_RPCH:A
     transform: none
   OIL_PRICE:
     label: Oil price
+    about: >-
+      The IMF's average crude price, % change. When not set, it follows world
+      demand: about 10% per point of world growth, the demand side of the oil
+      market. Supply shocks (price wars, wars, OPEC decisions) are not in that
+      link, so a scenario driven by supply sets oil itself.
     unit: '%'
     level: Global
     series: IMF:WEO:G001:POILAPSP:A
@@ -45,12 +53,22 @@ variables:
     same: [GDP_WLD]
   US_RATE:
     label: US policy rate
+    about: >-
+      The Federal Reserve's policy rate, change in points. Set by a scenario;
+      through the dollar peg Qatar's rates follow it (Adedeji, Roos, Shahid
+      and Zhu, IMF WP/19/304).
     unit: pp
     level: Global
     series: BIS:CBPOL:USA:VALUE:M
     transform: diff
   GOV_SPEND_QAT:
     label: Government spending, real
+    about: >-
+      Real government spending growth. GCC budgets are paid for by oil and gas
+      revenue, so spending follows the oil price in the same year and the
+      year after, and is cut when US rates rise and financing costs more
+      (the fiscal channel in the IMF's Regional Economic Outlooks). Estimated
+      on the six GCC countries together.
     unit: pp
     level: Qatar
     panel_series: IMF:WEO:{c}:GGX:A
@@ -60,6 +78,12 @@ variables:
     lag: [OIL_PRICE, NONOIL_GDP_QAT, CREDIT_QAT]
   NONOIL_GDP_QAT:
     label: Non-oil GDP growth
+    about: >-
+      Qatar's non-oil real GDP growth, the driver of QDB's internal PD model.
+      It follows world demand, government spending (GCC fiscal multipliers of
+      0.3 to 0.7 for current and 0.6 to 1.1 for capital spending: Espinoza and
+      Senhadji, IMF WP/11/61) and credit a year earlier, and carries part of
+      last year's growth forward.
     unit: pp
     level: Qatar
     panel_series: IMF:REO_MCD:{c}:NGDPXO_RPCH:A
@@ -68,6 +92,11 @@ variables:
     lag: [OIL_PRICE, US_RATE, GOV_SPEND_QAT, CREDIT_QAT]
   CREDIT_QAT:
     label: Private credit growth, real
+    about: >-
+      Real private credit growth. Banks lend when activity and deposits grow:
+      credit follows non-oil growth a year earlier, oil and spending, the
+      bank-macro feedback found for GCC banks (Espinoza and Prasad, IMF
+      WP/10/224; Khandelwal, Miyajima and Santos, IMF WP/16/161).
     unit: pp
     level: Qatar
     panel_series: IMF:MFS_ODC:{c}:ODCORP_A_ACO_PS_ODCS.XDC:M
@@ -77,6 +106,10 @@ variables:
     lag: [OIL_PRICE, US_RATE, NONOIL_GDP_QAT]
   PROPERTY_QAT:
     label: Property prices
+    about: >-
+      Qatar's real estate price index (PSA), % change. Prices follow non-oil
+      activity, which brings jobs and residents: about 2.4% per point of
+      non-oil growth. It moves property collateral, and so LGD.
     unit: '%'
     level: Qatar
     concept: PROPERTY_QAT
@@ -86,6 +119,11 @@ variables:
     lag: [NONOIL_GDP_QAT, CREDIT_QAT]
   GDP_GCC:
     label: GCC real GDP growth
+    about: >-
+      Real GDP growth of the six GCC countries, which moves the external
+      book's PD model (each country's sovereign and banks). It follows world
+      demand and the oil price, the link between oil and GCC activity
+      (Khandelwal, Miyajima and Santos, IMF WP/16/161).
     unit: pp
     level: GCC
     panel_series: IMF:WEO:{c}:NGDP_RPCH:A

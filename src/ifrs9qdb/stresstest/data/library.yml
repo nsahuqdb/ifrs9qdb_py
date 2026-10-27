@@ -1,39 +1,77 @@
 # The scenario library: pre-built scenarios to price as they are or to copy
 # and edit.
 #
-# Every number is a deviation from the baseline in the variable's own unit
-# (growth rates and price changes in percentage points, the policy rate in
-# points), year 1 being the run's first forecast year. A variable left out,
-# or a year left blank, is filled by the linked effects (macro/system.py).
+# Every number is a shock: a deviation from the forecast in the variable's
+# own unit (growth rates and price changes in percentage points, the policy
+# rate in points), in scenario years Y1 to Y5, Y1 being the first forecast
+# year of the run it is priced on. A variable left out, or a year left
+# blank, is filled by the linked effects (macro/system.py).
 #
 # Historical scenarios replay an episode from the macro store:
-#   how: actual   the episode's own values (prices and rates, whose normal
-#                 year-on-year change is close to zero)
-#   how: change   the change from ``base``, the last year before the shock
-#                 (growth rates, whose normal level is not zero)
-# ``countries`` averages a panel variable over those countries, and ``from``
+#   how: actual   the episode's own values: prices and rates, whose
+#                 baseline change is the reference
+#   how: change   the change from ``base``, the last year before the shock:
+#                 growth rates, whose normal level is not zero
+# ``countries`` averages a panel variable over those countries, ``from``
 # replays another variable (a series the store does not have for that
-# episode). ``values`` holds the numbers derived on the store vintage named
-# in ``derived_on``; ``check_library`` recomputes them on any vintage, so
-# every number can be traced to the data.
-schema_version: '1.0'
+# episode), and ``then`` appends fixed shocks after the derived ones.
+# ``values`` holds the numbers derived on the store vintage named in
+# ``derived_on``; ``check_library`` recomputes them on any vintage.
+#
+# The words: ``description`` is the one-line summary; ``history`` what
+# happened; ``narrative`` the scenario as it would unfold from Y1; ``why``
+# why each main variable is set and how its numbers were derived; ``book``
+# how it reaches QDB's provision; ``limits`` what to keep in mind;
+# ``references`` the sources. The linked variables' paths are explained on
+# screen from the estimated equations.
+schema_version: '2.0'
 derived_on: v20261025-121333
 
 scenarios:
 
+  # ------------------------------------------------------------ global --
   - id: H1
     name: 1986 oil price war
     category: history
+    region: global
     episode: [1986, 1988]
-    window: [1983, 1991]
-    source: IMF World Economic Outlook
+    window: [1982, 1991]
+    source: Gately (1986); IMF World Economic Outlook
     description: >-
-      Saudi Arabia gave up defending the oil price at the end of 1985 and
-      raised output to win back market share. The oil price roughly halved
-      in 1986 and stayed low for years, while the world economy kept
-      growing. Gulf governments cut spending; Qatar's non-oil economy is
-      not measured that far back, so its path comes from the linked
-      effects.
+      A supply-driven oil collapse: a large producer floods the market to win
+      back market share and the price halves within a year.
+    history: >-
+      From 1982 to 1985 Saudi Arabia cut its own output to hold up OPEC's
+      price while other producers kept pumping. At the end of 1985 it changed
+      course and raised output to win back market share. Crude fell to about
+      12 dollars a barrel in the first half of 1986, its 1974 level in
+      nominal terms (Gately, 1986). For 1986 as a whole the oil price was 48%
+      lower, then 26% higher in 1987 and 19% lower in 1988. World growth
+      barely moved in 1986: 3.4% against 3.7% in 1985. Its fall from 4.6% in
+      1984 had already happened in 1985, before the price war, and growth
+      picked up to 3.9% and 4.5% in 1987-88 as cheap oil helped importers.
+    narrative: >-
+      The price war is replayed from Y1. Oil falls by about half against the
+      forecast in Y1, recovers a quarter in Y2 and falls a fifth again in Y3;
+      later years follow world demand. Because the fall comes from supply,
+      not from weak demand, world growth is a little below the forecast in Y1 and
+      above it in Y2 and Y3, as in 1987-88. Qatar feels it through public
+      finances: lower hydrocarbon revenue cuts real government spending in
+      the same year and the next, which slows non-oil growth; credit and
+      property follow a year behind. Nothing in Qatar is set directly.
+    why:
+      OIL_PRICE: The defining shock. The oil price's recorded change in each
+        year of 1986-88.
+      GDP_WLD: World growth in each year of 1986-88 less its growth in 1985,
+        the last year before the price war. Most of the slowdown from 1984
+        happened in 1985, so the 1986 shock is small.
+    book: >-
+      Mostly the internal book, through non-oil growth (the PD model) and then
+      property collateral. GCC growth moves the external book only through
+      its estimated link to oil.
+    references:
+      - title: Gately, Lessons from the 1986 oil price collapse, Brookings Papers on Economic Activity 1986(2)
+        url: https://www.brookings.edu/articles/lessons-from-the-1986-oil-price-collapse/
     main:
       OIL_PRICE: {how: actual, years: [1986, 1987, 1988], values: [-48.08, 25.85, -18.91]}
       GDP_WLD: {how: change, base: 1985, years: [1986, 1987, 1988], values: [-0.29, 0.29, 0.87]}
@@ -41,13 +79,35 @@ scenarios:
   - id: H2
     name: 1998 oil slump (Asian crisis)
     category: history
+    region: global
     episode: [1998, 1999]
-    window: [1995, 2002]
+    window: [1994, 2002]
     source: IMF World Economic Outlook
     description: >-
-      The Asian financial crisis cut demand for oil just as OPEC raised
-      output. The oil price fell by about a third in 1998 before recovering
-      in 1999. World growth slowed but did not stop.
+      Emerging-market turmoil cuts oil demand just as producers add supply:
+      oil falls by a third and world growth slows.
+    history: >-
+      The Asian financial crisis of 1997-98 cut oil demand in Asia just as
+      OPEC, meeting in Jakarta in November 1997, raised its output ceiling.
+      The oil price fell by about a third in 1998, Brent briefly close to 10
+      dollars a barrel, and recovered in 1999 after OPEC and other producers
+      cut output. World growth slowed from 4.0% in 1997 to 2.6% in 1998 and
+      was 3.6% in 1999.
+    narrative: >-
+      A demand shock that meets extra supply. In Y1 oil falls by a third
+      against the forecast and world growth is 1.4 points lower; in Y2 oil
+      rebounds by 37% while world growth is still 0.5 points lower. Lower
+      revenue cuts Qatar's real government spending, lower world demand and
+      spending slow non-oil growth, and credit and property follow.
+    why:
+      OIL_PRICE: The oil price's recorded change in 1998 and 1999.
+      GDP_WLD: World growth in 1998-99 less its growth in 1997.
+    book: >-
+      The internal book through non-oil growth and collateral; the external
+      book through GCC growth's links to world demand and oil.
+    references:
+      - title: Bloomberg via Gulf News, Emerging-markets turmoil revives a dreaded old OPEC ghost (2018), on Jakarta 1997
+        url: https://gulfnews.com/business/sectors/markets/emerging-markets-turmoil-revives-a-dreaded-old-opec-ghost-1.2268012
     main:
       OIL_PRICE: {how: actual, years: [1998, 1999], values: [-31.6, 37.35]}
       GDP_WLD: {how: change, base: 1997, years: [1998, 1999], values: [-1.44, -0.48]}
@@ -55,16 +115,53 @@ scenarios:
   - id: H3
     name: 2009 global financial crisis
     category: history
+    region: global
     episode: [2009, 2010]
-    window: [2006, 2013]
+    window: [2005, 2013]
     source: IMF World Economic Outlook and Regional Economic Outlook; IMF Monetary and Financial Statistics; BIS policy rates
     description: >-
-      After the collapse of Lehman Brothers world output fell in 2009 for
-      the first time in the post-war era. The oil price dropped by about a
-      third, the Federal Reserve cut its rate to near zero, the Gulf's
-      credit boom ended and GCC growth fell by about six points. Qatar's own non-oil economy kept growing on LNG
-      investment, so the non-oil shock is the change in the other five GCC
-      economies, and the credit shock is Qatar's.
+      A global financial crisis: world output falls, oil collapses, the Fed
+      cuts to zero and the Gulf's credit boom ends.
+    history: >-
+      After Lehman Brothers failed in September 2008, world output fell in
+      2009, the oil price dropped by a third and the Federal Reserve cut its
+      rate to near zero. In the Gulf the credit boom of 2005-08 ended. Dubai's
+      property bubble burst in mid-2008 and Dubai World sought a debt
+      standstill in November 2009; real credit to the UAE's private sector
+      was flat in 2009 (IMF). In Qatar the state supported its banks: the
+      Qatar Investment Authority took stakes of up to 20% in the listed banks,
+      and the government bought the banks' real estate and listed-equity
+      portfolios (MEED). Qatar's own non-oil economy kept growing on LNG and
+      infrastructure investment.
+    narrative: >-
+      A world demand collapse with a regional credit crunch. In Y1 world
+      growth is 3.3 points below the forecast and oil 36% lower, with a 2.3-point
+      rebound in world growth and a 29% oil recovery in Y2; US rates fall 1.7
+      points. Non-oil growth is 3.7 and 2.9 points below the forecast. Real credit
+      growth falls 15.6 and 26.3 points below its pre-crisis pace, the
+      sharpest credit shock in the library, and GCC growth is 6.1 and 1.6
+      points lower. Property falls with non-oil activity and credit.
+    why:
+      OIL_PRICE: The oil price's recorded change in 2009 and 2010.
+      GDP_WLD: World growth in 2009-10 less its growth in 2008.
+      US_RATE: The recorded change in the annual average policy rate.
+      NONOIL_GDP_QAT: The average non-oil growth of Saudi Arabia, the UAE,
+        Kuwait, Oman and Bahrain in 2009-10 less their 2008 growth. Qatar's own
+        non-oil growth kept rising on LNG investment and would hide the shock.
+      CREDIT_QAT: Qatar's real credit growth in 2009-10 less its 2008 growth.
+      GDP_GCC: The six countries' average growth in 2009-10 less their 2008
+        growth.
+    book: >-
+      Every channel: non-oil growth (internal PD), GCC growth (external PD),
+      stage moves, and property collateral, which the credit fall pushes
+      down.
+    references:
+      - title: IMF Public Information Notice 10/20, United Arab Emirates 2009 Article IV
+        url: https://www.imf.org/en/News/Articles/2015/09/28/04/53/pn1020
+      - title: MEED, Qatari state support stabilises lenders
+        url: https://www.meed.com/qatari-state-support-stabilises-lenders/
+      - title: Espinoza and Prasad, Nonperforming loans in the GCC banking system and their macroeconomic effects, IMF WP/10/224
+        url: https://www.imf.org/external/pubs/ft/wp/2010/wp10224.pdf
     main:
       OIL_PRICE: {how: actual, years: [2009, 2010], values: [-36.44, 28.69]}
       GDP_WLD: {how: change, base: 2008, years: [2009, 2010], values: [-3.28, 2.34]}
@@ -76,15 +173,50 @@ scenarios:
   - id: H4
     name: 2015–16 oil collapse
     category: history
+    region: global
     episode: [2015, 2017]
-    window: [2012, 2020]
-    source: IMF World Economic Outlook and Regional Economic Outlook; IMF Monetary and Financial Statistics; PSA real estate price index
+    window: [2011, 2020]
+    source: IMF World Economic Outlook and Regional Economic Outlook; PSA real estate price index
     description: >-
-      OPEC chose not to cut output in late 2014 and the oil price fell from
-      over 100 dollars to under 30 by early 2016, while world growth held
-      steady. Qatar moved into fiscal deficit, cut spending and delayed
-      projects; non-oil growth slowed and property prices turned down from
-      2016. GCC output held up as oil production rose.
+      A supply-driven oil collapse with world growth steady: Qatar cuts
+      spending and its non-oil growth slows.
+    history: >-
+      OPEC decided not to cut output in November 2014. Brent fell from over
+      100 dollars a barrel in mid-2014 to under 30 in early 2016 while world
+      growth held at about 3.5%. Qatar moved into fiscal deficit, 9.2% of GDP
+      in 2016, cut spending and reprioritised projects, and its non-oil growth
+      slowed (IMF). Real estate prices, up 53% over 2013-16, fell 11% in 2017
+      (IMF). GCC output held up as producers pumped more.
+    narrative: >-
+      Oil falls 47% against the forecast in Y1 and a further 15% in Y2, then
+      recovers 22% in Y3, with world growth almost unchanged. Qatar's real
+      government spending grows about 20 points less than in the year before
+      the collapse, for two years, and non-oil growth is 1.5 and 4.7 points
+      lower. Property still rises in Y1, as the boom carried into 2015, falls
+      4% in Y2 and then follows non-oil activity down. GCC growth is little
+      changed.
+    why:
+      OIL_PRICE: The oil price's recorded change in 2015-17.
+      GDP_WLD: World growth in 2015-17 less its growth in 2014.
+      GOV_SPEND_QAT: Qatar's real spending growth in 2015-16 less its 2014
+        growth.
+      NONOIL_GDP_QAT: Qatar's non-oil growth in 2015-16 less its 2014 growth.
+      PROPERTY_QAT: The PSA index's recorded change in 2015-16.
+      GDP_GCC: The six countries' average growth in 2015-16 less their 2014
+        growth.
+    book: >-
+      The internal book through non-oil growth; collateral once property
+      turns down in Y2.
+    limits: >-
+      Credit is left to the linked effects: Qatar's credit growth rose in
+      2015, which is not part of the shock.
+    references:
+      - title: Khandelwal, Miyajima and Santos, The impact of oil prices on the banking system in the GCC, IMF WP/16/161
+        url: https://ideas.repec.org/p/imf/imfwpa/2016-161.html
+      - title: IMF Press Release 18/202, Qatar 2018 Article IV
+        url: https://www.imf.org/en/news/articles/2018/05/30/pr18202-qatar-2018-article-iv-consultation
+      - title: Gulf News, Blockade impact on Qatar fading but risks remain (IMF, 2018)
+        url: https://gulfnews.com/business/economy/blockade-impact-on-qatar-fading-but-risks-remain-imf-1.2183794
     main:
       OIL_PRICE: {how: actual, years: [2015, 2016, 2017], values: [-47.15, -15.02, 22.45]}
       GDP_WLD: {how: change, base: 2014, years: [2015, 2016, 2017], values: [-0.11, -0.34, 0.29]}
@@ -93,37 +225,55 @@ scenarios:
       PROPERTY_QAT: {how: actual, years: [2015, 2016], values: [14.5, -4.1]}
       GDP_GCC: {how: change, base: 2014, years: [2015, 2016], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [0.75, 0.35]}
 
-  - id: H5
-    name: 2017 blockade of Qatar
-    category: history
-    episode: [2017, 2019]
-    window: [2014, 2021]
-    source: IMF Regional Economic Outlook; IMF World Economic Outlook; PSA real estate price index
-    description: >-
-      In June 2017 Saudi Arabia, the UAE, Bahrain and Egypt cut diplomatic
-      and trade links with Qatar and closed its only land border and their
-      airspace. Imports were rerouted, non-resident deposits left and
-      property prices fell for three years. The blockade ended in January
-      2021.
-    main:
-      GOV_SPEND_QAT: {how: change, base: 2016, years: [2017, 2018, 2019], values: [-3.88, -0.2, 14.02]}
-      NONOIL_GDP_QAT: {how: change, base: 2016, years: [2017, 2018, 2019], values: [-6.83, -3.59, -3.65]}
-      PROPERTY_QAT: {how: actual, years: [2017, 2018, 2019], values: [-9.9, -2.6, -8.1]}
-
   - id: H6
     name: 2020 COVID-19 pandemic
     category: history
+    region: global
     episode: [2020, 2021]
-    window: [2017, 2023]
-    source: IMF World Economic Outlook and Regional Economic Outlook; IMF Monetary and Financial Statistics; BIS policy rates; PSA real estate price index; QDB loan data
+    window: [2016, 2023]
+    source: IMF World Economic Outlook and Regional Economic Outlook; BIS policy rates; PSA real estate price index; QDB loan data
     restructured: 0.72
     description: >-
-      Lockdowns closed much of the world economy in 2020 and the oil price
-      fell by about a third. The Federal Reserve cut to near zero and
-      Qatar's central bank launched a deferral programme for loan
-      instalments. In QDB's own loan data about 72% of performing Stage 1
-      borrowers moved to Stage 2 within a year, mostly through deferrals,
-      which the scenario carries as a deferral programme.
+      A pandemic: lockdowns, an oil price war, near-zero US rates and a
+      payment-deferral programme that moves most performing borrowers to
+      Stage 2.
+    history: >-
+      Lockdowns closed much of the world economy in 2020. Saudi Arabia and
+      Russia fought a price war in March as demand collapsed, and the oil
+      price fell by a third for the year. The Federal Reserve cut to near
+      zero. On 15 March 2020 Qatar announced a QR75 billion package for the
+      private sector; the central bank was asked to help banks postpone
+      instalments for six months, and QDB was directed to defer instalments
+      for all its borrowers for six months (The Peninsula). In QDB's loan data
+      72-75% of performing Stage 1 borrowers moved to Stage 2 within a year,
+      mostly through deferrals and maturity extensions.
+    narrative: >-
+      Y1 is a deep, broad shock: world growth 5.7 points below the forecast, oil
+      32% lower, US rates 1.75 points lower, Qatar's real government spending
+      18.9 points lower, non-oil growth 5.4 points lower, property 5% lower
+      and GCC growth 6.0 points lower, and a deferral programme moves 72% of
+      Stage 1 borrowers to Stage 2. Y2 rebounds: world growth 3.7 points above
+      the forecast, oil up 66% and non-oil growth slightly above, while real
+      credit growth slows 9.5 points.
+    why:
+      OIL_PRICE: The oil price's recorded change in 2020-21.
+      GDP_WLD: World growth in 2020-21 less its growth in 2019.
+      US_RATE: The recorded change in the annual average policy rate.
+      GOV_SPEND_QAT: Qatar's real spending growth in 2020-21 less its 2019
+        growth.
+      NONOIL_GDP_QAT: Qatar's non-oil growth in 2020-21 less its 2019 growth.
+      CREDIT_QAT: Qatar's real credit growth in 2020-21 less its 2019 growth.
+      PROPERTY_QAT: The PSA index's recorded change in 2020-21.
+      GDP_GCC: The six countries' average growth in 2020-21 less their 2019
+        growth.
+      restructured: The share of performing Stage 1 borrowers who moved to
+        Stage 2 within twelve months in QDB's 2019-2020 monthly cohorts.
+    book: >-
+      The deferral programme dominates: about two thirds of the cost is stage
+      moves, the rest the PD model.
+    references:
+      - title: The Peninsula, Qatar announces QR75bn stimulus for private sector (16 March 2020)
+        url: https://thepeninsulaqatar.com/article/16/03/2020/Qatar-announces-QR75bn-stimulus-for-private-sector
     main:
       OIL_PRICE: {how: actual, years: [2020, 2021], values: [-32.01, 65.81]}
       GDP_WLD: {how: change, base: 2019, years: [2020, 2021], values: [-5.68, 3.71]}
@@ -137,75 +287,70 @@ scenarios:
   - id: H7
     name: 2022–23 Fed tightening
     category: history
+    region: global
     episode: [2022, 2023]
-    window: [2019, 2025]
+    window: [2018, 2025]
     source: BIS central bank policy rates
     description: >-
-      The Federal Reserve raised its rate by about five points between
-      March 2022 and July 2023, the fastest rise in four decades. Qatar's
-      central bank followed through the dollar peg. Nothing else is set:
-      the rest comes from the linked effects.
+      The fastest US rate rise in four decades, followed by Qatar through the
+      dollar peg.
+    history: >-
+      The Federal Reserve raised its rate from near zero in March 2022 to
+      5.25-5.5% by July 2023, and Qatar's central bank moved with it under
+      the peg. The annual average US rate rose 1.8 points in 2022 and 3.2
+      points in 2023.
+    narrative: >-
+      US rates are 1.8 points above the forecast in Y1 and rise a further 3.2
+      points in Y2, then stay there. Higher financing costs trim GCC
+      government spending and, slightly, credit; non-oil growth eases through
+      spending, and property follows. Nothing else is set.
+    why:
+      US_RATE: The recorded change in the annual average policy rate in 2022
+        and 2023.
+    book: >-
+      Small: rates reach the book only through spending and activity.
+    limits: >-
+      QDB's own default history shows no direct link from rates to defaults
+      (tested on the codex-method series and dropped), so there is no
+      separate rate channel.
+    references:
+      - title: Adedeji, Roos, Shahid and Zhu, U.S. monetary policy spillovers to GCC countries, IMF WP/19/304
+        url: https://imf.org/-/media/Files/Publications/WP/2019/wpiea2019304-print-pdf.ashx
     main:
       US_RATE: {how: actual, years: [2022, 2023], values: [1.77, 3.21]}
-
-  - id: H8
-    name: 2016–20 Qatar property correction
-    category: history
-    episode: [2016, 2020]
-    window: [2013, 2023]
-    source: PSA real estate price index
-    description: >-
-      Qatar's real estate prices fell for five years running after the
-      2015 oil collapse, through the blockade and into the pandemic, about
-      a quarter in all. Only property prices are set.
-    main:
-      PROPERTY_QAT: {how: actual, years: [2016, 2017, 2018, 2019, 2020], values: [-4.1, -9.9, -2.6, -8.1, -5]}
-
-  - id: H9
-    name: 1990–91 Gulf war
-    category: history
-    episode: [1990, 1991]
-    window: [1987, 1994]
-    source: IMF World Economic Outlook
-    tail: true
-    description: >-
-      Iraq invaded Kuwait in August 1990. The oil price jumped and then
-      fell back as the war ended; Kuwait's output more than halved and activity
-      across the Gulf was disrupted. Qatar's non-oil economy was not
-      measured then, so its real GDP is used. The shock is far larger than anything the linked effects
-      were estimated on, so their part is an extrapolation.
-    main:
-      OIL_PRICE: {how: actual, years: [1990, 1991], values: [28.28, -15.33]}
-      NONOIL_GDP_QAT: {how: change, base: 1989, years: [1990, 1991], from: GDP_GCC, countries: [QAT], values: [-19.94, -6.82]}
-      GDP_GCC: {how: change, base: 1989, years: [1990, 1991], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-7.89, -12.52]}
-
-  - id: H10
-    name: 2026 regional disruption (IMF projection)
-    category: current
-    episode: [2026, 2026]
-    window: [2022, 2028]
-    source: IMF World Economic Outlook and Regional Economic Outlook, October 2026
-    description: >-
-      Not a past episode: the change the IMF's October 2026 outlook
-      projects for this year against 2025 -- the oil price about 40% higher,
-      Qatar's non-oil growth about 4 points lower and GCC growth about 11
-      points lower -- priced as if it happened again on top of the
-      baseline.
-    main:
-      OIL_PRICE: {how: actual, years: [2026], values: [41.33]}
-      NONOIL_GDP_QAT: {how: change, base: 2025, years: [2026], values: [-4.31]}
-      GDP_GCC: {how: change, base: 2025, years: [2026], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-11.32]}
 
   - id: H11
     name: 2001 global slowdown
     category: history
+    region: global
     episode: [2001, 2002]
-    window: [1998, 2005]
+    window: [1997, 2005]
     source: IMF World Economic Outlook; BIS policy rates
     description: >-
-      The end of the dot-com boom and the September 2001 attacks slowed
-      the world economy; the oil price fell and the Federal Reserve cut its
-      rate by more than four points during 2001.
+      A global slowdown after a boom: world growth falls by half, oil eases
+      and the Fed cuts by more than four points.
+    history: >-
+      The end of the dot-com boom and the attacks of 11 September 2001 slowed
+      the world economy: world growth fell from 4.8% in 2000 to 2.5% in 2001.
+      The oil price fell 14% and the Federal Reserve cut its rate from 6.5%
+      to 1.75% during 2001.
+    narrative: >-
+      World growth is 2.3 points below the forecast in Y1 and 2.0 in Y2, oil 14%
+      lower in Y1, and US rates 2.5 and 2.1 points lower. The demand shock
+      reaches Qatar through world demand and, via oil, spending; lower rates
+      soften it slightly.
+    why:
+      OIL_PRICE: The oil price's recorded change in 2001-02.
+      GDP_WLD: World growth in 2001-02 less its growth in 2000.
+      US_RATE: The recorded change in the annual average policy rate.
+    book: >-
+      The internal book through non-oil growth, the external book through
+      GCC growth's link to world demand.
+    references:
+      - title: IMF, World Economic Outlook December 2001, The global economy after September 11
+        url: https://www.imf.org/en/Publications/WEO/Issues/2016/12/30/World-Economic-Outlook-December-2001-Special-Issue-The-Global-Economy-After-September-11-15458
+      - title: Hamilton, Historical oil shocks, NBER Working Paper 16790
+        url: https://www.nber.org/papers/w16790
     main:
       OIL_PRICE: {how: actual, years: [2001, 2002], values: [-13.98, 2.09]}
       GDP_WLD: {how: change, base: 2000, years: [2001, 2002], values: [-2.32, -1.97]}
@@ -214,30 +359,374 @@ scenarios:
   - id: H12
     name: 1994 Fed tightening
     category: history
+    region: global
     episode: [1994, 1995]
-    window: [1991, 1998]
+    window: [1990, 1998]
     source: BIS central bank policy rates
     description: >-
+      A surprise doubling of US rates in a year, passed to Qatar through the
+      peg.
+    history: >-
       The Federal Reserve doubled its rate from 3% to 6% between February
-      1994 and February 1995, surprising bond markets. Only the US rate is
-      set; through the peg it is Qatar's too.
+      1994 and February 1995, surprising bond markets. The annual average
+      rate rose 1.3 points in 1994 and 1.5 points in 1995.
+    narrative: >-
+      US rates are 1.3 points above the forecast in Y1 and a further 1.5 points
+      in Y2. As with 2022-23, the effect on Qatar runs through government
+      spending and activity.
+    why:
+      US_RATE: The recorded change in the annual average policy rate in 1994
+        and 1995.
+    book: >-
+      Small, through spending and activity only.
+    references:
+      - title: Bank of England Quarterly Bulletin 1994 Q2, Financial market developments
+        url: https://www.bankofengland.co.uk/-/media/boe/files/quarterly-bulletin/1994/financial-market-developments-qb-1994-q2.pdf
+      - title: Adedeji, Roos, Shahid and Zhu, U.S. monetary policy spillovers to GCC countries, IMF WP/19/304
+        url: https://imf.org/-/media/Files/Publications/WP/2019/wpiea2019304-print-pdf.ashx
     main:
       US_RATE: {how: actual, years: [1994, 1995], values: [1.29, 1.52]}
 
+  # ---------------------------------------------------- GCC and Qatar --
+  - id: H5
+    name: 2017 blockade of Qatar
+    category: history
+    region: qatar
+    episode: [2017, 2019]
+    window: [2013, 2021]
+    source: IMF; PSA real estate price index
+    description: >-
+      A Qatar-specific shock: trade and transport links cut by neighbours,
+      foreign funding withdrawn and property prices falling for three years.
+    history: >-
+      On 5 June 2017 Saudi Arabia, the UAE, Bahrain and Egypt cut diplomatic
+      and trade links with Qatar and closed its land border and their
+      airspace. Foreign financing and resident private deposits at Qatari
+      banks fell by about 40 billion dollars, offset by injections from the
+      central bank and the Qatar Investment Authority; the IMF judged the
+      effect on activity transitory. The real estate price index fell 11% in
+      2017 (IMF) and kept falling to 2019. The blockade ended with the Al-Ula
+      declaration in January 2021.
+    narrative: >-
+      A confidence and trade shock that leaves world growth and oil
+      untouched. Non-oil growth is 6.8, 3.6 and 3.7 points below the forecast in
+      Y1-Y3; real government spending dips slightly, then rises 14 points in
+      Y3 as the state supports the economy; property falls 9.9%, 2.6% and
+      8.1%. Credit follows non-oil growth a year later.
+    why:
+      GOV_SPEND_QAT: Qatar's real spending growth in 2017-19 less its 2016
+        growth.
+      NONOIL_GDP_QAT: Qatar's non-oil growth in 2017-19 less its 2016 growth.
+      PROPERTY_QAT: The PSA index's recorded change in 2017-19.
+    book: >-
+      The internal book through non-oil growth and property collateral.
+    limits: >-
+      The store's revised data show a sharper non-oil slowdown in 2017 than
+      the IMF estimated at the time (about 4% growth). The deposit outflow is
+      not a variable here; its effect reaches the book through non-oil growth
+      and property.
+    references:
+      - title: Gulf News, Blockade impact on Qatar fading but risks remain (IMF, November 2018)
+        url: https://gulfnews.com/business/economy/blockade-impact-on-qatar-fading-but-risks-remain-imf-1.2183794
+      - title: IMF Press Release 18/202, Qatar 2018 Article IV
+        url: https://www.imf.org/en/news/articles/2018/05/30/pr18202-qatar-2018-article-iv-consultation
+      - title: IMF Press Release 19/192, Qatar 2019 Article IV
+        url: https://imf.org/en/News/Articles/2019/06/03/pr19192-qatar-imf-executive-board-concludes-2019-article-iv-consultation-with-qatar
+    main:
+      GOV_SPEND_QAT: {how: change, base: 2016, years: [2017, 2018, 2019], values: [-3.88, -0.2, 14.02]}
+      NONOIL_GDP_QAT: {how: change, base: 2016, years: [2017, 2018, 2019], values: [-6.83, -3.59, -3.65]}
+      PROPERTY_QAT: {how: actual, years: [2017, 2018, 2019], values: [-9.9, -2.6, -8.1]}
+
+  - id: H8
+    name: 2016–20 Qatar property correction
+    category: history
+    region: qatar
+    episode: [2016, 2020]
+    window: [2011, 2023]
+    source: PSA real estate price index
+    description: >-
+      Five years of falling property prices, about a quarter in all, with
+      nothing else set: what collateral alone does to the provision.
+    history: >-
+      Qatar's real estate prices rose 82% over 2012-16, then fell 15% over
+      2017-18 (IMF). The PSA index kept falling through the blockade and into
+      the pandemic, about a quarter in all over 2016-20.
+    narrative: >-
+      Property prices fall 4.1%, 9.9%, 2.6%, 8.1% and 5.0% in Y1-Y5. Nothing
+      else is set and no other variable is moved by property, so the
+      scenario isolates the collateral channel: LGD rises where property
+      backs a loan.
+    why:
+      PROPERTY_QAT: The PSA index's recorded change in each year of 2016-20.
+    book: >-
+      Collateral only: LGD on contracts secured by property.
+    references:
+      - title: IMF Press Release 19/192, Qatar 2019 Article IV
+        url: https://imf.org/en/News/Articles/2019/06/03/pr19192-qatar-imf-executive-board-concludes-2019-article-iv-consultation-with-qatar
+    main:
+      PROPERTY_QAT: {how: actual, years: [2016, 2017, 2018, 2019, 2020], values: [-4.1, -9.9, -2.6, -8.1, -5]}
+
+  - id: H9
+    name: 1990–91 Gulf war
+    category: history
+    region: gcc
+    episode: [1990, 1991]
+    window: [1986, 1994]
+    source: IMF World Economic Outlook
+    tail: true
+    description: >-
+      A regional war: oil spikes then falls, Kuwait's output more than halves
+      and activity across the Gulf is disrupted.
+    history: >-
+      Iraq invaded Kuwait on 2 August 1990. The oil price jumped, 28% higher
+      on average in 1990, and fell back as the war ended in early 1991.
+      Kuwait's output more than halved over 1990-91 and activity across the
+      Gulf was disrupted; Qatar's real GDP fell 14.6% in 1990.
+    narrative: >-
+      Oil rises 28% against the forecast in Y1 and falls 15% in Y2. Qatar's
+      non-oil growth is 19.9 and 6.8 points below the forecast and GCC growth 7.9
+      and 12.5 points below. The shock is far larger than anything the
+      linked effects were estimated on, so their part is an extrapolation;
+      the scenario is a tail case, not a central one.
+    why:
+      OIL_PRICE: The oil price's recorded change in 1990-91.
+      NONOIL_GDP_QAT: Qatar's real GDP growth in 1990-91 less its 1989 growth;
+        non-oil GDP was not measured then.
+      GDP_GCC: The six countries' average growth in 1990-91 less their 1989
+        growth.
+    book: >-
+      Every channel, the external book hardest.
+    limits: >-
+      Qatar's real GDP then was dominated by hydrocarbon output, so it
+      overstates the non-oil shock.
+    references:
+      - title: Hamilton, Historical oil shocks, NBER Working Paper 16790
+        url: https://www.nber.org/papers/w16790
+    main:
+      OIL_PRICE: {how: actual, years: [1990, 1991], values: [28.28, -15.33]}
+      NONOIL_GDP_QAT: {how: change, base: 1989, years: [1990, 1991], from: GDP_GCC, countries: [QAT], values: [-19.94, -6.82]}
+      GDP_GCC: {how: change, base: 1989, years: [1990, 1991], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-7.89, -12.52]}
+
+  - id: H10
+    name: 2026 Iran war and Hormuz closure (IMF projection)
+    category: current
+    region: gcc
+    episode: [2026, 2027]
+    window: [2022, 2029]
+    source: IMF World Economic Outlook, October 2026; QatarEnergy
+    description: >-
+      The war that began in February 2026 closed the Strait of Hormuz; the IMF
+      projects Qatar's economy to shrink 15.6% in 2026 and rebound in 2027.
+    history: >-
+      The war began at the end of February 2026 and shipping through the
+      Strait of Hormuz stopped in early March. On 18 March an Iranian strike
+      on Ras Laffan put about 17% of Qatar's LNG capacity out of action for
+      three to five years (QatarEnergy). The IMF's October 2026 outlook
+      projects real GDP growth of -15.6% for Qatar in 2026 and +18.8% in 2027,
+      with the GCC as a whole contracting 4.8% in 2026. It assumes the strait
+      reopens gradually from March 2027 and returns to pre-war conditions by
+      October 2027.
+    narrative: >-
+      Not a past episode: the IMF's own projection, replayed as if it hit
+      again on top of the forecast. In Y1 oil is 41% above the forecast, Qatar's
+      non-oil growth 4.3 points below and GCC growth 11.3 points below. In Y2
+      the reopening brings oil down 9%, non-oil growth 2.5 points above
+      the forecast and GCC growth 7.7 points above. The higher oil price supports
+      government spending in Y1, which is why non-oil growth falls much less
+      than GCC growth.
+    why:
+      OIL_PRICE: The IMF's projected change in the oil price for 2026 and
+        2027.
+      NONOIL_GDP_QAT: Projected non-oil growth in 2026-27 less 2025's.
+      GDP_GCC: The six countries' average projected growth in 2026-27 less
+        their 2025 growth.
+    book: >-
+      The external book through GCC growth, the internal book through
+      non-oil growth.
+    limits: >-
+      2026-27 are projections, not outturns. The run's own forecast may
+      already contain part of this projection; the scenario then asks what a
+      second shock of the same size would cost.
+    references:
+      - title: The National, IMF cuts 2026 growth forecasts for Gulf economies due to prolonged Hormuz closure (13 October 2026)
+        url: https://www.thenationalnews.com/business/economy/2026/10/13/imf-cuts-2026-growth-forecasts-for-gulf-economies-due-to-prolonged-hormuz-closure/
+      - title: World Oil, Iran strike could cut 17% of Qatar LNG capacity for up to five years (19 March 2026)
+        url: https://www.worldoil.com/news/2026/3/19/iran-strike-could-cut-17-of-qatar-lng-capacity-for-up-to-five-years/
+      - title: Zawya via TradingView, GCC economy faces 4.8% contraction in 2026, IMF says
+        url: https://www.tradingview.com/news/reuters.com,2026-10-26:newsml_Zaw9SpZ3l:0-zawya-gcc-economy-faces-4-8-contraction-in-2026-imf-says/
+    main:
+      OIL_PRICE: {how: actual, years: [2026, 2027], values: [41.33, -8.71]}
+      NONOIL_GDP_QAT: {how: change, base: 2025, years: [2026, 2027], values: [-4.31, 2.54]}
+      GDP_GCC: {how: change, base: 2025, years: [2026, 2027], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-11.32, 7.73]}
+
+  - id: G1
+    name: 2015–17 GCC fiscal austerity
+    category: history
+    region: gcc
+    episode: [2015, 2017]
+    window: [2011, 2020]
+    source: IMF Saudi Arabia 2017 Article IV; IMF World Economic Outlook and Regional Economic Outlook
+    description: >-
+      A GCC-wide fiscal squeeze: governments cut capital spending and delay
+      payments, contractors run short of cash and non-oil growth stalls.
+    history: >-
+      When oil revenue collapsed, GCC governments cut spending. Saudi Arabia,
+      the largest, cut spending 6.4% in 2016, mainly capital spending, while
+      settling arrears to contractors worth 3.3% of GDP. Delays in government
+      payments pushed contractors onto their credit lines and accelerated the
+      fall in bank deposits; three-month interbank rates rose to 2.4% in
+      October 2016, credit growth was near zero, and Saudi non-oil growth fell
+      to 0.2% (IMF). Across the six countries real spending fell about 9% in
+      2015 and 3-4% in each of 2016 and 2017, after rising 6% in 2014. In 2017
+      OPEC+ output cuts lowered GCC GDP.
+    narrative: >-
+      Oil is left at its forecast: the scenario isolates the fiscal channel.
+      Qatar's real government spending grows 14.9, 9.8 and 9.7 points less
+      than the forecast in Y1-Y3, as the GCC's did against 2014; non-oil growth
+      is 0.5, 1.2 and 3.7 points lower, the GCC average slowdown; GCC growth
+      holds up in Y1-Y2 and is 3.5 points lower in Y3. Credit and property
+      follow non-oil activity. Capital-spending cuts matter most: GCC fiscal
+      multipliers are 0.6 to 1.1 for capital spending against 0.3 to 0.7 for
+      current spending (Espinoza and Senhadji).
+    why:
+      GOV_SPEND_QAT: The six GCC countries' average real spending growth in
+        2015-17 less their 2014 growth, applied to Qatar.
+      NONOIL_GDP_QAT: The six countries' average non-oil growth in 2015-17
+        less their 2014 growth.
+      GDP_GCC: The six countries' average growth in 2015-17 less their 2014
+        growth.
+    book: >-
+      The internal book through non-oil growth, contractors and their
+      suppliers first; the external book through GCC growth in Y3.
+    limits: >-
+      Payment delays and deposit outflows are not variables in the system;
+      they reach the book only through non-oil growth.
+    references:
+      - title: IMF Country Report 17/316, Saudi Arabia 2017 Article IV Consultation
+        url: https://www.imf.org/-/media/files/publications/cr/2017/cr17316.pdf
+      - title: Espinoza and Senhadji, How strong are fiscal multipliers in the GCC? IMF WP/11/61
+        url: https://ideas.repec.org/p/imf/imfwpa/2011-061.html
+    main:
+      GOV_SPEND_QAT: {how: change, base: 2014, years: [2015, 2016, 2017], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-14.88, -9.75, -9.69]}
+      NONOIL_GDP_QAT: {how: change, base: 2014, years: [2015, 2016, 2017], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-0.49, -1.17, -3.65]}
+      GDP_GCC: {how: change, base: 2014, years: [2015, 2016, 2017], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [0.75, 0.35, -3.49]}
+
+  - id: G2
+    name: 2023–24 post-World Cup normalisation
+    category: history
+    region: qatar
+    episode: [2023, 2024]
+    window: [2019, 2026]
+    source: IMF Qatar 2023 Article IV; PSA real estate price index
+    description: >-
+      The end of a mega-event cycle: construction and services slow after the
+      World Cup, spending falls back and property softens.
+    history: >-
+      Qatar's economy boomed in 2022 with the FIFA World Cup and high
+      hydrocarbon prices. Afterwards activity normalised: the IMF put
+      non-hydrocarbon growth at 1.0% in 2023, down from 5.7% in 2022 (the
+      store's revised data show 2.0%), non-resident deposits fell by more than
+      a third from their peak, and the IMF warned that protracted weakness in
+      real estate could hurt the banks. Real government spending fell in 2023
+      and 2024 and property prices were flat, then fell 2.2% in 2024.
+    narrative: >-
+      Non-oil growth is 3.7 and 1.3 points below the forecast in Y1-Y2, real
+      government spending 5.6 and 6.7 points lower, and property 0.9% higher,
+      then 2.2% lower. World growth, oil and the GCC are untouched. Credit
+      follows non-oil growth a year later. The same pattern would follow the
+      end of any large project cycle, such as the North Field LNG expansion.
+    why:
+      GOV_SPEND_QAT: Qatar's real spending growth in 2023-24 less its 2022
+        growth.
+      NONOIL_GDP_QAT: Qatar's non-oil growth in 2023-24 less its 2022 growth.
+      PROPERTY_QAT: The PSA index's recorded change in 2023-24.
+    book: >-
+      The internal book through non-oil growth: contractors, hospitality and
+      services.
+    references:
+      - title: IMF Press Release 24/39, Qatar 2023 Article IV
+        url: https://www.imf.org/en/news/articles/2024/02/07/pr2439-qatar-imf-executive-board-concludes-2023-article-iv-consultation
+    main:
+      GOV_SPEND_QAT: {how: change, base: 2022, years: [2023, 2024], values: [-5.56, -6.66]}
+      NONOIL_GDP_QAT: {how: change, base: 2022, years: [2023, 2024], values: [-3.71, -1.28]}
+      PROPERTY_QAT: {how: actual, years: [2023, 2024], values: [0.89, -2.23]}
+
+  - id: G3
+    name: 1982–86 oil glut
+    category: history
+    region: gcc
+    episode: [1982, 1986]
+    window: [1979, 1989]
+    source: Gately (1986); IMF World Economic Outlook
+    description: >-
+      Lower for longer: five years of falling oil prices while GCC producers
+      cut output to defend them, ending in the 1986 collapse.
+    history: >-
+      After the 1979-80 price peak, oil demand fell and supply from outside
+      OPEC grew. OPEC defended its price by cutting output, Saudi Arabia most
+      of all, and the price still fell every year from 1982 to 1985 before
+      collapsing in 1986 (Gately, 1986). GCC output shrank with production:
+      the six countries' average growth was -3.9% in 1982 and -2.2% in 1985,
+      and Saudi Arabia's economy contracted 16% in 1982 and 11% in 1983.
+    narrative: >-
+      A slow-burning fiscal squeeze. Oil falls 11%, 9%, 4%, 4% and 48% in
+      Y1-Y5, and GCC growth runs well below the forecast in most years. Lower
+      revenue cuts Qatar's real spending year after year, which holds
+      non-oil growth, credit and property below the forecast for the whole
+      horizon. Unlike a sharp collapse, the damage builds slowly and does not
+      reverse within five years.
+    why:
+      OIL_PRICE: The oil price's recorded change in each year of 1982-86.
+      GDP_GCC: The average growth in 1982-86 of the GCC countries with data,
+        less their 1981 growth.
+    book: >-
+      The external book through GCC growth for all five years; the internal
+      book through non-oil growth as spending falls.
+    limits: >-
+      Qatar's non-oil GDP was not measured then, so it is filled by the
+      linked effects. Kuwait has no 1981 figure, so the 1981 reference
+      averages the other five.
+    references:
+      - title: Gately, Lessons from the 1986 oil price collapse, Brookings Papers on Economic Activity 1986(2)
+        url: https://www.brookings.edu/articles/lessons-from-the-1986-oil-price-collapse/
+    main:
+      OIL_PRICE: {how: actual, years: [1982, 1983, 1984, 1985, 1986], values: [-10.83, -8.6, -3.49, -4.32, -48.08]}
+      GDP_GCC: {how: change, base: 1981, years: [1982, 1983, 1984, 1985, 1986], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-9.25, -4.29, 1.23, -7.64, -5.96]}
+
+  # ------------------------------------------------------- supervisory --
   - id: F1
     name: Fed 2026 severely adverse (global)
     category: supervisory
+    region: global
     source: Board of Governors of the Federal Reserve System, 2026 stress test scenarios
     description: >-
       The Federal Reserve's severely adverse scenario for 2026: a severe
-      global recession, with output in advanced economies about 7.5% below
-      baseline and in developing Asia about 3%, and US short-term rates
-      falling to near zero. The scenario's output paths are translated to
-      world GDP growth; the US rate path is its own.
+      global recession with US short rates falling to near zero.
+    history: >-
+      The Federal Reserve publishes its supervisory scenarios each February.
+      The 2026 severely adverse scenario has a severe global recession, with
+      output in advanced economies about 7.5% below the forecast and in
+      developing Asia about 3%, and US short-term rates falling to near zero.
+    narrative: >-
+      World growth is 4.5 points below the forecast in Y1 and 1.0 point above in
+      Y2; US rates are 3.6 points lower in Y1. Oil falls with world demand,
+      cutting Qatar's real government spending; non-oil growth falls with
+      world demand and spending, then credit and property. GCC growth falls
+      with world demand and oil.
     translation: >-
       World GDP: the scenario's advanced-economy and developing-Asia output
       paths weighted by their shares of world output. US rate: the
       three-month Treasury rate's fall in year 1.
+    why:
+      GDP_WLD: The scenario's regional output paths translated to world GDP
+        growth, as above.
+      US_RATE: The scenario's three-month Treasury rate, year 1.
+    book: >-
+      Every channel, entirely through the linked effects: the scenario sets
+      only global variables.
+    references:
+      - title: Federal Reserve, 2026 final supervisory stress test scenarios
+        url: https://www.federalreserve.gov/publications/files/2026-final-supervisory-stress-test-scenarios-20260204.pdf
     main:
       GDP_WLD: {values: [-4.5, 1.0]}
       US_RATE: {values: [-3.6]}
@@ -245,28 +734,106 @@ scenarios:
   - id: E1
     name: EBA 2025 adverse (energy shock)
     category: supervisory
+    region: global
     source: European Systemic Risk Board, adverse scenario for the 2025 EU-wide stress test
     description: >-
-      The ESRB's adverse scenario for European banks in 2025: escalating
-      geopolitical tensions push energy prices up sharply (oil about 57%
-      higher in the first year) while EU output falls by about 6% over two
-      years. For Qatar a higher oil price cushions the fall in world
-      demand.
+      The ESRB's adverse scenario for European banks in 2025: a geopolitical
+      energy shock with oil much higher and EU output falling.
+    history: >-
+      The ESRB's adverse scenario for the 2025 EU-wide stress test assumes
+      escalating geopolitical tensions that push energy prices up sharply,
+      oil about 57% higher in the first year, while EU output falls by about
+      6% over two years.
+    narrative: >-
+      Oil is 57% above the forecast in Y1 and world growth 2.3 and 4.2 points
+      lower in Y1-Y2. For Qatar the two pull in opposite directions: higher
+      oil supports government spending, weaker world demand hits non-oil
+      growth and the GCC.
     translation: >-
-      Oil: the scenario's oil price path against its baseline. World GDP:
-      the scenario's EU GDP growth deviations, used for world demand.
+      Oil: the scenario's oil price path against its forecast. World GDP: the
+      scenario's EU GDP growth deviations, used for world demand.
+    why:
+      OIL_PRICE: The scenario's oil price path against its forecast.
+      GDP_WLD: The scenario's EU GDP growth deviations, used for world demand.
+    book: >-
+      The internal book through non-oil growth; the external book through
+      GCC growth.
+    references:
+      - title: ESRB, Macrofinancial scenario for the 2025 EU-wide banking sector stress test
+        url: https://www.eba.europa.eu/sites/default/files/2025-02/f23c8470-a2e1-410f-b752-55aff8f8e8f4/2025-02-26%20-%20ESRB%20-%20Macrofinancial%20scenario%20for%20the%202025%20EU-wide%20banking%20sector%20stress%20test%20%28updated%2026%20February%202025%29.pdf
     main:
       OIL_PRICE: {values: [57.0, 0.0, 0.0]}
       GDP_WLD: {values: [-2.3, -4.2, 0.0]}
 
+  # ----------------------------------------------------------- what-if --
+  - id: G4
+    name: Hormuz closure lasting into a second year
+    category: hypothetical
+    region: gcc
+    source: Built from H10 (IMF World Economic Outlook, October 2026)
+    description: >-
+      What if the strait does not reopen in 2027 as the IMF assumes: the 2026
+      shock repeats in the second year.
+    history: >-
+      The IMF's October 2026 projections assume the Strait of Hormuz reopens
+      gradually from March 2027 and that uncertainty stays elevated through
+      2027. Damage at Ras Laffan keeps about 17% of Qatar's LNG capacity out
+      for three to five years even after reopening.
+    narrative: >-
+      Y1 is the IMF's 2026 shock: oil 41% above the forecast, Qatar's non-oil
+      growth 4.3 points below and GCC growth 11.3 points below. Instead of
+      the 2027 rebound, Y2 repeats it: oil stays at its higher level, and
+      non-oil and GCC growth are again 4.3 and 11.3 points below the forecast.
+      From Y3 the linked effects take over.
+    why:
+      OIL_PRICE: The IMF's projected 2026 change, then held at that level (no
+        further change) in Y2.
+      NONOIL_GDP_QAT: The projected 2026 change against 2025, in both Y1 and
+        Y2.
+      GDP_GCC: The six countries' projected 2026 change against 2025, in both
+        Y1 and Y2.
+    book: >-
+      The external book hardest, through two years of GCC contraction; the
+      internal book through non-oil growth.
+    references:
+      - title: The National, IMF cuts 2026 growth forecasts for Gulf economies due to prolonged Hormuz closure (13 October 2026)
+        url: https://www.thenationalnews.com/business/economy/2026/10/13/imf-cuts-2026-growth-forecasts-for-gulf-economies-due-to-prolonged-hormuz-closure/
+    main:
+      OIL_PRICE: {how: actual, years: [2026], then: [0.0], values: [41.33, 0]}
+      NONOIL_GDP_QAT: {how: change, base: 2025, years: [2026, 2026], values: [-4.31, -4.31]}
+      GDP_GCC: {how: change, base: 2025, years: [2026, 2026], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-11.32, -11.32]}
+
   - id: X1
     name: Severe combined
     category: hypothetical
+    region: global
     source: Built from H3, H4 and H8
     description: >-
       The worst of three episodes at once: a world recession the size of
-      2009, the 2015–17 oil collapse and the 2016–20 property correction.
-      Not an event that has happened, a test of what the book can bear.
+      2009, the 2015-17 oil collapse and the 2016-20 property correction.
+    history: >-
+      Not an event that has happened. Each part is a recorded episode: world
+      growth from 2009-10, the oil price from 2015-17, property prices from
+      2016-20.
+    narrative: >-
+      World growth is 3.3 points below the forecast in Y1 and 2.3 above in Y2;
+      oil falls 47% and 15%, then recovers 22%; property falls every year,
+      about a quarter in all. Spending, non-oil growth, credit and GCC growth
+      follow through the linked effects. A test of what the book can bear
+      rather than a forecast.
+    why:
+      GDP_WLD: World growth in 2009-10 less its growth in 2008.
+      OIL_PRICE: The oil price's recorded change in 2015-17.
+      PROPERTY_QAT: The PSA index's recorded change in 2016-20.
+    book: >-
+      Every channel.
+    references:
+      - title: Espinoza and Prasad, Nonperforming loans in the GCC banking system and their macroeconomic effects, IMF WP/10/224
+        url: https://www.imf.org/external/pubs/ft/wp/2010/wp10224.pdf
+      - title: Khandelwal, Miyajima and Santos, The impact of oil prices on the banking system in the GCC, IMF WP/16/161
+        url: https://ideas.repec.org/p/imf/imfwpa/2016-161.html
+      - title: IMF Press Release 19/192, Qatar 2019 Article IV
+        url: https://imf.org/en/News/Articles/2019/06/03/pr19192-qatar-imf-executive-board-concludes-2019-article-iv-consultation-with-qatar
     main:
       GDP_WLD: {how: change, base: 2008, years: [2009, 2010], values: [-3.28, 2.34]}
       OIL_PRICE: {how: actual, years: [2015, 2016, 2017], values: [-47.15, -15.02, 22.45]}
@@ -275,21 +842,56 @@ scenarios:
   - id: X2
     name: Domestic credit crunch
     category: hypothetical
+    region: qatar
     source: Sized on Qatar 2009
     description: >-
-      Real private credit growth falls by as much as it did in Qatar in
-      2009, with nothing else set: how far a credit shock alone reaches
-      non-oil growth, property and the provision.
+      Banks pull back: real credit growth falls by as much as in Qatar in
+      2009, with nothing else set.
+    history: >-
+      Not an event in itself. In 2009 Qatar's real credit growth fell 15.6
+      points from its 2008 pace as the Gulf's credit boom ended.
+    narrative: >-
+      Real credit growth is 15.6 points below the forecast in Y1, as if banks
+      lost funding (a deposit outflow like 2017's, say) and cut lending. The
+      linked effects carry it to property in the same year and to non-oil
+      growth a year later, and from there to the PD model: how far a credit
+      shock alone reaches the book.
+    why:
+      CREDIT_QAT: Qatar's real credit growth in 2009 less its 2008 growth.
+    book: >-
+      Collateral first, through property; then the internal PD model through
+      non-oil growth.
+    references:
+      - title: MEED, Qatari state support stabilises lenders
+        url: https://www.meed.com/qatari-state-support-stabilises-lenders/
+      - title: Espinoza and Prasad, Nonperforming loans in the GCC banking system and their macroeconomic effects, IMF WP/10/224
+        url: https://www.imf.org/external/pubs/ft/wp/2010/wp10224.pdf
     main:
       CREDIT_QAT: {how: change, base: 2008, years: [2009], values: [-15.57]}
 
   - id: X3
     name: Fiscal consolidation
     category: hypothetical
+    region: qatar
     source: Sized on Qatar 2015–16
     description: >-
-      Real government spending cut as Qatar cut it in 2015 and 2016 after
-      the oil collapse -- about 20 points below 2014's growth each year --
-      with oil itself left at baseline: a spending shock on its own.
+      Qatar cuts real spending as it did after the 2015 oil collapse, with oil
+      itself left at its forecast.
+    history: >-
+      Not an event in itself. In 2015-16 Qatar's real government spending
+      grew about 20 points less than in 2014, after the oil collapse.
+    narrative: >-
+      Real government spending is 21.6 and 19.3 points below the forecast in
+      Y1-Y2. Non-oil growth falls through the fiscal multiplier, then credit
+      and property. A spending shock on its own, without the oil price that
+      caused it in 2015.
+    why:
+      GOV_SPEND_QAT: Qatar's real spending growth in 2015-16 less its 2014
+        growth.
+    book: >-
+      The internal book through non-oil growth.
+    references:
+      - title: Espinoza and Senhadji, How strong are fiscal multipliers in the GCC? IMF WP/11/61
+        url: https://ideas.repec.org/p/imf/imfwpa/2011-061.html
     main:
       GOV_SPEND_QAT: {how: change, base: 2014, years: [2015, 2016], values: [-21.64, -19.32]}

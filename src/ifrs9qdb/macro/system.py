@@ -399,6 +399,41 @@ class MacroSystem:
         return {"paths": P, "role": role, "flags": flags,
                 "recommended": self.recommend(given, H)}
 
+    def about(self, v: str) -> str:
+        """What a variable is and what moves it, in words (system.yml)."""
+        return " ".join(str((self.meta.get(v) or {}).get("about", "")).split())
+
+    def explain(self, given: dict, linked=None, H: int = 5) -> pd.DataFrame:
+        """Why each filled value is what it is: for every variable-year the
+        equations filled, each driver's part (coefficient x the driver's
+        value that year or the year before; the variable's own last year is
+        its momentum). The parts add up to the filled value exactly."""
+        sim = self.simulate(given, linked, H)
+        P = sim["paths"]
+        set_ = {v: [p is not None and j < len(p) and p[j] is not None
+                    for j in range(H)] for v, p in (given or {}).items()
+                for p in [list(p or [])]}
+        rows = []
+        for v in self.order:
+            if v not in self.equations or sim["role"].get(v) == "off":
+                continue
+            for t in range(H):
+                if set_.get(v, [False] * H)[t]:
+                    continue
+                for term in self.equations[v].terms:
+                    lag = term["lag"]
+                    if t - lag < 0:
+                        continue
+                    part = term["coef"] * float(P[term["driver"]][t - lag])
+                    if abs(part) < 1e-9:
+                        continue
+                    rows.append({"variable": v, "year": t + 1, "driver": term["driver"],
+                                 "lag": lag, "coef": term["coef"],
+                                 "driver_value": float(P[term["driver"]][t - lag]),
+                                 "part": part})
+        return pd.DataFrame(rows, columns=["variable", "year", "driver", "lag", "coef",
+                                           "driver_value", "part"])
+
     def recommend(self, given: dict, H: int = 5) -> list:
         """The variables the main variables reach through the equations."""
         main = {v for v, p in (given or {}).items()

@@ -15,7 +15,8 @@ import yaml
 from ifrs9qdb.macro.system import fit_system, system_spec
 from ifrs9qdb.stress import mev_stress, shift_curve
 from ifrs9qdb.stresstest import Scenario, ScenarioStore, library, read_stress_config, shape_path
-from ifrs9qdb.stresstest.library import check_library, derive, episode, library_entry
+from ifrs9qdb.stresstest.library import (REGIONS, check_library, derive, derivation,
+                                         episode, library_entry)
 from ifrs9qdb.stresstest.transmission import property_trough
 
 from conftest import ref_output
@@ -112,6 +113,44 @@ class TestLibrary:
             .read_text(encoding="utf-8"))["scenarios"]
             for r in e["main"].values() if r.get("how"))
         assert len(chk) == n
+
+    def test_every_scenario_carries_its_reasons(self):
+        for s in library():
+            assert s.region in REGIONS, s.id
+            assert s.history and s.narrative and s.book, s.id
+            assert s.references and all(r["title"] for r in s.references), s.id
+            for v in s.given():
+                assert s.why.get(v), (s.id, v)
+            if s.restructured:
+                assert s.why.get("restructured"), s.id
+
+    def test_the_library_has_gcc_and_qatar_scenarios(self):
+        lib = library()
+        assert len(lib) == 21
+        assert sum(s.region in ("gcc", "qatar") for s in lib) >= 10
+
+    def test_then_holds_the_new_level(self, system):
+        ref = dict(library_entry("G4")["main"]["OIL_PRICE"], var="OIL_PRICE")
+        got = derive(ref, system)
+        assert got is not None and got[-1] == 0.0 and len(got) == 2
+        assert next(s for s in library() if s.id == "G4").refs["OIL_PRICE"].endswith("then held")
+
+    def test_each_number_is_explained(self, system):
+        # the recorded value less the reference is the shock the data give
+        d = derivation("H1", system)
+        assert set(d["variable"]) == {"OIL_PRICE", "GDP_WLD"}
+        entry = library_entry("H1")["main"]
+        for v, g in d.groupby("variable"):
+            got = derive(dict(entry[v], var=v), system)
+            for r in g.itertuples():
+                if r.rule == "change":
+                    assert r.reference_year == 1985
+                    assert r.recorded - r.reference == pytest.approx(got[r.y - 1], abs=0.006)
+                else:
+                    assert r.rule == "actual" and r.reference == 0.0
+                    assert r.recorded == pytest.approx(got[r.y - 1], abs=0.006)
+                assert r.shock == entry[v]["values"][r.y - 1]
+        assert derivation("nope", system).empty
 
     def test_an_episode_has_every_variable(self, system):
         e = episode("H4", system)

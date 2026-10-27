@@ -106,9 +106,13 @@ src/ifrs9qdb/
                   a scenario's other variables with its main ones
   stresstest/     macro scenarios: a few main variables set year by year
                   (scenarios.py, saved to an SQLite database with every
-                  version), the library of historical, supervisory and
-                  what-if scenarios with the episode behind each
-                  (library.py, stresstest/data/library.yml), their path into
+                  version), the library of 21 historical, GCC and Qatar,
+                  supervisory and what-if scenarios, each with what it
+                  captures, how it unfolds, why each main variable is set,
+                  its sources and the episode behind it, every historical
+                  number recomputable from the store (library.py:
+                  derive, derivation, check_library;
+                  stresstest/data/library.yml), their path into
                   the provision -- the PD model, stage moves, property
                   collateral (transmission.py, stresstest/data/stress.yml)
                   -- and the risk measures (risk.py): the split by main

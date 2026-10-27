@@ -13,11 +13,11 @@ the rest. Everything prices through ``stress.reprice`` -- the same
 provision, and nothing here changes how a run is calculated.
 """
 from .config import read_stress_config
-from .library import CATEGORIES, library
+from .library import CATEGORIES, REGIONS, library
 from .scenarios import SHAPES, Scenario, ScenarioStore, scenarios_db_path, shape_path
 
 __all__ = ["read_stress_config", "Scenario", "ScenarioStore", "scenarios_db_path", "SHAPES",
-           "shape_path", "library", "CATEGORIES", "RunContext", "prepare", "transmit"]
+           "shape_path", "library", "CATEGORIES", "REGIONS", "RunContext", "prepare", "transmit"]
 
 
 def __getattr__(name):

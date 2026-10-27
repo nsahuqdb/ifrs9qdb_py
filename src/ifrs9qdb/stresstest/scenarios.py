@@ -78,6 +78,13 @@ class Scenario:
     translation: str = ""
     tail: bool = False
     refs: dict = field(default_factory=dict)        # variable -> how the library derived it
+    region: str = "qatar"                           # global | gcc | qatar
+    history: str = ""                               # what happened
+    narrative: str = ""                             # the scenario as it unfolds from Y1
+    why: dict = field(default_factory=dict)         # main variable -> why and how it is set
+    book: str = ""                                  # how it reaches the provision
+    limits: str = ""
+    references: list = field(default_factory=list)  # [{"title", "url"}]
 
     @classmethod
     def from_dict(cls, d: dict) -> "Scenario":
@@ -98,7 +105,12 @@ class Scenario:
             shapes={str(k): dict(v) for k, v in (d.get("shapes") or {}).items() if v},
             episode=d.get("episode"), window=d.get("window"),
             translation=str(d.get("translation") or ""), tail=bool(d.get("tail", False)),
-            refs={str(k): str(v) for k, v in (d.get("refs") or {}).items()})
+            refs={str(k): str(v) for k, v in (d.get("refs") or {}).items()},
+            region=str(d.get("region") or "qatar"), history=str(d.get("history") or ""),
+            narrative=str(d.get("narrative") or ""),
+            why={str(k): str(v) for k, v in (d.get("why") or {}).items()},
+            book=str(d.get("book") or ""), limits=str(d.get("limits") or ""),
+            references=[dict(r) for r in (d.get("references") or []) if isinstance(r, dict)])
 
     def to_dict(self) -> dict:
         return asdict(self)
