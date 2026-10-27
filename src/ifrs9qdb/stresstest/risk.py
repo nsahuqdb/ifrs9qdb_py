@@ -1,195 +1,214 @@
-"""Measuring the risk of a scenario, and of the macro outlook as a whole.
+"""Measuring a scenario, and the macro outlook as a whole.
 
-    shapley        a combined scenario's change split by shock: each shock's
-                   average added ECL over every order the shocks could be
-                   added in, so the parts add up to the total; the gap
-                   between the total and the shocks priced alone is the
-                   interaction
-    sensitivities  the change for a one-standard-deviation adverse move in
-                   each variable that reaches the book, and by segment
-    ecl_at_risk    thousands of five-year paths from the macro model, each
-                   priced through the transmission layers, with customer
-                   defaults drawn in each: the distribution of the
-                   provision and of the year's credit loss, its percentiles
-                   and expected shortfall, where each named scenario sits,
-                   and who carries the tail
-    reverse        the most likely scenario (nearest the baseline in the
-                   joint history) that produces a given loss
+    drivers        a scenario's change split by main variable (Shapley
+                   values): each variable's own moves and what they move
+                   through the linked effects, adding up to the total
+    sensitivity    the change for a one-standard-deviation adverse move in
+                   each variable, with its linked effects; a variable's
+                   change over a range of sizes; a scenario at both ends of
+                   the PD link's range
+    ecl_at_risk    thousands of five-year paths from the macro system, each
+                   priced through the three channels, with customer defaults
+                   drawn in each: the distribution of the provision and of
+                   the year's credit loss, its percentiles and expected
+                   shortfall, where each named scenario sits, and who
+                   carries the tail
+    reverse        what it takes to raise the provision by a given amount:
+                   how far each scenario must be scaled, how large a shock
+                   each variable needs, and how often the macro system
+                   produces it
 
-Every number but the Monte Carlo is a full repricing. Pricing thousands of
-paths in full is too slow, so ``ecl_at_risk`` prices the book once on a grid
-of moves per channel and segment (``build_proxy``), reads each path from the
-grid, and checks the grid against full repricing on the named scenarios
-(``proxy_check``). The paths and the default draws come from one stream R
-draws identically (``macro.prng``).
+Every number but the Monte Carlo (and the reverse search, which full
+repricing then confirms) is a full repricing. Pricing thousands of paths in
+full is too slow, so the book is decomposed once (``build_proxy``) and each
+path read from it; ``proxy_check`` compares it with full repricing on the
+library every time. The default draws come from one stream R draws
+identically (``macro.prng``).
 """
 from __future__ import annotations
 
-import itertools
-import math
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from ..macro.catalogue import concepts as _concepts
 from ..macro.prng import uniforms
-from ..stress import pd_chain, reprice
-from .config import segment_loadings
-from .scenarios import Scenario, Shock, library, scenario_paths
-from .transmission import (RunContext, _level_move, _sd, drawdown, external_notches,
-                           factor_shift, implied_stage, notch_ratings, rate_notches,
-                           stressed_pd12, transmit)
+from ..stress import pd_chain
+from .library import library
+from .scenarios import Scenario, shape_path
+from .transmission import (RunContext, _k, _share, channel_paths, price_channels,
+                           scenario_paths, transmit)
 
-__all__ = ["shapley", "sensitivities", "linked_concepts", "Proxy", "build_proxy",
-           "proxy_eval", "ecl_at_risk", "ALL_CHANNELS", "proxy_check", "reverse", "player_label"]
-
-
-def _label(concept: str) -> str:
-    c = _concepts()
-    hit = c[c["concept"] == concept]
-    return hit["label"].iloc[0] if len(hit) else concept
+__all__ = ["drivers", "sensitivity", "sensitivity_curve", "pd_link_range", "Proxy",
+           "build_proxy", "proxy_eval", "paths_matrix", "ecl_at_risk", "proxy_check",
+           "reverse"]
 
 
-def player_label(s: Shock) -> str:
-    unit = " sd" if s.unit == "sd" else ""
-    if s.shape == "custom":
-        moves = ", ".join(f"{v:+g}" for v in (s.path or []) if v)
-        return f"{_label(s.concept)} ({moves}{unit})"
-    words = {"one_year": "one year", "held": "held", "build": f"over {s.years} years",
-             "recover": f"recovering over {s.years} years"}.get(s.shape, s.shape)
-    return f"{_label(s.concept)} ({s.size:+g}{unit}, {words})"
+def _total(rc: RunContext, scn: Scenario, slope_scale: float = 1.0) -> dict:
+    """A scenario's change by channel, without the reporting."""
+    sim = scenario_paths(scn, rc.system, rc.H)
+    pc = price_channels(rc, sim["paths"], scn.restructured, slope_scale)
+    ok = rc.base["ecl"].notna().to_numpy() & np.isfinite(pc["after"])
+    b = float(np.sum(rc.base["ecl"].to_numpy(float)[ok]))
+    a_pd = float(np.sum(pc["after_pd"][ok]))
+    a_st = float(np.sum(pc["after_staging"][ok]))
+    a = float(np.sum(pc["after"][ok]))
+    return {"change": a - b, "pd": a_pd - b, "staging": a_st - a_pd, "collateral": a - a_st}
 
 
-# ------------------------------------------------------------------ Shapley --
-def shapley(rc: RunContext, scn: Scenario, max_exact: int = 6, samples: int = 24,
-            seed: int | None = None, progress=None) -> dict:
-    """The scenario's change split by its parts: each shock, and the
-    overrides, the parameter levers and the IFRS 9 weights when it has them.
-    Exact over every subset up to ``max_exact`` parts (2^n repricings), by
-    ``samples`` random orders beyond."""
+# ------------------------------------------------------------- drivers --
+def _part(scn: Scenario, keep: str | None, H: int) -> Scenario:
+    """The scenario with one main variable's moves kept and every other
+    main variable held at baseline in the years it sets: the share of every
+    path that comes from ``keep`` (the system is linear, so the parts' paths
+    add up to the scenario's)."""
+    main = {}
+    for v, p in scn.given(H).items():
+        main[v] = p if v == keep else [None if x is None else 0.0 for x in p]
+    return Scenario(name=scn.name, main=main, linked=scn.linked,
+                    restructured=scn.restructured if keep == "_deferral" else 0.0)
+
+
+def drivers(rc: RunContext, scn, P: "Proxy | None" = None, max_full: int = 3,
+            progress=None) -> dict:
+    """The scenario's change split by its main variables (and the deferral
+    programme), as Shapley values: each part's average contribution over
+    every order the parts could be added in, so the parts add up to the
+    total exactly. A part is the main variable's own moves and everything
+    they move through the linked effects, with the other main variables held
+    where the scenario sets them -- the parts' paths add up to the
+    scenario's. Up to ``max_full`` parts every combination is priced in full;
+    beyond, the combinations are read from the proxy and scaled to the full
+    price of the whole."""
+    import itertools
+    import math
     if isinstance(scn, dict):
         scn = Scenario.from_dict(scn)
-    players = [("shock", i, player_label(s)) for i, s in enumerate(scn.shocks)]
-    if scn.overrides:
-        players.append(("overrides", None, "Paths set by hand"))
-    if scn.levers:
-        players.append(("levers", None, "Parameter levers"))
-    if scn.scenario_weights:
-        players.append(("weights", None, "IFRS 9 scenario weights"))
-    n = len(players)
-    if n == 0:
-        return {"ok": False, "reason": "The scenario has no shocks."}
-    cache: dict = {frozenset(): 0.0}
+    given = scn.given(rc.H)
+    parts = [(v, rc.system.label(v)) for v in given]
+    if scn.restructured > 0:
+        parts.append(("_deferral", "Deferral programme"))
+    n = len(parts)
+    if not n:
+        return {"ok": False, "reason": "The scenario sets no variable."}
+    paths = {}
+    for v, _ in parts:
+        if v != "_deferral":
+            paths[v] = scenario_paths(_part(scn, v, rc.H), rc.system, rc.H)["paths"]
+    zero = {u: np.zeros(rc.H) for u in rc.system.order}
 
-    def v(S: frozenset) -> float:
+    def combo(S):
+        tot = {u: np.zeros(rc.H) for u in rc.system.order}
+        for v in S:
+            if v in paths:
+                for u in tot:
+                    tot[u] = tot[u] + np.asarray(paths[v].get(u, zero[u]), float)
+        return tot, (scn.restructured if "_deferral" in S else 0.0)
+
+    full = n <= max_full
+    if not full and P is None:
+        P = build_proxy(rc)
+    names = [v for v, _ in parts]
+    cache: dict = {}
+
+    def value(S: frozenset) -> float:
         if S in cache:
             return cache[S]
-        sub = Scenario(
-            name=scn.name, shocks=[scn.shocks[p[1]] for j, p in enumerate(players)
-                                   if j in S and p[0] == "shock"],
-            knock_on=scn.knock_on,
-            overrides=scn.overrides if any(players[j][0] == "overrides" for j in S) else {},
-            levers=scn.levers if any(players[j][0] == "levers" for j in S) else {},
-            weights=scn.weights,
-            scenario_weights=scn.scenario_weights
-            if any(players[j][0] == "weights" for j in S) else None)
-        r = transmit(rc, sub, waterfall=False)
-        if not r.get("ok"):
-            raise RuntimeError(r.get("reason"))
-        cache[S] = float(r["delta"])
+        if not S:
+            cache[S] = 0.0
+            return 0.0
+        pth, r = combo(S)
+        if full:
+            pc = price_channels(rc, pth, r)
+            ok = rc.base["ecl"].notna().to_numpy() & np.isfinite(pc["after"])
+            cache[S] = float(np.sum(pc["after"][ok]) - np.sum(rc.base["ecl"].to_numpy(float)[ok]))
+        else:
+            cache[S] = float(proxy_eval(P, paths_matrix(rc, P, pth), r)["total"][0])
         if progress:
-            progress(len(cache))
+            progress(len(cache), 2 ** n)
         return cache[S]
 
     phi = np.zeros(n)
-    exact = n <= max_exact
-    if exact:
-        f = math.factorial
-        for i in range(n):
-            others = [j for j in range(n) if j != i]
-            for r in range(len(others) + 1):
-                w = f(r) * f(n - r - 1) / f(n)
-                for S in itertools.combinations(others, r):
-                    S = frozenset(S)
-                    phi[i] += w * (v(S | {i}) - v(S))
-    else:
-        u = uniforms(samples * n, int(seed or rc.cfg.get("risk", {}).get("seed", 20261023)))
-        for k in range(samples):
-            order = list(np.argsort(u[k * n:(k + 1) * n], kind="stable"))
-            S = frozenset()
-            for i in order:
-                phi[i] += (v(S | {i}) - v(S)) / samples
-                S = S | {i}
-    total = v(frozenset(range(n)))
-    alone = np.array([v(frozenset({i})) for i in range(n)])
-    out = pd.DataFrame({"part": [p[2] for p in players], "kind": [p[0] for p in players],
-                        "alone": alone, "shapley": phi})
-    out["share_pct"] = 100 * out["shapley"] / total if total else np.nan
-    return {"ok": True, "parts": out.sort_values("shapley", key=abs, ascending=False)
-            .reset_index(drop=True), "total": total, "sum_alone": float(alone.sum()),
-            "interaction": float(total - alone.sum()), "exact": exact,
-            "repricings": len(cache) - 1}
+    f = math.factorial
+    for i in range(n):
+        others = [j for j in range(n) if j != i]
+        for k in range(n):
+            w = f(k) * f(n - k - 1) / f(n)
+            for T in itertools.combinations(others, k):
+                S = frozenset(names[j] for j in T)
+                phi[i] += w * (value(S | {names[i]}) - value(S))
+    total = _total(rc, scn)["change"]
+    whole = value(frozenset(names))
+    if not full and whole:
+        phi = phi * total / whole
+    alone = [value(frozenset({v})) * (total / whole if (not full and whole) else 1.0)
+             for v in names]
+    out = pd.DataFrame({"variable": names, "label": [lb for _, lb in parts],
+                        "change": phi, "alone": alone})
+    return {"ok": True, "parts": out.sort_values("change", key=abs, ascending=False)
+            .reset_index(drop=True), "total": total, "exact": full,
+            "pricings": len(cache) - 1}
 
 
-# ------------------------------------------------------------- sensitivity --
-def linked_concepts(rc: RunContext) -> dict:
-    """Every concept that reaches the book, with the direction of an
-    adverse move (-1 a fall, +1 a rise) and the channel."""
-    out = {}
-    for c, (_, _, active) in rc.drivers_internal.items():
-        if active:
-            out[c] = (-1, "PD model driver")
-    for c in rc.drivers_external:
-        out.setdefault(c, (-1, "PD model driver (external)"))
-    tot: dict = {}
-    for seg in pd.unique(rc.segment):
-        ext = seg == (rc.cfg.get("factor") or {}).get("external_segment", "External book")
-        for c, b in segment_loadings(rc.cfg, seg, ext).items():
-            tot[c] = tot.get(c, 0.0) + b
-    for c, b in tot.items():
-        if c not in out and b != 0 and c in rc.model.concepts:
-            out[c] = (-1 if b > 0 else 1, "Credit factor")
-    for c in rc.coll_share:
-        out.setdefault(c, (-1, "Collateral"))
-    rcfg = rc.cfg.get("rates") or {}
-    for c in (rcfg.get("variable"), rcfg.get("follows")):
-        if c:
-            out.setdefault(c, (1, "Rates"))
-    x = (rc.cfg.get("ead") or {}).get("variable")
-    if x:
-        out.setdefault(x, (-1, "Exposure"))
-    for c in ((rc.cfg.get("external") or {}).get("notches_per_sd") or {}):
-        out.setdefault(c, (-1, "External book"))
-    return out
+# --------------------------------------------------------- sensitivity --
+def _one(rc: RunContext, v: str, size_sd: float, shape: str, linked: bool,
+         years: int = 2) -> Scenario:
+    sd = rc.system.sd(v)
+    size = rc.system.adverse(v) * float(size_sd) * (sd if np.isfinite(sd) else 1.0)
+    return Scenario(name=rc.system.label(v), main={v: shape_path(shape, size, rc.H, years)},
+                    linked=None if linked else [])
 
 
-def sensitivities(rc: RunContext, size_sd: float = 1.0, shape: str = "held",
-                  knock_on: bool = False, progress=None) -> dict:
-    """The change for a ``size_sd`` adverse move in each linked variable on
-    its own (held over the horizon, the rest at baseline unless
-    ``knock_on``), ranked; and the same by segment."""
-    rows, heat = [], []
-    for k, (c, (sign, channel)) in enumerate(linked_concepts(rc).items()):
-        scn = Scenario(name=c, shocks=[Shock(c, sign * size_sd, "sd", shape)],
-                       knock_on=knock_on)
-        r = transmit(rc, scn, waterfall=False)
+def sensitivity(rc: RunContext, size_sd: float = 1.0, shape: str = "one_year",
+                linked: bool = True, progress=None) -> dict:
+    """An adverse move of ``size_sd`` standard deviations in each variable,
+    on its own (with its linked effects unless ``linked`` is false),
+    ranked by the change in ECL."""
+    rows = []
+    for i, v in enumerate(rc.system.order):
+        scn = _one(rc, v, size_sd, shape, linked)
+        t = _total(rc, scn)
+        move = next(x for x in scn.main[v] if x is not None)
+        rows.append({"variable": v, "label": rc.system.label(v), "unit": rc.system.unit(v),
+                     "sd": rc.system.sd(v), "move": move, "change": t["change"],
+                     "change_pct": 100 * t["change"] / rc.base_total if rc.base_total else np.nan,
+                     "pd": t["pd"], "staging": t["staging"], "collateral": t["collateral"]})
         if progress:
-            progress(k + 1)
-        if not r.get("ok"):
+            progress(i + 1, len(rc.system.order))
+    tab = pd.DataFrame(rows).sort_values("change", key=abs, ascending=False)
+    return {"ok": True, "table": tab.reset_index(drop=True), "size_sd": size_sd,
+            "shape": shape, "linked": linked}
+
+
+def sensitivity_curve(rc: RunContext, v: str, sizes=(-3, -2, -1, 0, 1, 2, 3),
+                      shape: str = "one_year", linked: bool = True) -> pd.DataFrame:
+    """The change in ECL as one variable moves from a favourable to an
+    adverse shock of each size (in standard deviations; positive is
+    adverse)."""
+    rows = []
+    for a in sizes:
+        if a == 0:
+            rows.append({"size_sd": 0.0, "move": 0.0, "change": 0.0})
             continue
-        rows.append({"concept": c, "label": _label(c), "channel": channel,
-                     "move": f"{'+' if sign > 0 else '-'}{size_sd:g} sd",
-                     "move_native": sign * size_sd * _sd(rc, c),
-                     "change": r["delta"], "change_pct": r["pct"]})
-        for _, s in r["by_segment"].iterrows():
-            heat.append({"concept": c, "label": _label(c), "segment": s["segment"],
-                         "change": s["change"], "change_pct": s["change_pct"]})
-    t = pd.DataFrame(rows)
-    if len(t):
-        t = t.sort_values("change", key=abs, ascending=False).reset_index(drop=True)
-    return {"ok": True, "table": t, "heat": pd.DataFrame(heat)}
+        scn = _one(rc, v, a, shape, linked)
+        move = next(x for x in scn.main[v] if x is not None)
+        rows.append({"size_sd": float(a), "move": move, "change": _total(rc, scn)["change"]})
+    return pd.DataFrame(rows)
+
+
+def pd_link_range(rc: RunContext, scn) -> dict:
+    """A scenario priced with the PD model's slope on non-oil growth at each
+    end of the range QDB's default history supports (stress.yml pd_link)."""
+    if isinstance(scn, dict):
+        scn = Scenario.from_dict(scn)
+    pl = rc.cfg.get("pd_link") or {}
+    b = float(pl.get("slope", -0.0414))
+    lo, hi = (float(x) for x in pl.get("range", [-0.019, -0.048]))
+    out = {"slope": b, "range": [lo, hi], "central": _total(rc, scn)["change"]}
+    out["low"] = _total(rc, scn, lo / b)["change"]
+    out["high"] = _total(rc, scn, hi / b)["change"]
+    return out
 
 
 # ------------------------------------------------------------------- proxy --
@@ -203,21 +222,22 @@ def sensitivities(rc: RunContext, size_sd: float = 1.0, shape: str = "held",
 #     ECL = LGD x sum_y m(y) x W(y),   W(y) = sum over year y of EAD/disc/12
 #
 # with weights W that do not depend on the PD at all. A path changes the m's
-# (the PD chain's drivers year by year, the credit factor's probit shift,
-# the downgrades), the stage (and so the horizon: Stage 1 has year 1 only),
-# LGD (collateral) and EAD (drawdown) -- so with W computed once for each
-# contract and stage, and each curve's yearly m's on a grid of driver moves,
-# a path is priced without repricing, and to the engine's own arithmetic.
-# What is left out: a curve capped at 1, and a discount rate that resets
-# (rates: discount), which the full repricing covers.
+# (the PD chain's drivers year by year), the chance of a Stage 1 contract
+# moving to Stage 2 (through its 12-month PD), and LGD (collateral) -- so
+# with W computed once for each contract and stage, and each curve on a grid
+# of driver moves, a path is priced to the engine's own arithmetic without
+# repricing. The grid holds each year's default rate among the survivors
+# (m(y) / survival), read at that year's move: a year's defaults then depend
+# on the path's earlier years through survival, as in the chain itself.
 
 @dataclass
 class Proxy:
     """The book, decomposed for pricing thousands of paths."""
     segments: list
     seg_of_row: np.ndarray
-    ok: np.ndarray                 # rows priced
+    ok: np.ndarray
     stage0: np.ndarray
+    external: np.ndarray
     onb: np.ndarray
     cnet: np.ndarray
     lgd_base: float
@@ -226,30 +246,25 @@ class Proxy:
     cap: bool
     W1: np.ndarray                 # (n,)   Stage 1, year 1
     W2: np.ndarray                 # (n, H) Stage 2, years 1..H
-    T: np.ndarray                  # (n, K, G, H) yearly m by notches and driver grid
-    R: np.ndarray                  # (n, K, G) Stage 2 years after H, weighted
-    RM: np.ndarray                 # (n, K, G) the PD mass after H, unweighted
+    Q: np.ndarray                  # (n, G, H) each year's default rate among survivors, on the grid
+    SG: np.ndarray                 # (n, G) survival to the end of year H on the grid
+    R: np.ndarray                  # (n, G) Stage 2 years after H, weighted
+    RM: np.ndarray                 # (n, G) the PD mass after H
     xs_int: np.ndarray
     xs_ext: np.ndarray
-    k_rho: np.ndarray              # sqrt(rho / (1 - rho)) per row
-    base_total: float
-    base_seg: np.ndarray
-    rate_rows: np.ndarray
-    ead_rows: np.ndarray
-    coll_share: dict
-    loadings: np.ndarray           # (S, k) per sd
-    concept_index: dict
-    gcc_weights: dict
-    driver: tuple | None           # (concept, multiplier)
-    ladder_lp: dict                # rating type -> log midpoints
-    rtype: np.ndarray
-    grade0: np.ndarray
+    pb: np.ndarray                 # base 12-month PD
+    elig: np.ndarray               # Stage 1 rows that can move
+    p12: float
+    k: float
+    coll: list                     # collateral variables, in path order after the two drivers
+    coll_share: np.ndarray         # (C, n)
     customer: np.ndarray
+    base_total: float = 0.0
+    base_seg: np.ndarray = field(default_factory=lambda: np.zeros(0))
     built_with: dict = field(default_factory=dict)
 
 
 def _year_m(cum, Y: int) -> np.ndarray:
-    """A zero-prepended monthly curve's default probability year by year."""
     c = np.asarray(cum, float)
     out = np.zeros(Y)
     for y in range(Y):
@@ -261,11 +276,10 @@ def _year_m(cum, Y: int) -> np.ndarray:
 
 
 def _pricer(rc: RunContext):
-    """compute_ecl on the run's contracts with a curve per row, LGD of one
-    and no cap: the weights W."""
+    """compute_ecl on the run's contracts with one curve for every row, LGD
+    of one and no cap: the weights W."""
     from ..etl.report import compute_ecl
-    ing = rc.ing
-    frame = ing.copy()
+    frame = rc.ing.copy()
     frame["payment_frequency"] = frame["pay_freq"]
     have = frame["cid"].notna().to_numpy()
     ctx = rc.inputs.ctx.copy(cap=False)
@@ -274,18 +288,16 @@ def _pricer(rc: RunContext):
         f = frame.copy()
         f["stage"] = stage
         out = np.full(len(f), np.nan)
-        r = compute_ecl(ctx, f[have], lgd=np.ones(int(have.sum())),
-                        cum=[cum] * int(have.sum()))
+        r = compute_ecl(ctx, f[have], lgd=np.ones(int(have.sum())), cum=[cum] * int(have.sum()))
         out[have] = r["ecl"].to_numpy()
         return out
     return run
 
 
 def build_proxy(rc: RunContext, progress=None) -> Proxy:
-    """Decompose the book: the weights W for each stage (one pricing per
-    year of the longest contract), the yearly default probabilities of every
-    curve on a grid of PD-model-driver moves (one PD chain rebuild per grid
-    point), and every contract's curve after 0..K notches."""
+    """Decompose the book: the weights W for each stage, and the yearly
+    default probabilities of every curve on a grid of moves in each PD
+    model's driver (one PD chain rebuild per grid point)."""
     from ..etl.report import _KEYSEP
     cfg = rc.cfg.get("risk") or {}
     ing, H = rc.ing, rc.H
@@ -304,329 +316,214 @@ def build_proxy(rc: RunContext, progress=None) -> Proxy:
     W2 = np.zeros((n, Y))
     for y in range(Y):
         t = np.arange(curve_len)
-        cum = np.clip((t - 12 * y) / 12.0, 0.0, 1.0)
-        W2[:, y] = run(2, cum)
+        W2[:, y] = run(2, np.clip((t - 12 * y) / 12.0, 0.0, 1.0))
         tick(f"Weights, year {y + 1}")
     W1 = run(1, np.clip(np.arange(curve_len) / 12.0, 0.0, 1.0))
     tick("Weights, Stage 1")
 
-    # every row's curve key after k notches (k = 0..K-1)
-    mx_ext = int((rc.cfg.get("external") or {}).get("max_notches", 6))
-    K = max(5, mx_ext + 1)
-    rating0 = ing["rating"].astype(str).to_numpy().astype(object)
-    keys = np.empty((n, K), dtype=object)
-    for k in range(K):
-        rat = notch_ratings(rc, rating0, np.ones(n, dtype=bool), k) if k else rating0
-        for i, (pf, r, rt) in enumerate(zip(ing["portfolio"], rat, ing["rating_type"])):
-            t = str(rt)
-            t = "2" if (t.startswith("External") or t in ("2", "2.0")) else "1"
-            b = ctx0.rat2bucket.get(f"{t}{_KEYSEP}{r}")
-            keys[i, k] = None if b is None or (isinstance(b, float) and np.isnan(b)) \
-                else f"{pf}{_KEYSEP}{b}"
+    keys = np.empty(n, dtype=object)
+    for i, (pf, r, rt) in enumerate(zip(ing["portfolio"], ing["rating"].astype(str),
+                                        ing["rating_type"])):
+        t = str(rt)
+        t = "2" if (t.startswith("External") or t in ("2", "2.0")) else "1"
+        b = ctx0.rat2bucket.get(f"{t}{_KEYSEP}{r}")
+        keys[i] = None if b is None or (isinstance(b, float) and np.isnan(b)) else f"{pf}{_KEYSEP}{b}"
 
-    def grid_sets(kind):
-        xs = np.asarray(cfg.get("driver_grid",
-                                [-10, -8, -6, -5, -4, -3, -2, -1, -0.5, 0, 0.5, 1, 2, 3, 4]), float)
+    xs = np.asarray(cfg.get("driver_grid", [-20, -15, -10, -6, -4, -2, -1, 0, 1, 2, 4]), float)
+    pl = rc.cfg.get("pd_link") or {}
+    drv = rc.drivers_internal.get(pl.get("internal", "NONOIL_GDP_QAT"))
+
+    def grid(kind):
+        if (kind == "int" and drv is None) or (kind == "ext" and not rc.drivers_external):
+            return np.array([0.0, 1.0]), [ctx0.stpd, ctx0.stpd]
         sets = []
         for x in xs:
             if x == 0:
                 sets.append(ctx0.stpd)
                 continue
             if kind == "int":
-                c, (col, mult, _) = drv
+                col, mult, _ = drv
                 ch = pd_chain(rc.inputs, rc.report, rc.run_path, weight_mode="hold",
                               mev_deltas={col: [x / mult] * H})
             else:
                 ch = pd_chain(rc.inputs, rc.report, rc.run_path, weight_mode="hold",
                               gcc_deltas={k: [x] * H for k in rc.drivers_external.values()})
+            if not ch.get("ok"):
+                raise RuntimeError(ch.get("reason", "The PD chain could not be rebuilt."))
             sets.append(ch["curves"])
             tick(f"PD chain, {'non-oil GDP' if kind == 'int' else 'GCC growth'} {x:+g}")
-        return xs, sets
+        return xs.copy(), sets
 
-    drv_list = [(c, v) for c, v in rc.drivers_internal.items() if v[2]]
-    drv = drv_list[0] if drv_list else None
-    xs_i, sets_i = grid_sets("int") if drv else (np.array([0.0]), [ctx0.stpd])
-    xs_e, sets_e = grid_sets("ext") if rc.drivers_external else (np.array([0.0]), [ctx0.stpd])
+    xs_i, sets_i = grid("int")
+    xs_e, sets_e = grid("ext")
     G = max(len(xs_i), len(xs_e))
 
-    def pad(xs, sets):
-        # the shorter grid repeats its last point, so one tensor holds both
-        while len(sets) < G:
-            xs = np.append(xs, xs[-1] + 1e-9 * len(sets))
-            sets.append(sets[-1])
-        return xs, sets
-    xs_i, sets_i = pad(xs_i, list(sets_i))
-    xs_e, sets_e = pad(xs_e, list(sets_e))
+    def pad(x_, s_):
+        x_, s_ = list(x_), list(s_)
+        while len(s_) < G:
+            x_.append(x_[-1] + 1e-9 * len(s_))
+            s_.append(s_[-1])
+        return np.array(x_), s_
+    xs_i, sets_i = pad(xs_i, sets_i)
+    xs_e, sets_e = pad(xs_e, sets_e)
 
-    ym_cache: dict = {}
-
-    def ym(j, ext, key):
-        k2 = (j, ext, key)
-        if k2 not in ym_cache:
-            cv = (sets_e if ext else sets_i)[j].get(key)
-            ym_cache[k2] = None if cv is None else _year_m(cv, Y)
-        return ym_cache[k2]
-
-    T = np.full((n, K, G, H), np.nan)
-    R = np.zeros((n, K, G))
-    RM = np.zeros((n, K, G))
+    memo: dict = {}
+    T = np.full((n, G, H), np.nan)
+    R = np.zeros((n, G))
+    RM = np.zeros((n, G))
     ext = rc.external
-    for k in range(K):
-        for j in range(G):
-            M = np.full((n, Y), np.nan)
-            for i in range(n):
-                key = keys[i, k]
-                if key is None:
-                    continue
-                m = ym(j, bool(ext[i]), key)
-                if m is not None:
-                    M[i] = m
-            T[:, k, j, :] = M[:, :H]
-            R[:, k, j] = np.nansum(M[:, H:] * W2[:, H:], axis=1)
-            RM[:, k, j] = np.nansum(M[:, H:], axis=1)
-    tick("Curves by notch and driver")
+    for j in range(G):
+        M = np.full((n, Y), np.nan)
+        for i in range(n):
+            key = keys[i]
+            if key is None:
+                continue
+            e = bool(ext[i])
+            k2 = (j, e, key)
+            if k2 not in memo:
+                cv = (sets_e if e else sets_i)[j].get(key)
+                memo[k2] = None if cv is None else _year_m(cv, Y)
+            if memo[k2] is not None:
+                M[i] = memo[k2]
+        T[:, j, :] = M[:, :H]
+        R[:, j] = np.nansum(M[:, H:] * W2[:, H:], axis=1)
+        RM[:, j] = np.nansum(M[:, H:], axis=1)
+    tick("Curves on the grid")
+    surv = 1.0 - np.concatenate([np.zeros((n, G, 1)), np.cumsum(T, axis=2)[:, :, :-1]], axis=2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        Q = np.where(surv > 1e-12, T / surv, 1.0)
+    Q = np.clip(Q, 0.0, 1.0)
+    SG = 1.0 - np.nansum(T, axis=2)
 
-    # the base: the decomposition must reproduce the engine's own price
-    stage0 = ing["stage"].fillna(2).astype(int).to_numpy()
-    onb = ing["on_balance"].to_numpy(float)
-    cn = ing["collateral_net"].fillna(0.0).to_numpy(float)
     ctx = rc.inputs.ctx
     segs = list(pd.unique(rc.segment))
     sidx = {s: i for i, s in enumerate(segs)}
     srow = np.array([sidx[s] for s in rc.segment])
-
-    cat = list(rc.model.concepts)
-    ci = {c: i for i, c in enumerate(cat)}
-    L = np.zeros((len(segs), len(cat)))
-    driver_c = {c for c, v in rc.drivers_internal.items() if v[2]}
-    ext_name = (rc.cfg.get("factor") or {}).get("external_segment", "External book")
-    for a_, s_ in enumerate(segs):
-        e_ = s_ == ext_name
-        skip = set(rc.drivers_external) if e_ else driver_c
-        for c, b in segment_loadings(rc.cfg, s_, e_).items():
-            if c in ci and c not in skip:
-                L[a_, ci[c]] = b
-
-    from ..stress import frozen_config
-    fz = frozen_config(rc.run_path)
-    prices = ((fz.get("raw") or {}).get("external_gcc_country_prices") or {}) if fz.get("ok") else {}
-    tot = sum(float(np.atleast_1d(v)[0]) for v in prices.values()) or 1.0
-    gw = {c: float(np.atleast_1d(prices.get(country, [0]))[0]) / tot
-          for c, country in rc.drivers_external.items()}
-    lad = {}
-    for r_, v in rc.ladders.items():
-        lp = np.log(v)
-        lad[r_] = (lp[:-1] + lp[1:]) / 2.0
-    rts = ing["rating_type"].map(lambda v: 2 if (str(v).startswith("External")
-                                                  or str(v) in ("2", "2.0")) else 1).to_numpy()
+    j0 = int(np.argmin(np.abs(xs_i)))
+    pb = np.where(ext, T[:, int(np.argmin(np.abs(xs_e))), 0], T[:, j0, 0])
+    s = rc.cfg.get("staging") or {}
+    elig = (rc.stage0 == 1) & np.isfinite(pb) & (pb > 0) & (pb < 1)
+    if s.get("internal_only", True):
+        elig &= ~ext
+    coll = list(rc.coll_share)
     base_ecl = rc.base["ecl"].to_numpy(float)
-    okrow = np.isfinite(base_ecl) & np.isfinite(T[:, 0, 0, 0])
-    P = Proxy(segments=segs, seg_of_row=srow, ok=okrow, stage0=stage0, onb=onb, cnet=cn,
+    P = Proxy(segments=segs, seg_of_row=srow,
+              ok=np.isfinite(base_ecl) & (np.isfinite(T[:, 0, 0]) | (rc.stage0 == 3)),
+              stage0=rc.stage0.copy(), external=ext.copy(),
+              onb=ing["on_balance"].to_numpy(float),
+              cnet=ing["collateral_net"].fillna(0.0).to_numpy(float),
               lgd_base=float(ctx.lgd_base), lgd_floor=float(ctx.lgd_floor),
               stage3_zero=str(ctx.stage3) == "zero", cap=bool(ctx.cap),
-              W1=np.nan_to_num(W1), W2=np.nan_to_num(W2[:, :H]), T=T, R=R, RM=RM,
-              xs_int=xs_i, xs_ext=xs_e, k_rho=np.sqrt(rc.rho / (1 - rc.rho)),
-              base_total=0.0, base_seg=np.zeros(len(segs)),
-              rate_rows=rate_notches(rc, {})["rows"], ead_rows=drawdown(rc, {})[0],
-              coll_share={c: _share(rc, c) for c in rc.coll_share},
-              loadings=L, concept_index=ci, gcc_weights=gw,
-              driver=(drv[0], drv[1][1]) if drv else None, ladder_lp=lad, rtype=rts,
-              grade0=rc.grade0.copy(), customer=ing["customer"].astype(str).to_numpy())
-    D0 = np.zeros((1, H, len(cat)))
-    e0 = _price_paths(P, rc, D0)
+              W1=np.nan_to_num(W1), W2=np.nan_to_num(W2[:, :H]), Q=Q, SG=SG, R=R, RM=RM,
+              xs_int=xs_i, xs_ext=xs_e, pb=pb, elig=elig, p12=float(s.get("p12", 0.063)),
+              k=_k(rc.cfg), coll=coll,
+              coll_share=np.vstack([_share(rc, c) for c in coll]) if coll else np.zeros((0, n)),
+              customer=ing["customer"].astype(str).to_numpy())
+    e0 = _price_paths(P, np.zeros((1, H, 2 + len(coll))), np.zeros(1))
     P.base_total = float(e0["ecl"][0].sum())
     P.base_seg = np.bincount(srow, weights=e0["ecl"][0], minlength=len(segs))
     P.built_with = {"pricings": step[0],
-                    "base_gap": P.base_total - float(np.nansum(base_ecl[okrow]))}
+                    "base_gap": P.base_total - float(np.nansum(base_ecl[P.ok]))}
     return P
 
 
-def _share(rc, c):
-    from .transmission import rc_share
-    return rc_share(rc, c)
-
-
 def _interp_index(x, xs):
-    """Each value's grid cell and its weight towards the next point, clamped
-    at the grid's ends."""
     x = np.clip(np.asarray(x, float), xs[0], xs[-1])
     j = np.clip(np.searchsorted(xs, x, side="right") - 1, 0, len(xs) - 2)
     w = (x - xs[j]) / np.maximum(xs[j + 1] - xs[j], 1e-12)
     return j, w
 
 
-def _path_inputs(P: Proxy, rc: RunContext, D: np.ndarray, on: set) -> dict:
-    """What each path does to each channel."""
-    n_p, H = D.shape[0], rc.H
-    ci = P.concept_index
-    sd = np.array([_sd(rc, c) for c in rc.model.concepts])
-    rcfg = rc.cfg.get("rates") or {}
-    D = D.copy()
-    v, f = rcfg.get("variable"), rcfg.get("follows")
-    rv = D[:, :, ci[v]].copy() if v in ci else np.zeros((n_p, H))
-    if f in ci:
-        none = ~np.any(rv != 0, axis=1)
-        rv[none] = D[none][:, :, ci[f]]
-        if v in ci:
-            D[none, :, ci[v]] = rv[none]
-    out = {}
-    out["d_int"] = (D[:, :, ci[P.driver[0]]] / P.driver[1]) if (P.driver and P.driver[0] in ci
-                                                                and "drivers" in on) \
-        else np.zeros((n_p, H))
-    g = np.zeros((n_p, H))
-    if "drivers" in on:
-        for c, w in P.gcc_weights.items():
-            if c in ci:
-                g += w * D[:, :, ci[c]]
-    out["d_ext"] = g
-    out["Z"] = np.einsum("sk,nhk->nsh", P.loadings / sd[None, :], D) if "factor" in on \
-        else np.zeros((n_p, len(P.segments), H))
-    out["k_rate"] = np.clip(np.round(float(rcfg.get("notches_per_point", 0)) *
-                                     np.maximum(0, rv.max(axis=1))), 0, 4).astype(int) \
-        if "rates" in on else np.zeros(n_p, dtype=int)
-    ecfg = rc.cfg.get("external") or {}
-    idx = np.zeros(n_p)
-    if "external" in on:
-        for c, w in (ecfg.get("notches_per_sd") or {}).items():
-            if c in ci:
-                idx += float(w) * np.minimum(0.0, (D[:, :, ci[c]] / _sd(rc, c)).min(axis=1))
-    out["k_ext"] = np.clip(np.round(-idx), 0, int(ecfg.get("max_notches", 6))).astype(int)
-    xcfg = rc.cfg.get("ead") or {}
-    xv = xcfg.get("variable")
-    if "exposure" in on and xv in ci:
-        zc = (D[:, :, ci[xv]] / _sd(rc, xv)).min(axis=1)
-        out["pct"] = np.where(zc < 0, -float(xcfg.get("drawdown_per_sd", 0)) * zc, 0.0)
-    else:
-        out["pct"] = np.zeros(n_p)
-    lv = {}
-    if "collateral" in on:
-        for c in P.coll_share:
-            if c in ci:
-                lvl = np.cumprod(1.0 + D[:, :, ci[c]] / 100.0, axis=1) - 1.0
-                j = np.abs(lvl).argmax(axis=1)
-                lv[c] = 100.0 * lvl[np.arange(n_p), j]
-    out["levels"] = lv
-    return out
-
-
-ALL_CHANNELS = ("drivers", "factor", "staging", "collateral", "rates", "exposure", "external")
-
-
-def _price_paths(P: Proxy, rc: RunContext, D: np.ndarray, on=ALL_CHANNELS,
+def _price_paths(P: Proxy, D: np.ndarray, restr, on=("staging", "collateral"),
                  chunk: int = 64) -> dict:
-    """Every contract's ECL in each path (n_paths x n), and each performing
-    row's stressed 12-month PD (for the credit-loss draws)."""
+    """Every contract's ECL in each path (n_paths x n), and each row's
+    stressed 12-month PD. D is (paths, H, 2 + collateral variables): the
+    internal driver, GCC growth, then each collateral variable."""
     on = set(on)
     n = len(P.onb)
-    H = rc.H
-    K, G = P.T.shape[1], P.T.shape[2]
-    sicr = int((rc.cfg.get("staging") or {}).get("sicr_notches", 3))
-    ecl_all, pd12_all = [], []
+    H = P.Q.shape[2]
+    G = P.Q.shape[1]
+    restr = np.broadcast_to(np.asarray(restr, float), (D.shape[0],))
     ar = np.arange(n)
+    ecl_all, pd12_all = [], []
     for c0 in range(0, D.shape[0], chunk):
         Dc = D[c0:c0 + chunk]
-        x = _path_inputs(P, rc, Dc, on)
+        rc_ = restr[c0:c0 + chunk]
         npth = Dc.shape[0]
-        ji, wi = _interp_index(x["d_int"], P.xs_int)          # (p, H)
-        je, we = _interp_index(x["d_ext"], P.xs_ext)
-        ext = rc.external
-        jj = np.where(ext[None, :, None], je[:, None, :], ji[:, None, :])   # (p, n, H)
-        ww = np.where(ext[None, :, None], we[:, None, :], wi[:, None, :])
-        kk = np.zeros((npth, n), dtype=int)
-        kk[:, P.rate_rows] = x["k_rate"][:, None]
-        kk[:, ext] = np.maximum(kk[:, ext], x["k_ext"][:, None])
-        kk = np.minimum(kk, K - 1)
+        ji, wi = _interp_index(Dc[:, :, 0], P.xs_int)
+        je, we = _interp_index(Dc[:, :, 1], P.xs_ext)
+        jj = np.where(P.external[None, :, None], je[:, None, :], ji[:, None, :])
+        ww = np.where(P.external[None, :, None], we[:, None, :], wi[:, None, :])
         hh = np.arange(H)[None, None, :]
         I = ar[None, :, None]
-
-        def gather(k):
-            a = P.T[I, k[:, :, None], jj, hh]
-            b = P.T[I, k[:, :, None], np.minimum(jj + 1, G - 1), hh]
-            return (1 - ww) * a + ww * b
-        m_k = gather(kk)
-        m_0 = gather(np.zeros_like(kk))[:, :, 0] if "staging" in on else None
-        # the credit factor's probit shift, year by year
-        Zr = x["Z"][:, P.seg_of_row, :]                       # (p, n, H)
-        sh = -P.k_rho[None, :, None] * Zr
-
-        def shift(m, s):
-            mm = np.clip(m, 1e-12, 1 - 1e-12)
-            out = norm.cdf(norm.ppf(mm) + s)
-            return np.where(np.isfinite(m) & (m > 0), out, np.nan_to_num(m))
-        mk = shift(m_k, sh) if "factor" in on else m_k
-        stage = np.tile(P.stage0, (npth, 1))
-        if "staging" in on:
-            p12 = shift(m_0, sh[:, :, 0]) if "factor" in on else m_0
-            grade = P.grade0[None, :].repeat(npth, axis=0).copy()
-            for r_, mids in P.ladder_lp.items():
-                rows = P.rtype == r_
-                if rows.any():
-                    grade[:, rows] = np.searchsorted(mids, np.log(np.clip(
-                        np.nan_to_num(p12[:, rows], nan=1e-4), 1e-9, 1.0)))
-            implied = np.maximum(0, grade - P.grade0[None, :])
-            to2 = (P.stage0[None, :] == 1) & (implied + kk >= sicr)
-            stage = np.where(to2, 2, stage)
-        onb = np.tile(P.onb, (npth, 1))
-        if "exposure" in on:
-            onb = onb * (1.0 + np.where(P.ead_rows[None, :], x["pct"][:, None] / 100.0, 0.0))
-        cn = np.tile(P.cnet, (npth, 1))
-        mult = np.ones((npth, n))
-        for c, lvl in x["levels"].items():
-            mult += P.coll_share[c][None, :] * lvl[:, None] / 100.0
-        cn = np.maximum(0.0, cn * mult)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            lgd = np.where(onb > 0, P.lgd_base * np.maximum(P.lgd_floor, (onb - cn) / onb), 1.0)
-        e = onb / np.where(P.onb[None, :] != 0, P.onb[None, :], 1.0)
-        # a cumulative PD cannot pass 1: once it reaches it, later years add
-        # nothing (the StPD's cap, and shift_curve's)
-        mk = np.nan_to_num(mk)
-        S = np.cumsum(mk, axis=2)
-        mk = np.clip(np.minimum(mk, 1.0 - (S - mk)), 0.0, None)
-        SH = mk.sum(axis=2)
+        q = (1 - ww) * P.Q[I, jj, hh] + ww * P.Q[I, np.minimum(jj + 1, G - 1), hh]
+        q = np.clip(np.nan_to_num(q), 0.0, 1.0)
+        surv = np.concatenate([np.ones((npth, n, 1)), np.cumprod(1.0 - q, axis=2)[:, :, :-1]],
+                              axis=2)
+        m = surv * q
+        SH = surv[:, :, -1] * (1.0 - q[:, :, -1])           # survival to the end of year H
         jH, wH = jj[:, :, -1], ww[:, :, -1]
         jH1 = np.minimum(jH + 1, G - 1)
-        rest = (1 - wH) * P.R[ar[None, :], kk, jH] + wH * P.R[ar[None, :], kk, jH1]
-        rmass = (1 - wH) * P.RM[ar[None, :], kk, jH] + wH * P.RM[ar[None, :], kk, jH1]
+        lin = lambda A: (1 - wH) * A[ar[None, :], jH] + wH * A[ar[None, :], jH1]
+        sg = lin(P.SG)
         with np.errstate(divide="ignore", invalid="ignore"):
-            room = np.where(rmass > 0, np.clip((1.0 - SH) / rmass, 0.0, 1.0), 1.0)
+            scale = np.where(sg > 1e-12, SH / sg, 0.0)
+        rest = lin(P.R) * scale
+        rmass = lin(P.RM) * scale
+        with np.errstate(divide="ignore", invalid="ignore"):
+            room = np.where(rmass > 0, np.clip(SH / rmass, 0.0, 1.0), 1.0)
         rest = rest * room
-        s1 = mk[:, :, 0] * P.W1[None, :]
-        s2 = (mk * P.W2[None, :, :]).sum(axis=2) + rest
-        ecl = lgd * e * np.where(stage == 1, s1, s2)
-        s3 = np.where(onb > 0, onb, 0.0) if not P.stage3_zero else np.zeros_like(onb)
-        ecl = np.where(stage == 3, s3, ecl)
+        s1 = m[:, :, 0] * P.W1[None, :]
+        s2 = (m * P.W2[None, :, :]).sum(axis=2) + rest
+        dp = np.zeros((npth, n))
+        if "staging" in on:
+            ps = m[:, :, 0]
+            e = P.elig[None, :] & (ps > 0) & (ps < 1)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                dz = np.where(e, norm.ppf(np.clip(ps, 1e-12, 1 - 1e-12))
+                              - norm.ppf(np.clip(P.pb, 1e-12, 1 - 1e-12))[None, :], 0.0)
+            dp = np.where(e, np.clip(norm.cdf(norm.ppf(P.p12) + P.k * dz) - P.p12
+                                     + rc_[:, None], 0.0, 1.0), 0.0)
+        cn = np.tile(P.cnet, (npth, 1))
+        if "collateral" in on and P.coll:
+            mult = np.ones((npth, n))
+            for ci in range(len(P.coll)):
+                lvl = np.cumprod(1.0 + Dc[:, :, 2 + ci] / 100.0, axis=1) - 1.0
+                tr = np.minimum(0.0, lvl.min(axis=1))
+                mult += P.coll_share[ci][None, :] * tr[:, None]
+            cn = np.maximum(0.0, cn * mult)
+        onb = P.onb[None, :]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            lgd = np.where(onb > 0, P.lgd_base * np.maximum(P.lgd_floor, (onb - cn) / onb), 1.0)
+        ecl = lgd * np.where(P.stage0[None, :] == 1, s1 + dp * (s2 - s1), s2)
+        s3 = np.where(onb > 0, onb, 0.0) if not P.stage3_zero else np.zeros_like(cn)
+        ecl = np.where(P.stage0[None, :] == 3, s3, ecl)
         if P.cap:
             ecl = np.where(onb > 0, np.minimum(ecl, onb), ecl)
         ecl = np.where(P.ok[None, :], ecl, 0.0)
         ecl_all.append(ecl)
-        pd12_all.append(mk[:, :, 0])
+        pd12_all.append(m[:, :, 0])
     return {"ecl": np.vstack(ecl_all), "pd12": np.vstack(pd12_all)}
 
 
-def proxy_eval(P: Proxy, rc: RunContext, D: np.ndarray, channels: bool = False,
+def proxy_eval(P: Proxy, D: np.ndarray, restr=0.0, channels: bool = False,
                rows: np.ndarray | None = None) -> dict:
-    """The change in ECL for a batch of deviation paths D (n x H x k, native
-    units, the model's concepts): in total and by segment, and -- with
-    ``channels`` -- each channel's part, added in the waterfall's order."""
-    r = _price_paths(P, rc, D)
+    """The change in ECL for a batch of paths: in total and by segment, and
+    -- with ``channels`` -- each channel's part, added in the waterfall's
+    order."""
+    r = _price_paths(P, D, restr)
     S = len(P.segments)
     by = np.vstack([np.bincount(P.seg_of_row, weights=e, minlength=S) for e in r["ecl"]]) \
         - P.base_seg[None, :]
     out = {"total": by.sum(axis=1), "by_segment": by, "pd12": r["pd12"]}
     if channels:
         sel = np.arange(D.shape[0]) if rows is None else rows
-        order = [("PD model drivers", {"drivers"}),
-                 ("Credit factor", {"drivers", "factor"}),
-                 ("Ratings and stages", {"drivers", "factor", "staging"}),
-                 ("Collateral", {"drivers", "factor", "staging", "collateral"}),
-                 ("Rates", {"drivers", "factor", "staging", "collateral", "rates"}),
-                 ("Exposure", {"drivers", "factor", "staging", "collateral", "rates",
-                               "exposure"}),
-                 ("External book", set(ALL_CHANNELS))]
+        rs = np.broadcast_to(np.asarray(restr, float), (D.shape[0],))[sel]
         prev = np.zeros(len(sel))
         ch = {}
-        for name, on in order:
-            t = _price_paths(P, rc, D[sel], on)["ecl"].sum(axis=1) - P.base_total
+        for name, on in (("PD model", ()), ("Stage moves", ("staging",)),
+                         ("Collateral", ("staging", "collateral"))):
+            t = _price_paths(P, D[sel], rs, on)["ecl"].sum(axis=1) - P.base_total
             ch[name] = t - prev
             prev = t
         out["channels"] = ch
@@ -634,18 +531,37 @@ def proxy_eval(P: Proxy, rc: RunContext, D: np.ndarray, channels: bool = False,
     return out
 
 
+def paths_matrix(rc: RunContext, P: Proxy, paths: dict) -> np.ndarray:
+    """One path set (variable -> deviations) as the proxy reads it."""
+    ch = channel_paths(rc, paths)
+    cols = [ch["internal"], ch["external"]] + [ch[c] for c in P.coll]
+    return np.stack(cols, axis=1)[None, :rc.H, :]
+
+
+def _draws(rc: RunContext, P: Proxy, n: int, seed: int) -> np.ndarray:
+    A = rc.system.draw(n, rc.H, seed=seed)
+    idx = {v: i for i, v in enumerate(rc.system.order)}
+    pl = rc.cfg.get("pd_link") or {}
+    out = np.zeros((n, rc.H, 2 + len(P.coll)))
+    for j, v in enumerate([pl.get("internal", "NONOIL_GDP_QAT"), pl.get("external", "GDP_GCC")]
+                          + P.coll):
+        if v in idx:
+            out[:, :, j] = A[:, idx[v], :]
+    return out
+
+
 def ecl_at_risk(rc: RunContext, P: Proxy | None = None, n: int | None = None,
                 seed: int | None = None, threshold: float | None = None,
                 scenarios=None, progress=None) -> dict:
     """The distribution of the provision (and of the year's credit loss)
-    over ``n`` five-year paths drawn from the macro model."""
+    over ``n`` five-year paths drawn from the macro system."""
     cfg = rc.cfg.get("risk") or {}
     n = int(n or cfg.get("paths", 2000))
-    seed = int(seed or cfg.get("seed", 20261023))
+    seed = int(seed or cfg.get("seed", 20261027))
     P = P or build_proxy(rc, progress=progress)
-    D = rc.model.simulate(n, rc.H, seed=seed, bootstrap=bool(cfg.get("bootstrap", True)))
-    ev = proxy_eval(P, rc, D)
-    base = float(np.nansum(rc.base["ecl"]))
+    D = _draws(rc, P, n, seed)
+    ev = proxy_eval(P, D)
+    base = rc.base_total
     change = ev["total"]
     ecl = base + change
     pcts = [float(x) for x in cfg.get("percentiles", [95, 99])]
@@ -668,14 +584,11 @@ def ecl_at_risk(rc: RunContext, P: Proxy | None = None, n: int | None = None,
                         "tail_change": ev["by_segment"][tailm].mean(axis=0)})
     tot_tail = float(seg["tail_change"].sum())
     seg["tail_share_pct"] = 100 * seg["tail_change"] / tot_tail if tot_tail else np.nan
-
-    # the channels, on the tail paths and on a sample for the mean
     tail_idx = np.where(tailm)[0]
     samp = np.arange(0, n, max(1, n // 200))
-    chs = proxy_eval(P, rc, D, channels=True, rows=np.unique(np.concatenate([tail_idx, samp])))
+    chs = proxy_eval(P, D, channels=True, rows=np.unique(np.concatenate([tail_idx, samp])))
     sel = chs["channel_rows"]
-    in_tail = np.isin(sel, tail_idx)
-    in_samp = np.isin(sel, samp)
+    in_tail, in_samp = np.isin(sel, tail_idx), np.isin(sel, samp)
     chan = pd.DataFrame({"channel": list(chs["channels"]),
                          "mean_change": [float(v[in_samp].mean()) for v in chs["channels"].values()],
                          "tail_change": [float(v[in_tail].mean()) if in_tail.any() else np.nan
@@ -715,130 +628,126 @@ def ecl_at_risk(rc: RunContext, P: Proxy | None = None, n: int | None = None,
                                    "tail_loss": Lmat[tl].mean(axis=0) if tl.any() else 0.0})
                      .sort_values("tail_loss", ascending=False).head(25).reset_index(drop=True))
     named = []
-    for s in (scenarios if scenarios is not None else library()):
-        d = float(proxy_eval(P, rc, _paths_matrix(rc, s))["total"][0])
-        named.append({"scenario": s.name, "proxy_change": d,
-                      "percentile": float(100 * np.mean(change <= d))})
+    for s in (scenarios if scenarios is not None else library(rc.H)):
+        d = float(proxy_eval(P, paths_matrix(rc, P, scenario_paths(s, rc.system, rc.H)["paths"]),
+                             s.restructured)["total"][0])
+        named.append({"id": s.id, "scenario": s.name, "category": s.category,
+                      "proxy_change": d, "percentile": float(100 * np.mean(change <= d))})
     out = {"ok": True, "paths": n, "seed": seed, "base": base, "ecl": ecl, "change": change,
            "summary": pd.DataFrame(rows),
            "by_segment": seg.sort_values("tail_change", ascending=False).reset_index(drop=True),
            "by_channel": chan, "named": pd.DataFrame(named), "credit_loss": loss,
            "loss_summary": pd.DataFrame(loss_rows), "customers": cust_tail,
-           "expected_loss": el, "proxy": P}
+           "expected_loss": el}
     if threshold is not None:
         out["p_exceed"] = float(np.mean(ecl > float(threshold)))
     return out
 
 
-def _paths_matrix(rc: RunContext, s) -> np.ndarray:
-    sp = scenario_paths(s, rc.model, rc.H)["paths"]
-    Ds = np.zeros((1, rc.H, len(rc.model.concepts)))
-    ci = {c: i for i, c in enumerate(rc.model.concepts)}
-    for c, v in sp.items():
-        if c in ci:
-            Ds[0, :, ci[c]] = np.asarray(v, float)[:rc.H]
-    return Ds
-
-
 def proxy_check(rc: RunContext, P: Proxy, scenarios=None) -> pd.DataFrame:
     """The proxy against full repricing on the named scenarios."""
     rows = []
-    for s in (scenarios if scenarios is not None else library()):
-        prox = float(proxy_eval(P, rc, _paths_matrix(rc, s))["total"][0])
-        full = transmit(rc, s, waterfall=False)
-        if not full.get("ok"):
-            continue
-        rows.append({"scenario": s.name, "full": full["delta"], "proxy": prox,
-                     "gap": prox - full["delta"],
-                     "gap_pct_of_full": 100 * (prox - full["delta"]) / full["delta"]
-                     if full["delta"] else np.nan})
+    for s in (scenarios if scenarios is not None else library(rc.H)):
+        sim = scenario_paths(s, rc.system, rc.H)
+        prox = float(proxy_eval(P, paths_matrix(rc, P, sim["paths"]), s.restructured)["total"][0])
+        full = _total(rc, s)["change"]
+        rows.append({"id": s.id, "scenario": s.name, "full": full, "proxy": prox,
+                     "gap": prox - full,
+                     "gap_pct_of_full": 100 * (prox - full) / full if full else np.nan})
     return pd.DataFrame(rows)
 
 
 # ----------------------------------------------------------------- reverse --
-def reverse(rc: RunContext, P: Proxy, target: float, max_iter: int = 40,
-            confirm: bool = True) -> dict:
-    """The most likely path set -- the one nearest the baseline in the joint
-    history -- whose change in ECL is ``target``. Linearise the proxy, step
-    along the covariance-weighted gradient (the most likely direction for a
-    linear loss), scale to the target, then confirm with full repricing."""
-    H, k = rc.H, len(rc.model.concepts)
-    sd = np.array([rc.model.sd[c] for c in rc.model.concepts])
-    _, C = rc.model.stacked(H)
-    eps = 0.5
-    m = H * k
-    Dp = np.zeros((2 * m, H, k))
-    for j in range(m):
-        h, i = divmod(j, k)
-        Dp[2 * j, h, i] = eps * sd[i]
-        Dp[2 * j + 1, h, i] = -eps * sd[i]
-    f = proxy_eval(P, rc, Dp)["total"]
-    g = (f[0::2] - f[1::2]) / (2 * eps)                 # per sd, stacked h*k + i
-    if not np.any(g != 0):
-        return {"ok": False, "reason": "No macro variable moves this book."}
-    direction = C @ g
-    direction = direction / np.sqrt(g @ C @ g)          # unit Mahalanobis length
-
-    def at(a):
-        x = a * direction
-        D = (x.reshape(H, k) * sd)[None, :, :]
-        return float(proxy_eval(P, rc, D)["total"][0]), D[0]
-
-    lo, hi = 0.0, 1.0
-    while at(hi)[0] < target and hi < 64:
-        hi *= 2
-    if at(hi)[0] < target:
-        return {"ok": True, "found": False, "reason": "No plausible macro path reaches "
-                "that loss through the channels configured.", "max_change": at(hi)[0],
-                "distance": hi}
-    for _ in range(max_iter):
-        mid = (lo + hi) / 2
-        if at(mid)[0] >= target:
-            hi = mid
+def _solve(f, target: float, hi: float = 10.0, grid: int = 40) -> float | None:
+    """The smallest scale in (0, hi] where f reaches target, or None."""
+    xs = np.linspace(0, hi, grid + 1)[1:]
+    vals = np.array([f(x) for x in xs])
+    hit = np.where(vals >= target)[0]
+    if not len(hit):
+        return None
+    j = int(hit[0])
+    lo_, hi_ = (0.0 if j == 0 else xs[j - 1]), xs[j]
+    for _ in range(40):
+        mid = (lo_ + hi_) / 2
+        if f(mid) >= target:
+            hi_ = mid
         else:
-            lo = mid
-        if hi - lo < 1e-4:
+            lo_ = mid
+        if hi_ - lo_ < 1e-4:
             break
-    a = hi
-    prox, D = at(a)
+    return float(hi_)
 
-    def full_at(a_):
-        _, D_ = at(a_)
-        p_ = {c: D_[:, j] for j, c in enumerate(rc.model.concepts)}
-        r_ = transmit(rc, Scenario(name="Reverse stress", knock_on=False),
-                      waterfall=True, paths=p_)
-        return (float(r_["delta"]) if r_.get("ok") else float("nan")), r_, D_
 
-    full = None
-    if confirm:
-        # the proxy found the direction and a first scale; full repricing
-        # settles the scale (secant steps on the distance along it)
-        fa, full, D = full_at(a)
-        pts = [(0.0, 0.0), (a, fa)]
-        for _ in range(6):
-            if not np.isfinite(fa) or abs(fa - target) <= 0.01 * abs(target):
+def _scaled(s: Scenario, a: float, H: int) -> Scenario:
+    return Scenario(name=s.name, main={v: [None if x is None else a * x for x in p]
+                                       for v, p in s.given(H).items()},
+                    linked=s.linked, restructured=min(1.0, a * s.restructured))
+
+
+def reverse(rc: RunContext, P: Proxy, target: float, scenarios=None, n: int | None = None,
+            seed: int | None = None, confirm: int = 3, max_scale: float = 10.0) -> dict:
+    """What it takes to raise the provision by ``target``:
+
+    * each scenario scaled -- the factor its main variables (and deferral
+      share) must be multiplied by, smallest first, the closest ones
+      confirmed by full repricing;
+    * each variable alone -- the adverse shock in year 1, with its linked
+      effects, in standard deviations and in its own unit;
+    * how often the macro system's paths raise it that much."""
+    H = rc.H
+    scns = list(scenarios if scenarios is not None else library(H))
+    srows = []
+    for s in scns:
+        sim = scenario_paths(s, rc.system, H)
+        D1 = paths_matrix(rc, P, sim["paths"])
+
+        def f(a, D1=D1, r=s.restructured):
+            return float(proxy_eval(P, a * D1, min(1.0, a * r))["total"][0])
+        a = _solve(f, target, max_scale)
+        srows.append({"id": s.id, "scenario": s.name, "category": s.category,
+                      "scale": a, "at_one": f(1.0), "full_change": None})
+    tab = pd.DataFrame(srows)
+    found = tab[tab["scale"].notna()].sort_values("scale")
+    for i in found.index[:confirm]:
+        s = next(x for x in scns if x.id == tab.at[i, "id"] and x.name == tab.at[i, "scenario"])
+        a = float(tab.at[i, "scale"])
+        pts = []
+        for _ in range(4):
+            fa = _total(rc, _scaled(s, a, H))["change"]
+            pts.append((a, fa))
+            if abs(fa - target) <= 0.01 * abs(target) or len(pts) > 3:
                 break
-            (a0, f0), (a1, f1) = pts[-2], pts[-1]
-            a_new = a1 + (target - f1) * (a1 - a0) / (f1 - f0) if f1 != f0 else a1 * 1.2
-            a_new = float(np.clip(a_new, 0.25 * a1, 4.0 * a1))
-            fa, full, D = full_at(a_new)
-            pts.append((a_new, fa))
-            a = a_new
-        full = full if full and full.get("ok") else None
-    years = list(range(rc.first_year, rc.first_year + H))
-    tab = []
-    for j, c in enumerate(rc.model.concepts):
-        if np.max(np.abs(D[:, j])) < 1e-6 * max(1.0, sd[j]):
+            if len(pts) == 1:
+                a2 = a * target / fa if fa > 0 else a * 1.2
+            else:
+                (a0, f0), (a1, f1) = pts[-2], pts[-1]
+                a2 = a1 + (target - f1) * (a1 - a0) / (f1 - f0) if f1 != f0 else a1 * 1.1
+            a = float(np.clip(a2, 0.5 * pts[-1][0], 2.0 * pts[-1][0]))
+        tab.at[i, "scale"] = pts[-1][0]
+        tab.at[i, "full_change"] = pts[-1][1]
+    tab = tab.sort_values("scale", na_position="last").reset_index(drop=True)
+
+    vrows = []
+    for v in rc.system.order:
+        sd = rc.system.sd(v)
+        if not np.isfinite(sd) or sd <= 0:
             continue
-        tab.append({"concept": c, "label": _label(c),
-                    "worst_sd": float(D[:, j][np.argmax(np.abs(D[:, j]))] / sd[j]),
-                    **{str(y): float(D[h, j]) for h, y in enumerate(years)}})
-    tab = pd.DataFrame(tab)
-    if len(tab):
-        tab = tab.reindex(tab["worst_sd"].abs().sort_values(ascending=False).index)
-    return {"ok": True, "found": True, "target": target, "distance": a,
-            "probability": float(norm.sf(a)), "one_in": float(1 / norm.sf(a)) if norm.sf(a) > 0
-            else float("inf"), "proxy_change": prox,
-            "full_change": full["delta"] if full else None,
-            "proxy_at_first_scale": prox,
-            "paths": tab.reset_index(drop=True), "result": full}
+        unit_scn = _one(rc, v, 1.0, "one_year", True)
+        sim = scenario_paths(unit_scn, rc.system, H)
+        D1 = paths_matrix(rc, P, sim["paths"])
+
+        def g(a, D1=D1):
+            return float(proxy_eval(P, a * D1)["total"][0])
+        a = _solve(g, target, max_scale)
+        vrows.append({"variable": v, "label": rc.system.label(v), "unit": rc.system.unit(v),
+                      "size_sd": a, "move": None if a is None else
+                      a * rc.system.adverse(v) * sd, "at_one_sd": g(1.0)})
+    vt = pd.DataFrame(vrows).sort_values("size_sd", na_position="last").reset_index(drop=True)
+
+    cfg = rc.cfg.get("risk") or {}
+    n = int(n or cfg.get("paths", 2000))
+    seed = int(seed or cfg.get("seed", 20261027))
+    ch = proxy_eval(P, _draws(rc, P, n, seed))["total"]
+    p = float(np.mean(ch >= target))
+    return {"ok": True, "target": float(target), "scenarios": tab, "variables": vt,
+            "probability": p, "one_in": (1.0 / p) if p > 0 else None, "paths": n}

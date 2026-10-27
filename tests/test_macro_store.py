@@ -354,7 +354,7 @@ class TestMacroModel:
         assert all(np.allclose(v, 0) for v in c.values())
         assert model.severity({})["probability"] == 1.0
 
-    def test_knock_on_is_linear_and_severity_symmetric(self, model):
+    def test_linked_effects_are_linear_and_severity_symmetric(self, model):
         a = model.condition({"OIL_PRICE": [-20, 0, 0, 0, 0]})
         b = model.condition({"OIL_PRICE": [-40, 0, 0, 0, 0]})
         assert np.allclose(2 * a["GDP_QAT"], b["GDP_QAT"])

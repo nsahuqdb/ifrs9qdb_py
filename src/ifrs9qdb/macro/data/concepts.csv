@@ -21,7 +21,7 @@ GOV_SPEND_QAT,Qatar government spending growth,% change,pct_change,IMF:WEO:QAT:G
 GOV_BALANCE_QAT,Qatar fiscal balance (% of GDP),% of GDP,none,IMF:WEO:QAT:GGXCNL_NGDP*|DM:WEO:QAT:GGXCNL_NGDP:*|IMF:FM:QAT:*GGXCNL_G01_GDP*,,no,0.6,6.0
 CPI_QAT,Qatar inflation,% change,none,IMF:WEO:QAT:PCPIPCH*|DM:WEO:QAT:PCPIPCH:*,,yes,0.3,2.0
 CREDIT_QAT,Qatar private credit growth,% change,pct_change,QCB:CREDIT_PRIVATE:QAT:*|name~[Cc]laims on (the )?[Pp]rivate [Ss]ector@IMF:MFS_ODC:QAT:*,VAR_QATAR_DOMESTIC_CREDIT_GROWTH,yes,0.3,6.0
-PROPERTY_QAT,Qatar real estate price index,% change,pct_change,QCB:REPI:QAT:*|NPC:REPI:QAT:*|name~[Rr]eal [Ee]state@*:*:QAT:*,VAR_QATAR_REAL_ESTATE_INDEX_GROWTH,yes,0.3,8.0
+PROPERTY_QAT,Qatar real estate price index,% change,pct_change,QCB:REPI:QAT:*|NPC:REPI:QAT:*|STATIC:REPI:QAT:*|name~[Rr]eal [Ee]state@*:*:QAT:*,VAR_QATAR_REAL_ESTATE_INDEX_GROWTH,yes,0.3,8.0
 EQUITY_QAT,Qatar stock market index,% change,pct_change,MARKET:QE_INDEX:QAT:*|QCB:QE_INDEX:QAT:*,,no,0.0,20.0
 VISITORS_QAT,Qatar visitor arrivals,% change,pct_change,NPC:VISITORS:QAT:*,,no,0.2,20.0
 GDP_CHN,China real GDP growth,% change,none,IMF:WEO:CHN:NGDP_RPCH*|DM:WEO:CHN:NGDP_RPCH:*,,yes,0.3,2.0

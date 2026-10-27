@@ -6,7 +6,9 @@
     store       the vintaged store on disk
     fetch       one refresh of the store
     quarter     a new quarter's config inputs from the store, into a draft
-    var         the macro model behind a scenario's knock-on effects
+    system      the linked effects: how a scenario's main variables move the
+                others (a recursive system estimated on outturns)
+    var         an earlier macro model (a Bayesian VAR), kept for comparison
 
 None of it is read by a run: the booked provision is priced from the run's
 frozen config alone.

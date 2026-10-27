@@ -100,16 +100,20 @@ src/ifrs9qdb/
                   vintages;
                   quarter.py fills a new quarter's forecasts into a draft
                   config version (five years from the first unconfirmed
-                  year); var.py the macro model (a Bayesian VAR) that gives
-                  a shock its knock-on effects and its severity
-  stresstest/     macro scenarios: shocks on any variable, several at once
-                  (scenarios.py, with a library), their path into the
-                  provision -- PD model drivers, a credit factor by sector,
-                  ratings and stages, collateral, rates, drawn exposure, the
-                  external book (transmission.py, stresstest/data/stress.yml)
-                  -- and the risk measures (risk.py): the split by shock,
-                  sensitivities, ECL at risk over simulated paths with
-                  customer default draws, reverse stress. Prices through
+                  year); system.py the linked effects: a recursive system
+                  (macro/data/system.yml) estimated on outturns with
+                  Bayesian model averaging and sign restrictions, that moves
+                  a scenario's other variables with its main ones
+  stresstest/     macro scenarios: a few main variables set year by year
+                  (scenarios.py, saved to an SQLite database with every
+                  version), the library of historical, supervisory and
+                  what-if scenarios with the episode behind each
+                  (library.py, stresstest/data/library.yml), their path into
+                  the provision -- the PD model, stage moves, property
+                  collateral (transmission.py, stresstest/data/stress.yml)
+                  -- and the risk measures (risk.py): the split by main
+                  variable, sensitivities, ECL at risk over simulated paths
+                  with customer default draws, reverse stress. Prices through
                   stress.py's reprice, so an empty scenario is the run
   validation/     153 run checks with the R engine's ids -- input,
                   transform, derived, pricing readiness (READY) and report

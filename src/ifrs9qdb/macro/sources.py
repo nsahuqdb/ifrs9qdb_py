@@ -906,6 +906,7 @@ def static_seed(static_dir) -> tuple[pd.DataFrame, pd.DataFrame]:
         non_oil_gdp_history.csv     STATIC:NONOIL:QAT:NGDP_NOIL_RPCH:A
         gcc_real_gdp_growth.csv     STATIC:GCC_GDP:<ISO>:NGDP_RPCH:A
         gcc_gdp_current_prices.csv  STATIC:GCC_NGDPD:<ISO>:NGDPD:A
+        qatar_repi_index.csv        STATIC:REPI:QAT:REPI_IX:A
     """
     d = Path(static_dir)
     by_name = {r["name"]: r["code"] for _, r in _countries().iterrows()}
@@ -925,6 +926,15 @@ def static_seed(static_dir) -> tuple[pd.DataFrame, pd.DataFrame]:
         srows.append({"series_id": sid, "source": "STATIC", "dataset": "NONOIL",
                       "country": "QAT", "indicator": "NGDP_NOIL_RPCH", "freq": "A",
                       "name": "Non-oil real GDP growth", "unit": "Percent change",
+                      "last_actual": str(int(t["year"].max())), "release": "package"})
+        orows += [{"series_id": sid, "period": str(int(y)), "value": float(v)}
+                  for y, v in zip(t["year"], t["value"]) if pd.notna(v)]
+    t = read("qatar_repi_index.csv")
+    if t is not None and {"year", "value"} <= set(t.columns):
+        sid = series_id("STATIC", "REPI", "QAT", "REPI_IX", "A")
+        srows.append({"series_id": sid, "source": "STATIC", "dataset": "REPI",
+                      "country": "QAT", "indicator": "REPI_IX", "freq": "A",
+                      "name": "Real estate price index (2009 = 100)", "unit": "Index",
                       "last_actual": str(int(t["year"].max())), "release": "package"})
         orows += [{"series_id": sid, "period": str(int(y)), "value": float(v)}
                   for y, v in zip(t["year"], t["value"]) if pd.notna(v)]

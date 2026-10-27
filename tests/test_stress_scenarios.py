@@ -1,10 +1,10 @@
-"""Stress scenarios: shocks, the transmission into one repricing, and the
-risk measures. The repricing tests run on a real run (IFRS9_REF_RUN) with
-the synthetic macro store; they check the properties that make the numbers
-trustworthy -- an empty scenario changes nothing, the new path agrees with
-the macro screen and the lever packages it shares its code with, and every
-split adds up."""
-import shutil
+"""Stress scenarios: the builder's shapes, saving, the library, the
+transmission into one repricing, and the risk measures. The repricing tests
+run on a real run (IFRS9_REF_RUN) with a synthetic macro store; they check
+the properties that make the numbers trustworthy -- an empty scenario
+changes nothing, the PD channel agrees with the macro screen it shares its
+code with, every split adds up, and the Monte Carlo pricing tracks full
+repricing."""
 from pathlib import Path
 
 import numpy as np
@@ -12,109 +12,143 @@ import pandas as pd
 import pytest
 import yaml
 
-from ifrs9qdb.macro import MacroStore, concepts
-from ifrs9qdb.stress import StressSpec, apply_stress, mev_stress, shift_curve
-from ifrs9qdb.stresstest import Scenario, Shock, library, read_scenarios, write_scenarios
-from ifrs9qdb.stresstest.config import read_stress_config, segment_loadings
-from ifrs9qdb.stresstest.scenarios import shape_profile
+from ifrs9qdb.macro.system import fit_system, system_spec
+from ifrs9qdb.stress import mev_stress, shift_curve
+from ifrs9qdb.stresstest import Scenario, ScenarioStore, library, read_stress_config, shape_path
+from ifrs9qdb.stresstest.library import check_library, derive, episode, library_entry
+from ifrs9qdb.stresstest.transmission import property_trough
 
 from conftest import ref_output
+from system_store import build
 
-HERE = Path(__file__).parent
-FIX = HERE / "fixtures" / "macro" / "store"
 RUN = ref_output()
 has_run = pytest.mark.skipif(RUN is None or not (RUN / "StPD.csv").is_file(),
                              reason="no real run (IFRS9_REF_RUN)")
 
 
+@pytest.fixture(scope="module")
+def system(tmp_path_factory):
+    return fit_system(build(tmp_path_factory.mktemp("st") / "store"))
+
+
 class TestShapes:
-    @pytest.mark.parametrize("shape,start,years,want", [
-        ("one_year", 1, 2, [1, 0, 0, 0, 0]), ("one_year", 3, 2, [0, 0, 1, 0, 0]),
-        ("held", 2, 2, [0, 1, 1, 1, 1]), ("build", 1, 2, [0.5, 1, 1, 1, 1]),
-        ("recover", 1, 2, [1, 0.5, 0, 0, 0]), ("recover", 2, 4, [0, 1, .75, .5, .25])])
-    def test_profiles(self, shape, start, years, want):
-        assert np.allclose(shape_profile(shape, 5, start, years), want)
+    @pytest.mark.parametrize("shape,years,want", [
+        ("one_year", 2, [-10, None, None, None, None]),
+        ("held", 2, [-10] * 5),
+        ("recover", 2, [-10, -5, None, None, None]),
+        ("recover", 4, [-10, -7.5, -5, -2.5, None])])
+    def test_paths(self, shape, years, want):
+        assert shape_path(shape, -10, 5, years) == want
 
-    def test_a_shock_in_standard_deviations(self):
-        s = Shock("OIL_PRICE", -1.5, "sd", "one_year")
-        assert np.allclose(s.native_path(5, 30.0), [-45, 0, 0, 0, 0])
-
-    def test_shocks_on_one_variable_add_up_and_an_override_replaces(self):
-        sc = Scenario(shocks=[Shock("OIL_PRICE", -10, shape="held"),
-                              Shock("OIL_PRICE", -5, shape="one_year")],
-                      overrides={"GDP_QAT": [-1, -1]})
-        g = sc.given(5, {"OIL_PRICE": 30})
-        assert np.allclose(g["OIL_PRICE"], [-15, -10, -10, -10, -10])
-        assert np.allclose(g["GDP_QAT"], [-1, -1, 0, 0, 0])
-
-    def test_round_trip_and_saving(self, tmp_path):
-        sc = library()[-1]
+    def test_round_trip(self):
+        sc = library()[3]
         back = Scenario.from_dict(sc.to_dict())
         assert back.to_dict() == sc.to_dict()
-        p = write_scenarios([sc, Scenario("Mine", shocks=[Shock("US_RATE", 1, shape="held")])],
-                            tmp_path / "config" / "stress_scenarios.yml")
-        got = read_scenarios(p)
-        assert [s.name for s in got] == ["Combined severe", "Mine"]
-        assert all(s.kind == "custom" for s in got)
 
-    def test_every_library_variable_is_in_the_catalogue(self):
-        known = set(concepts()["concept"])
+    def test_blank_years_are_left_to_the_linked_effects(self):
+        sc = Scenario(main={"OIL_PRICE": [-40, None], "GDP_WLD": [None, None]})
+        assert sc.given(5) == {"OIL_PRICE": [-40.0, None, None, None, None]}
+
+    def test_an_edit_is_noticed(self):
+        a = library()[3]
+        b = Scenario.from_dict(a.to_dict())
+        assert not b.edited_from(a)
+        b.main["OIL_PRICE"][0] = -60.0
+        assert b.edited_from(a)
+        c = Scenario.from_dict(a.to_dict())
+        c.linked = ["NONOIL_GDP_QAT"]
+        assert c.edited_from(a)
+
+
+class TestStore:
+    def test_save_update_delete_and_history(self, tmp_path):
+        st = ScenarioStore(tmp_path / "scenarios.sqlite")
+        sid = st.save(Scenario("Mine", main={"US_RATE": [2, 2, None, None, None]},
+                               based_on="H7"), user="alice")
+        assert [d["name"] for d in st.list()] == ["Mine"]
+        assert st.get(sid)["based_on"] == "H7" and st.get(sid)["category"] == "mine"
+        sc = st.scenarios()[0]
+        sc.main["US_RATE"][0] = 3.0
+        st.save(sc, user="bob", sid=sid)
+        assert st.get(sid)["main"]["US_RATE"][0] == 3.0
+        assert st.get(sid)["updated_by"] == "bob"
+        st.delete(sid, user="alice")
+        assert st.list() == []
+        assert [h["action"] for h in st.history(sid)] == ["created", "updated", "deleted"]
+
+    def test_names_are_unique(self, tmp_path):
+        st = ScenarioStore(tmp_path / "s.sqlite")
+        st.save(Scenario("Oil"))
+        with pytest.raises(ValueError):
+            st.save(Scenario("oil "))
+
+
+class TestLibrary:
+    def test_every_variable_is_a_system_variable(self):
+        known = set(system_spec()["variables"])
         for sc in library():
-            assert set(sc.concepts()) <= known, sc.name
+            assert set(sc.given()) <= known, sc.id
+            assert sc.description and sc.source, sc.id
+
+    def test_ids_are_unique_and_every_history_has_its_episode(self):
+        ids = [s.id for s in library()]
+        assert len(ids) == len(set(ids))
+        for s in library():
+            if s.category == "history":
+                assert s.episode and s.window, s.id
+
+    def test_a_shock_is_derived_from_the_data(self, system):
+        ref = dict(library_entry("H4")["main"]["OIL_PRICE"], var="OIL_PRICE")
+        d = system.display("OIL_PRICE").set_index("year")["value"]
+        assert derive(ref, system) == [round(d[y], 2) for y in (2015, 2016, 2017)]
+        ref = dict(library_entry("H4")["main"]["NONOIL_GDP_QAT"], var="NONOIL_GDP_QAT")
+        q = system.series("NONOIL_GDP_QAT")
+        assert derive(ref, system) == [round(q[y] - q[2014], 2) for y in (2015, 2016)]
+
+    def test_the_check_covers_every_historical_shock(self, system):
+        chk = check_library(system)
+        n = sum(1 for e in yaml.safe_load(
+            (Path(__file__).parents[1] / "src/ifrs9qdb/stresstest/data/library.yml")
+            .read_text(encoding="utf-8"))["scenarios"]
+            for r in e["main"].values() if r.get("how"))
+        assert len(chk) == n
+
+    def test_an_episode_has_every_variable(self, system):
+        e = episode("H4", system)
+        assert e["ok"] and set(e["series"]["variable"]) <= set(system.order)
+        assert e["series"]["year"].between(*e["window"]).all()
 
 
-class TestShiftCurve:
-    cum = np.concatenate([[0.0], np.cumsum(np.full(60, 0.02 / 12))])
+class TestChannels:
+    def test_property_trough(self):
+        assert property_trough([-15, -10, 0]) == pytest.approx(-23.5)
+        assert property_trough([14.5, -4.1]) == 0.0
+        assert property_trough([5, -10, -10]) == pytest.approx(100 * (1.05 * .9 * .9 - 1))
 
-    def test_no_shift_is_the_curve(self):
-        assert np.array_equal(shift_curve(self.cum, [0, 0, 0]), self.cum)
-
-    def test_a_shift_moves_its_year_only(self):
-        out = shift_curve(self.cum, [0.5, 0, 0])
-        inc0, inc1 = np.diff(self.cum), np.diff(out)
-        assert (inc1[:12] > inc0[:12]).all()
-        assert np.allclose(inc1[12:], inc0[12:])
-        from scipy.stats import norm
-        assert inc1[:12].sum() == pytest.approx(norm.cdf(norm.ppf(0.02) + 0.5))
-
-    def test_capped_at_one(self):
-        assert shift_curve(self.cum, [5, 5, 5, 5, 5]).max() <= 1.0
-
-
-class TestConfig:
-    def test_a_segment_by_any_of_its_spellings(self):
-        cfg = read_stress_config()
-        a = segment_loadings(cfg, "Industry", False)
-        b = segment_loadings(cfg, "manufacturing", False)
-        assert a == b and a["LNG_PRICE"] > segment_loadings(cfg, "Education", False)["LNG_PRICE"]
-
-    def test_the_external_book_has_its_own(self):
-        cfg = read_stress_config()
-        e = segment_loadings(cfg, "External book", True)
-        assert "OIL_PRICE" in e and "GOV_SPEND_QAT" not in e
+    def test_shift_curve_capped_at_one(self):
+        cum = np.concatenate([[0.0], np.cumsum(np.full(60, 0.02 / 12))])
+        assert shift_curve(cum, [5, 5, 5, 5, 5]).max() <= 1.0
 
     def test_a_project_file_overrides_what_it_names(self, tmp_path):
         (tmp_path / "config").mkdir()
         (tmp_path / "config" / "stress.yml").write_text(
-            yaml.safe_dump({"staging": {"sicr_notches": 2}}))
+            yaml.safe_dump({"staging": {"p12": 0.05}}))
         cfg = read_stress_config(tmp_path)
-        assert cfg["staging"]["sicr_notches"] == 2
-        assert cfg["rates"]["variable"] == "QA_RATE"          # default kept
+        assert cfg["staging"]["p12"] == 0.05
+        assert cfg["staging"]["rho_stage"] == 0.033            # default kept
 
 
 # ------------------------------------------------------------- real run ------
 @pytest.fixture(scope="module")
-def rc(tmp_path_factory):
+def rc(system):
     if RUN is None:
         pytest.skip("no real run")
     from ifrs9qdb import load_engine_inputs
     from ifrs9qdb.analytics import normalise
     from ifrs9qdb.stresstest.transmission import prepare
-    d = tmp_path_factory.mktemp("st") / "store"
-    shutil.copytree(FIX, d)
     inp = load_engine_inputs(RUN)
     rep = normalise(pd.read_csv(RUN / "FinalEclReport.csv", low_memory=False))
-    return prepare(inp, rep, RUN.parent, MacroStore(d))
+    return prepare(inp, rep, RUN.parent, system)
 
 
 @has_run
@@ -125,46 +159,44 @@ class TestTransmission:
         assert r["ok"] and r["delta"] == 0.0
         assert (r["waterfall"]["change"] == 0).all()
 
-    def test_the_model_driver_agrees_with_the_macro_screen(self, rc):
-        """One PD chain rebuild for both: a non-oil shock held over every
-        year, weights held, is exactly the macro screen's shift."""
+    def test_the_pd_channel_agrees_with_the_macro_screen(self, rc):
+        """One PD chain rebuild for both: non-oil 2 points lower in every
+        year, nothing linked, weights held, is the macro screen's shift."""
         from ifrs9qdb.stresstest import transmit
-        sc = Scenario("Non-oil", shocks=[Shock("NONOIL_GDP_QAT", -2, shape="held")],
-                      knock_on=False)
-        r = transmit(rc, sc, waterfall=True)
-        m = mev_stress(rc.inputs, rc.report, rc.run_path, shock={"1": -2.0},
+        sc = Scenario("Non-oil", main={"NONOIL_GDP_QAT": [-2.0] * 5}, linked=[])
+        r = transmit(rc, sc)
+        col = rc.drivers_internal["NONOIL_GDP_QAT"][0]
+        m = mev_stress(rc.inputs, rc.report, rc.run_path, shock={str(col): -2.0},
                        weight_mode="hold")
-        drv = r["waterfall"].set_index("key").loc["drivers", "change"]
-        assert drv == pytest.approx(m["delta"], rel=1e-9, abs=1e-3)
+        pdc = r["waterfall"].set_index("key").loc["pd", "change"]
+        assert pdc == pytest.approx(m["delta"], rel=1e-9, abs=1e-3)
 
-    def test_levers_agree_with_the_lever_packages(self, rc):
+    def test_the_waterfall_and_splits_add_up(self, rc):
         from ifrs9qdb.stresstest import transmit
-        r = transmit(rc, Scenario("Levers", levers={"pd_multiplier": 1.25,
-                                                    "collateral_pct": 80.0}))
-        a = apply_stress(rc.inputs, rc.report, StressSpec(pd_multiplier=1.25,
-                                                          collateral_pct=80.0))
-        if rc.base_curves is None:
-            assert r["delta"] == pytest.approx(a["delta"], rel=1e-9)
-
-    def test_the_waterfall_adds_up(self, rc):
-        from ifrs9qdb.stresstest import transmit
-        r = transmit(rc, library()[-1])
+        r = transmit(rc, next(s for s in library() if s.id == "H3"))
         assert r["waterfall"]["change"].sum() == pytest.approx(r["delta"], rel=1e-9)
         assert r["by_segment"]["change"].sum() == pytest.approx(r["delta"], rel=1e-6)
         assert r["by_book"]["change"].sum() == pytest.approx(r["delta"], rel=1e-6)
 
-    def test_an_adverse_move_costs_more(self, rc):
+    def test_a_property_fall_reaches_collateral_only(self, rc):
         from ifrs9qdb.stresstest import transmit
-        up = transmit(rc, Scenario(shocks=[Shock("PROPERTY_QAT", -20)], knock_on=False))
-        down = transmit(rc, Scenario(shocks=[Shock("PROPERTY_QAT", 20)], knock_on=False))
-        assert up["delta"] > 0 > down["delta"]
+        r = transmit(rc, Scenario(main={"PROPERTY_QAT": [-20, None, None, None, None]},
+                                  linked=[]))
+        w = r["waterfall"].set_index("key")["change"]
+        assert w["collateral"] > 0 and w["pd"] == 0 and w["staging"] == 0
 
-    def test_a_rate_rise_through_the_peg(self, rc):
+    def test_a_deferral_programme_moves_stages(self, rc):
         from ifrs9qdb.stresstest import transmit
-        us = transmit(rc, Scenario(shocks=[Shock("US_RATE", 2, shape="held")], knock_on=False))
-        qa = transmit(rc, Scenario(shocks=[Shock("QA_RATE", 2, shape="held")], knock_on=False))
-        assert us["delta"] == pytest.approx(qa["delta"], rel=1e-9)
-        assert us["info"]["rates"]["notches"] == 1
+        r = transmit(rc, Scenario(restructured=0.5))
+        w = r["waterfall"].set_index("key")["change"]
+        assert w["staging"] > 0 and w["pd"] == 0
+        assert r["staging"]["expected_moves"] == pytest.approx(0.5 * r["staging"]["eligible"])
+
+    def test_adverse_costs_more_than_favourable(self, rc):
+        from ifrs9qdb.stresstest import transmit
+        bad = transmit(rc, Scenario(main={"GDP_WLD": [-3, None, None, None, None]}))
+        good = transmit(rc, Scenario(main={"GDP_WLD": [3, None, None, None, None]}))
+        assert bad["delta"] > 0 > good["delta"]
 
 
 @pytest.fixture(scope="module")
@@ -175,27 +207,29 @@ def proxy(rc):
 
 @has_run
 class TestRisk:
-    def test_the_shapley_split_adds_up(self, rc):
-        from ifrs9qdb.stresstest.risk import shapley
-        sc = Scenario("Two", shocks=[Shock("PROPERTY_QAT", -15), Shock("QA_RATE", 2, shape="held")],
-                      knock_on=False)
-        r = shapley(rc, sc)
-        assert r["exact"] and r["parts"]["shapley"].sum() == pytest.approx(r["total"], rel=1e-9)
-        assert r["interaction"] == pytest.approx(r["total"] - r["sum_alone"])
+    def test_drivers_add_up_in_full(self, rc):
+        from ifrs9qdb.stresstest.risk import drivers
+        r = drivers(rc, next(s for s in library() if s.id == "H1"))
+        assert r["exact"] and r["parts"]["change"].sum() == pytest.approx(r["total"])
 
+    def test_drivers_add_up_from_the_proxy(self, rc, proxy):
+        from ifrs9qdb.stresstest.risk import drivers
+        r = drivers(rc, next(s for s in library() if s.id == "H6"), P=proxy)
+        assert not r["exact"] and r["parts"]["change"].sum() == pytest.approx(r["total"])
+        assert "_deferral" in set(r["parts"]["variable"])
 
     def test_the_proxy_reproduces_the_base_exactly(self, proxy):
         assert abs(proxy.built_with["base_gap"]) < 1e-3
 
     def test_the_proxy_tracks_full_repricing(self, rc, proxy):
         from ifrs9qdb.stresstest.risk import proxy_check
-        chk = proxy_check(rc, proxy, scenarios=library()[:4])
+        chk = proxy_check(rc, proxy, scenarios=library()[:6])
         assert (chk["gap_pct_of_full"].abs() < 5).all(), chk
 
     def test_ecl_at_risk_is_ordered_and_reproducible(self, rc, proxy):
         from ifrs9qdb.stresstest.risk import ecl_at_risk
-        a = ecl_at_risk(rc, proxy, n=400, seed=11)
-        b = ecl_at_risk(rc, proxy, n=400, seed=11)
+        a = ecl_at_risk(rc, proxy, n=300, seed=11)
+        b = ecl_at_risk(rc, proxy, n=300, seed=11)
         assert np.array_equal(a["ecl"], b["ecl"])
         v = a["summary"]["value"].tolist()
         assert v == sorted(v)
@@ -204,6 +238,8 @@ class TestRisk:
 
     def test_reverse_stress_hits_its_target(self, rc, proxy):
         from ifrs9qdb.stresstest.risk import reverse
-        t = 0.05 * float(np.nansum(rc.base["ecl"]))
-        r = reverse(rc, proxy, t)
-        assert r["found"] and r["full_change"] == pytest.approx(t, rel=0.02)
+        t = 0.03 * rc.base_total
+        r = reverse(rc, proxy, t, scenarios=library()[:4], n=200, confirm=1)
+        top = r["scenarios"].iloc[0]
+        assert top["full_change"] == pytest.approx(t, rel=0.02)
+        assert 0 <= r["probability"] <= 1

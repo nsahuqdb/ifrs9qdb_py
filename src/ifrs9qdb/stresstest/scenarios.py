@@ -1,233 +1,258 @@
-"""Stress scenarios: shocks on any macro variables, several at once.
+"""Stress scenarios: the main variables a scenario sets, year by year, and
+the saved scenarios.
 
-A scenario is a set of shocks on top of the quarter's baseline. A shock names
-a concept (a variable of the macro store's catalogue), a size -- in the
-variable's own unit or in standard deviations of its history -- a shape over
-the forecast years, and the year it starts:
+A scenario sets one or more *main* variables -- a deviation from the
+baseline in each forecast year, in the variable's own unit -- and lets the
+*linked effects* (``macro.system``) move the rest. ``linked`` names the
+variables allowed to move that way (``None``: every one the main variables
+reach); a variable left out stays at baseline and passes nothing on. Only
+main variables are set by hand: a linked variable's path is whatever the
+system makes of the main ones.
 
-    one_year   the move in its start year only
-    held       the move in every year from the start
-    build      reaching the full move over ``years`` years, then held
-    recover    the full move in the start year, gone after ``years`` more
-    custom     a path given year by year (``path``), in the variable's unit
+The builder draws a main variable's path from a shape:
 
-Shocks on the same variable add up. With ``knock_on`` (the default) every
-other variable moves as the macro model says it moves with them
-(``macro.var.MacroModel.condition``); without it they stay at baseline. An
-``override`` fixes a variable's path outright and conditions the rest on it
-too. ``levers`` add a parameter stress (a ``stress.StressSpec``: a PD
-multiplier, notches, collateral, the largest N defaulting) on top, and
-``scenario_weights`` price the internal book on one IFRS 9 scenario alone.
+    one_year   the move in year 1, then left to the linked effects
+    recover    the move in year 1, shrinking to nothing over ``years`` years
+    held       the move in every year
+    custom     year by year; a blank year is left to the linked effects
 
-Saved scenarios live in the project's ``config/stress_scenarios.yml``; the
-library below ships with the package (and identically with the R one).
+``restructured`` is the share of Stage 1 borrowers a payment-deferral
+programme moves to Stage 2 (the 2020 programme moved about 72% of QDB's).
+
+Saved scenarios live in an SQLite database in the project folder
+(``ScenarioStore``), every save kept as a version; the library ships with
+the package (``library.py``).
 """
 from __future__ import annotations
 
+import datetime as _dt
+import json
+import sqlite3
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-__all__ = ["SHAPES", "Shock", "Scenario", "library", "scenarios_path",
-           "read_scenarios", "write_scenarios", "scenario_paths", "shape_profile"]
+__all__ = ["SHAPES", "Scenario", "shape_path", "ScenarioStore", "scenarios_db_path"]
 
-SHAPES = ("one_year", "held", "build", "recover", "custom")
-
-
-def shape_profile(shape: str, H: int, start: int = 1, years: int = 2) -> np.ndarray:
-    """The multiplier on a shock's size in each forecast year 1..H."""
-    p = np.zeros(H)
-    s = max(1, int(start)) - 1
-    n = max(1, int(years))
-    if s >= H:
-        return p
-    if shape == "one_year":
-        p[s] = 1.0
-    elif shape == "held":
-        p[s:] = 1.0
-    elif shape == "build":
-        for j in range(s, H):
-            p[j] = min(1.0, (j - s + 1) / n)
-    elif shape == "recover":
-        for j in range(s, H):
-            p[j] = max(0.0, 1.0 - (j - s) / n)
-    return p
+SHAPES = ("one_year", "recover", "held", "custom")
 
 
-@dataclass
-class Shock:
-    concept: str
-    size: float = 0.0
-    unit: str = "native"          # native | sd
-    shape: str = "one_year"
-    start: int = 1
-    years: int = 2
-    path: list | None = None      # custom: the move year by year, native unit
+def shape_path(shape: str, size: float, H: int = 5, years: int = 2) -> list:
+    """A main variable's yearly path from a shape: numbers for the years it
+    sets, ``None`` for the years it leaves to the linked effects."""
+    size = float(size)
+    if shape == "held":
+        return [size] * H
+    if shape == "recover":
+        n = max(1, int(years))
+        return [size * max(0.0, 1.0 - t / n) for t in range(min(n, H))] + [None] * max(0, H - n)
+    return [size] + [None] * (H - 1)
 
-    def native_path(self, H: int, sd: float) -> np.ndarray:
-        if self.shape == "custom":
-            p = np.zeros(H)
-            vals = [float(v) for v in (self.path or [])][:H]
-            p[:len(vals)] = vals
-            return p * (sd if self.unit == "sd" else 1.0)
-        scale = float(self.size) * (sd if self.unit == "sd" else 1.0)
-        return shape_profile(self.shape, H, self.start, self.years) * scale
 
-    @classmethod
-    def from_dict(cls, d: dict) -> "Shock":
-        d = dict(d or {})
-        return cls(concept=str(d.get("concept", "")),
-                   size=float(d.get("size") or 0.0),
-                   unit=str(d.get("unit") or "native"),
-                   shape=str(d.get("shape") or "one_year"),
-                   start=int(float(d.get("start") or 1)),
-                   years=int(float(d.get("years") or 2)),
-                   path=[float(v) for v in d["path"]] if d.get("path") is not None else None)
+def _num(x):
+    if x is None:
+        return None
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return v if np.isfinite(v) else None
 
 
 @dataclass
 class Scenario:
     name: str = "Scenario"
+    main: dict = field(default_factory=dict)        # variable -> [deviation or None] by year
+    linked: list | None = None                      # None: every variable the main ones reach
+    restructured: float = 0.0
     description: str = ""
-    shocks: list = field(default_factory=list)
-    knock_on: bool = True
-    overrides: dict = field(default_factory=dict)     # concept -> path (native)
-    levers: dict = field(default_factory=dict)        # StressSpec fields
-    weights: str = "hold"                             # hold | auto
-    scenario_weights: dict | None = None              # IFRS 9 scenario weights
-    kind: str = "custom"                              # custom | library
+    category: str = "mine"                          # history | supervisory | hypothetical | current | mine
+    source: str = ""
+    id: str | None = None
+    based_on: str | None = None
+    shapes: dict = field(default_factory=dict)      # variable -> {"shape", "size", "years"}
+    episode: list | None = None
+    window: list | None = None
+    translation: str = ""
+    tail: bool = False
+    refs: dict = field(default_factory=dict)        # variable -> how the library derived it
 
     @classmethod
     def from_dict(cls, d: dict) -> "Scenario":
         d = dict(d or {})
+        main = {}
+        for v, p in (d.get("main") or {}).items():
+            if p is None:
+                continue
+            main[str(v)] = [_num(x) for x in p]
+        linked = d.get("linked")
         return cls(
-            name=str(d.get("name") or "Scenario"),
+            name=str(d.get("name") or "Scenario"), main=main,
+            linked=None if linked is None else [str(x) for x in linked],
+            restructured=float(d.get("restructured") or 0.0),
             description=str(d.get("description") or ""),
-            shocks=[Shock.from_dict(s) for s in (d.get("shocks") or [])],
-            knock_on=bool(d.get("knock_on", True)),
-            overrides={str(k): [float(x) for x in v]
-                       for k, v in (d.get("overrides") or {}).items()},
-            levers=dict(d.get("levers") or {}),
-            weights=str(d.get("weights") or "hold"),
-            scenario_weights=({str(k): float(v) for k, v in d["scenario_weights"].items()}
-                              if d.get("scenario_weights") else None),
-            kind=str(d.get("kind") or "custom"))
+            category=str(d.get("category") or "mine"), source=str(d.get("source") or ""),
+            id=d.get("id"), based_on=d.get("based_on"),
+            shapes={str(k): dict(v) for k, v in (d.get("shapes") or {}).items() if v},
+            episode=d.get("episode"), window=d.get("window"),
+            translation=str(d.get("translation") or ""), tail=bool(d.get("tail", False)),
+            refs={str(k): str(v) for k, v in (d.get("refs") or {}).items()})
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        d["shocks"] = [{k: v for k, v in s.items() if v is not None} for s in d["shocks"]]
-        if not d["scenario_weights"]:
-            d.pop("scenario_weights")
-        return d
+        return asdict(self)
 
-    def concepts(self) -> list[str]:
-        out = [s.concept for s in self.shocks] + list(self.overrides)
-        return list(dict.fromkeys(out))
+    def given(self, H: int = 5) -> dict:
+        """The main variables' paths, padded to H years (``None`` = left to
+        the linked effects)."""
+        out = {}
+        for v, p in self.main.items():
+            p = list(p or [])
+            if not any(x is not None for x in p):
+                continue
+            out[v] = ([_num(x) for x in p] + [None] * H)[:H]
+        return out
 
-    def given(self, H: int, sd: dict) -> dict:
-        """The paths the scenario sets itself: its shocks summed by
-        variable, then its overrides."""
-        g: dict = {}
-        for s in self.shocks:
-            p = s.native_path(H, float(sd.get(s.concept, 1.0)))
-            g[s.concept] = g.get(s.concept, np.zeros(H)) + p
-        for c, v in self.overrides.items():
-            p = np.zeros(H)
-            vals = [float(x) for x in v][:H]
-            p[:len(vals)] = vals
-            g[c] = p
-        return g
+    def variables(self) -> list:
+        return list(self.given())
 
+    def is_library(self) -> bool:
+        return self.category != "mine"
 
-def scenario_paths(scn: Scenario, model, H: int = 5) -> dict:
-    """Every concept's deviation from baseline under a scenario, the paths
-    it set itself, and its severity."""
-    given = scn.given(H, model.sd)
-    if scn.knock_on:
-        paths = model.condition(given, H)
-    else:
-        paths = {c: np.zeros(H) for c in model.concepts}
-        paths.update({c: np.asarray(v, float) for c, v in given.items()})
-    for c, v in given.items():                 # a concept outside the model
-        paths[c] = np.asarray(v, float)
-    return {"paths": paths, "given": given, "severity": model.severity(given, H)}
+    def edited_from(self, other: "Scenario", H: int = 5) -> bool:
+        """Whether this scenario's numbers differ from ``other``'s: a changed
+        library scenario must be saved under a new name."""
+        a, b = self.given(H), other.given(H)
+        if set(a) != set(b):
+            return True
+        for v in a:
+            for x, y in zip(a[v], b[v]):
+                if (x is None) != (y is None) or (x is not None and abs(x - y) > 1e-9):
+                    return True
+        la = None if self.linked is None else sorted(self.linked)
+        lb = None if other.linked is None else sorted(other.linked)
+        return la != lb or abs(self.restructured - other.restructured) > 1e-12
 
 
-def _s(concept, size=0.0, shape="one_year", unit="native", start=1, years=2, path=None):
-    return Shock(concept, size, unit, shape, start, years, path)
+# ---------------------------------------------------------------- saving --
+def scenarios_db_path(project_root) -> Path:
+    return Path(project_root) / "scenarios" / "scenarios.sqlite"
 
 
-def library() -> list[Scenario]:
-    """The scenarios that ship with the package. Moves are those of the
-    episodes named, or round severe-but-plausible numbers; each is a
-    starting point to copy and edit."""
-    L = "library"
-    return [
-        Scenario("Oil and LNG price collapse",
-                 "The 2014-16 fall replayed: Brent down 47% then 17%, LNG with it.",
-                 [_s("OIL_PRICE", shape="custom", path=[-47, -17, 0, 0, 0]),
-                  _s("LNG_PRICE", shape="custom", path=[-40, -25, 0, 0, 0])], kind=L),
-        Scenario("Regional conflict or blockade",
-                 "Trade and visitors cut, non-oil activity and property down, "
-                 "recovering over two years (2017, 2026).",
-                 [_s("VISITORS_QAT", -30, "recover", years=2),
-                  _s("NONOIL_GDP_QAT", -3, "recover", years=2),
-                  _s("PROPERTY_QAT", -10, "recover", years=3),
-                  _s("GDP_QAT", -2, "recover", years=2)], kind=L),
-        Scenario("Fed tightening through the peg",
-                 "US and Qatar policy rates 2 points higher from the first year.",
-                 [_s("US_RATE", 2, "held"), _s("QA_RATE", 2, "held")], kind=L),
-        Scenario("Property price correction",
-                 "Real estate prices down 15% then 10%.",
-                 [_s("PROPERTY_QAT", shape="custom", path=[-15, -10, 0, 0, 0])], kind=L),
-        Scenario("Fiscal consolidation",
-                 "Government spending cut 15%, then 5% more.",
-                 [_s("GOV_SPEND_QAT", shape="custom", path=[-15, -5, 0, 0, 0])], kind=L),
-        Scenario("Global recession",
-                 "World and China growth 3 points lower, oil and LNG prices down.",
-                 [_s("GDP_WLD", -3, "recover", years=2),
-                  _s("GDP_CHN", -3, "recover", years=2),
-                  _s("OIL_PRICE", -35, "one_year"),
-                  _s("LNG_PRICE", -30, "one_year")], kind=L),
-        Scenario("GCC-wide downturn",
-                 "Every GCC economy 1.5 standard deviations weaker, recovering over two years.",
-                 [_s(c, -1.5, "recover", unit="sd", years=2)
-                  for c in ("GDP_SAU", "GDP_ARE", "GDP_KWT", "GDP_OMN", "GDP_BHR", "GDP_QAT")],
-                 kind=L),
-        Scenario("Combined severe",
-                 "Oil collapse, property correction, Fed tightening and a spending cut together.",
-                 [_s("OIL_PRICE", shape="custom", path=[-47, -17, 0, 0, 0]),
-                  _s("PROPERTY_QAT", shape="custom", path=[-15, -10, 0, 0, 0]),
-                  _s("US_RATE", 2, "held"), _s("QA_RATE", 2, "held"),
-                  _s("GOV_SPEND_QAT", shape="custom", path=[-15, -5, 0, 0, 0])], kind=L),
-    ]
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS scenario (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    based_on TEXT,
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS scenario_version (
+    id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    saved_at TEXT NOT NULL,
+    saved_by TEXT NOT NULL,
+    action TEXT NOT NULL,
+    PRIMARY KEY (id, version)
+);
+"""
 
 
-def scenarios_path(project_root) -> Path:
-    return Path(project_root) / "config" / "stress_scenarios.yml"
+class ScenarioStore:
+    """The project's saved scenarios: one row each, every save kept as a
+    version (who, when, what), a deletion only hiding the row."""
 
+    def __init__(self, path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._db() as c:
+            c.executescript(_SCHEMA)
 
-def read_scenarios(path) -> list[Scenario]:
-    import yaml
-    p = Path(path)
-    if not p.is_file():
-        return []
-    try:
-        y = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return []
-    return [Scenario.from_dict(d) for d in (y.get("scenarios") or []) if isinstance(d, dict)]
+    def _db(self):
+        c = sqlite3.connect(self.path, timeout=10)
+        c.row_factory = sqlite3.Row
+        return c
 
+    @staticmethod
+    def _now() -> str:
+        return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
-def write_scenarios(scenarios, path) -> Path:
-    import yaml
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    rows = [(s if isinstance(s, Scenario) else Scenario.from_dict(s)).to_dict()
-            for s in scenarios]
-    for r in rows:
-        r["kind"] = "custom"
-    p.write_text(yaml.safe_dump({"scenarios": rows}, sort_keys=False,
-                                allow_unicode=True), encoding="utf-8")
-    return p
+    def list(self) -> list[dict]:
+        with self._db() as c:
+            rows = c.execute("SELECT * FROM scenario WHERE deleted = 0 ORDER BY updated_at DESC")
+            out = []
+            for r in rows.fetchall():
+                d = json.loads(r["body"])
+                d.update({"id": r["id"], "category": "mine", "based_on": r["based_on"],
+                          "created_at": r["created_at"], "created_by": r["created_by"],
+                          "updated_at": r["updated_at"], "updated_by": r["updated_by"]})
+                out.append(d)
+            return out
+
+    def scenarios(self) -> list[Scenario]:
+        return [Scenario.from_dict(d) for d in self.list()]
+
+    def get(self, sid: str) -> dict | None:
+        return next((d for d in self.list() if d["id"] == sid), None)
+
+    def _name_taken(self, c, name: str, but: str | None = None) -> bool:
+        q = "SELECT id FROM scenario WHERE deleted = 0 AND lower(name) = lower(?)"
+        return any(r["id"] != but for r in c.execute(q, (name.strip(),)).fetchall())
+
+    def save(self, scn: Scenario, user: str = "", sid: str | None = None) -> str:
+        """Save ``scn``: a new scenario, or -- with ``sid`` -- a new version
+        of a saved one. Names are unique among the saved scenarios."""
+        name = (scn.name or "").strip()
+        if not name:
+            raise ValueError("A scenario needs a name.")
+        body = scn.to_dict()
+        body["category"] = "mine"
+        now, user = self._now(), user or "unknown"
+        with self._db() as c:
+            if self._name_taken(c, name, sid):
+                raise ValueError(f"A saved scenario is already called {name!r}.")
+            if sid is None:
+                sid = uuid.uuid4().hex[:12]
+                body["id"] = sid
+                c.execute("INSERT INTO scenario VALUES (?,?,?,?,?,?,?,?,0)",
+                          (sid, name, scn.based_on, json.dumps(body), now, user, now, user))
+                action = "created"
+            else:
+                if not c.execute("SELECT 1 FROM scenario WHERE id = ? AND deleted = 0",
+                                 (sid,)).fetchone():
+                    raise KeyError(f"No saved scenario {sid!r}.")
+                body["id"] = sid
+                c.execute("UPDATE scenario SET name = ?, body = ?, updated_at = ?, "
+                          "updated_by = ? WHERE id = ?", (name, json.dumps(body), now, user, sid))
+                action = "updated"
+            v = c.execute("SELECT COALESCE(MAX(version), 0) + 1 FROM scenario_version "
+                          "WHERE id = ?", (sid,)).fetchone()[0]
+            c.execute("INSERT INTO scenario_version VALUES (?,?,?,?,?,?)",
+                      (sid, v, json.dumps(body), now, user, action))
+        return sid
+
+    def delete(self, sid: str, user: str = "") -> None:
+        now = self._now()
+        with self._db() as c:
+            row = c.execute("SELECT body FROM scenario WHERE id = ? AND deleted = 0",
+                            (sid,)).fetchone()
+            if not row:
+                raise KeyError(f"No saved scenario {sid!r}.")
+            c.execute("UPDATE scenario SET deleted = 1, updated_at = ?, updated_by = ? "
+                      "WHERE id = ?", (now, user or "unknown", sid))
+            v = c.execute("SELECT COALESCE(MAX(version), 0) + 1 FROM scenario_version "
+                          "WHERE id = ?", (sid,)).fetchone()[0]
+            c.execute("INSERT INTO scenario_version VALUES (?,?,?,?,?,?)",
+                      (sid, v, row["body"], now, user or "unknown", "deleted"))
+
+    def history(self, sid: str) -> list[dict]:
+        with self._db() as c:
+            rows = c.execute("SELECT version, saved_at, saved_by, action FROM scenario_version "
+                             "WHERE id = ? ORDER BY version", (sid,)).fetchall()
+            return [dict(r) for r in rows]

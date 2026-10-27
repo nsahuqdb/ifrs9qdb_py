@@ -1,0 +1,23 @@
+# variable_id: VAR_QATAR_REAL_ESTATE_INDEX
+# display_name: Qatar real estate price index (2009 = 100)
+# units: index
+# source: Planning and Statistics Authority real estate price index, yearly % change as used in QDB's macro PD calibration (codex macro master file); chained to a level here
+# last_refreshed: 2026-10-27
+year,value
+2009,100.0
+2010,116.600000
+2011,138.870600
+2012,146.786224
+2013,177.024186
+2014,238.451579
+2015,273.027058
+2016,261.832949
+2017,235.911487
+2018,229.777788
+2019,211.165787
+2020,200.607498
+2021,204.704086
+2022,215.085321
+2023,216.993849
+2024,212.155056
+2025,212.183973

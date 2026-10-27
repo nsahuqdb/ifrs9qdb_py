@@ -1,4 +1,6 @@
-"""The macro model behind a scenario's knock-on effects.
+"""An earlier macro model, kept for comparison: scenarios now take their
+linked effects from ``macro.system`` (a recursive system estimated equation
+by equation on outturns).
 
 A Bayesian VAR(1) on the core concepts' yearly values, each standardised by
 its own history:
@@ -19,7 +21,7 @@ years the stacked deviations are D = M e with M's blocks A^(h-j), so
 
     Cov(D) = M (I_H (x) Sigma) M'
 
-and the knock-on effects of a set of fixed paths d_S are the conditional mean
+and the effects of a set of fixed paths d_S on the rest are the conditional mean
 
     E[D_u | D_S = d_S] = Cov_uS Cov_SS^-1 d_S
 

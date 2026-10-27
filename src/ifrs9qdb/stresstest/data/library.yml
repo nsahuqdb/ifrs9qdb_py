@@ -1,0 +1,295 @@
+# The scenario library: pre-built scenarios to price as they are or to copy
+# and edit.
+#
+# Every number is a deviation from the baseline in the variable's own unit
+# (growth rates and price changes in percentage points, the policy rate in
+# points), year 1 being the run's first forecast year. A variable left out,
+# or a year left blank, is filled by the linked effects (macro/system.py).
+#
+# Historical scenarios replay an episode from the macro store:
+#   how: actual   the episode's own values (prices and rates, whose normal
+#                 year-on-year change is close to zero)
+#   how: change   the change from ``base``, the last year before the shock
+#                 (growth rates, whose normal level is not zero)
+# ``countries`` averages a panel variable over those countries, and ``from``
+# replays another variable (a series the store does not have for that
+# episode). ``values`` holds the numbers derived on the store vintage named
+# in ``derived_on``; ``check_library`` recomputes them on any vintage, so
+# every number can be traced to the data.
+schema_version: '1.0'
+derived_on: v20261025-121333
+
+scenarios:
+
+  - id: H1
+    name: 1986 oil price war
+    category: history
+    episode: [1986, 1988]
+    window: [1983, 1991]
+    source: IMF World Economic Outlook
+    description: >-
+      Saudi Arabia gave up defending the oil price at the end of 1985 and
+      raised output to win back market share. The oil price roughly halved
+      in 1986 and stayed low for years, while the world economy kept
+      growing. Gulf governments cut spending; Qatar's non-oil economy is
+      not measured that far back, so its path comes from the linked
+      effects.
+    main:
+      OIL_PRICE: {how: actual, years: [1986, 1987, 1988], values: [-48.08, 25.85, -18.91]}
+      GDP_WLD: {how: change, base: 1985, years: [1986, 1987, 1988], values: [-0.29, 0.29, 0.87]}
+
+  - id: H2
+    name: 1998 oil slump (Asian crisis)
+    category: history
+    episode: [1998, 1999]
+    window: [1995, 2002]
+    source: IMF World Economic Outlook
+    description: >-
+      The Asian financial crisis cut demand for oil just as OPEC raised
+      output. The oil price fell by about a third in 1998 before recovering
+      in 1999. World growth slowed but did not stop.
+    main:
+      OIL_PRICE: {how: actual, years: [1998, 1999], values: [-31.6, 37.35]}
+      GDP_WLD: {how: change, base: 1997, years: [1998, 1999], values: [-1.44, -0.48]}
+
+  - id: H3
+    name: 2009 global financial crisis
+    category: history
+    episode: [2009, 2010]
+    window: [2006, 2013]
+    source: IMF World Economic Outlook and Regional Economic Outlook; IMF Monetary and Financial Statistics; BIS policy rates
+    description: >-
+      After the collapse of Lehman Brothers world output fell in 2009 for
+      the first time in the post-war era. The oil price dropped by about a
+      third, the Federal Reserve cut its rate to near zero, the Gulf's
+      credit boom ended and GCC growth fell by about six points. Qatar's own non-oil economy kept growing on LNG
+      investment, so the non-oil shock is the change in the other five GCC
+      economies, and the credit shock is Qatar's.
+    main:
+      OIL_PRICE: {how: actual, years: [2009, 2010], values: [-36.44, 28.69]}
+      GDP_WLD: {how: change, base: 2008, years: [2009, 2010], values: [-3.28, 2.34]}
+      US_RATE: {how: actual, years: [2009, 2010], values: [-1.74, 0]}
+      NONOIL_GDP_QAT: {how: change, base: 2008, years: [2009, 2010], countries: [SAU, ARE, KWT, OMN, BHR], values: [-3.74, -2.9]}
+      CREDIT_QAT: {how: change, base: 2008, years: [2009, 2010], values: [-15.57, -26.33]}
+      GDP_GCC: {how: change, base: 2008, years: [2009, 2010], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-6.07, -1.57]}
+
+  - id: H4
+    name: 2015–16 oil collapse
+    category: history
+    episode: [2015, 2017]
+    window: [2012, 2020]
+    source: IMF World Economic Outlook and Regional Economic Outlook; IMF Monetary and Financial Statistics; PSA real estate price index
+    description: >-
+      OPEC chose not to cut output in late 2014 and the oil price fell from
+      over 100 dollars to under 30 by early 2016, while world growth held
+      steady. Qatar moved into fiscal deficit, cut spending and delayed
+      projects; non-oil growth slowed and property prices turned down from
+      2016. GCC output held up as oil production rose.
+    main:
+      OIL_PRICE: {how: actual, years: [2015, 2016, 2017], values: [-47.15, -15.02, 22.45]}
+      GDP_WLD: {how: change, base: 2014, years: [2015, 2016, 2017], values: [-0.11, -0.34, 0.29]}
+      GOV_SPEND_QAT: {how: change, base: 2014, years: [2015, 2016], values: [-21.64, -19.32]}
+      NONOIL_GDP_QAT: {how: change, base: 2014, years: [2015, 2016], values: [-1.49, -4.72]}
+      PROPERTY_QAT: {how: actual, years: [2015, 2016], values: [14.5, -4.1]}
+      GDP_GCC: {how: change, base: 2014, years: [2015, 2016], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [0.75, 0.35]}
+
+  - id: H5
+    name: 2017 blockade of Qatar
+    category: history
+    episode: [2017, 2019]
+    window: [2014, 2021]
+    source: IMF Regional Economic Outlook; IMF World Economic Outlook; PSA real estate price index
+    description: >-
+      In June 2017 Saudi Arabia, the UAE, Bahrain and Egypt cut diplomatic
+      and trade links with Qatar and closed its only land border and their
+      airspace. Imports were rerouted, non-resident deposits left and
+      property prices fell for three years. The blockade ended in January
+      2021.
+    main:
+      GOV_SPEND_QAT: {how: change, base: 2016, years: [2017, 2018, 2019], values: [-3.88, -0.2, 14.02]}
+      NONOIL_GDP_QAT: {how: change, base: 2016, years: [2017, 2018, 2019], values: [-6.83, -3.59, -3.65]}
+      PROPERTY_QAT: {how: actual, years: [2017, 2018, 2019], values: [-9.9, -2.6, -8.1]}
+
+  - id: H6
+    name: 2020 COVID-19 pandemic
+    category: history
+    episode: [2020, 2021]
+    window: [2017, 2023]
+    source: IMF World Economic Outlook and Regional Economic Outlook; IMF Monetary and Financial Statistics; BIS policy rates; PSA real estate price index; QDB loan data
+    restructured: 0.72
+    description: >-
+      Lockdowns closed much of the world economy in 2020 and the oil price
+      fell by about a third. The Federal Reserve cut to near zero and
+      Qatar's central bank launched a deferral programme for loan
+      instalments. In QDB's own loan data about 72% of performing Stage 1
+      borrowers moved to Stage 2 within a year, mostly through deferrals,
+      which the scenario carries as a deferral programme.
+    main:
+      OIL_PRICE: {how: actual, years: [2020, 2021], values: [-32.01, 65.81]}
+      GDP_WLD: {how: change, base: 2019, years: [2020, 2021], values: [-5.68, 3.71]}
+      US_RATE: {how: actual, years: [2020, 2021], values: [-1.75, -0.25]}
+      GOV_SPEND_QAT: {how: change, base: 2019, years: [2020, 2021], values: [-18.94, -5.92]}
+      NONOIL_GDP_QAT: {how: change, base: 2019, years: [2020, 2021], values: [-5.36, 0.72]}
+      CREDIT_QAT: {how: change, base: 2019, years: [2020, 2021], values: [-1.57, -9.48]}
+      PROPERTY_QAT: {how: actual, years: [2020, 2021], values: [-5, 2.04]}
+      GDP_GCC: {how: change, base: 2019, years: [2020, 2021], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-6.02, 2.43]}
+
+  - id: H7
+    name: 2022–23 Fed tightening
+    category: history
+    episode: [2022, 2023]
+    window: [2019, 2025]
+    source: BIS central bank policy rates
+    description: >-
+      The Federal Reserve raised its rate by about five points between
+      March 2022 and July 2023, the fastest rise in four decades. Qatar's
+      central bank followed through the dollar peg. Nothing else is set:
+      the rest comes from the linked effects.
+    main:
+      US_RATE: {how: actual, years: [2022, 2023], values: [1.77, 3.21]}
+
+  - id: H8
+    name: 2016–20 Qatar property correction
+    category: history
+    episode: [2016, 2020]
+    window: [2013, 2023]
+    source: PSA real estate price index
+    description: >-
+      Qatar's real estate prices fell for five years running after the
+      2015 oil collapse, through the blockade and into the pandemic, about
+      a quarter in all. Only property prices are set.
+    main:
+      PROPERTY_QAT: {how: actual, years: [2016, 2017, 2018, 2019, 2020], values: [-4.1, -9.9, -2.6, -8.1, -5]}
+
+  - id: H9
+    name: 1990–91 Gulf war
+    category: history
+    episode: [1990, 1991]
+    window: [1987, 1994]
+    source: IMF World Economic Outlook
+    tail: true
+    description: >-
+      Iraq invaded Kuwait in August 1990. The oil price jumped and then
+      fell back as the war ended; Kuwait's output more than halved and activity
+      across the Gulf was disrupted. Qatar's non-oil economy was not
+      measured then, so its real GDP is used. The shock is far larger than anything the linked effects
+      were estimated on, so their part is an extrapolation.
+    main:
+      OIL_PRICE: {how: actual, years: [1990, 1991], values: [28.28, -15.33]}
+      NONOIL_GDP_QAT: {how: change, base: 1989, years: [1990, 1991], from: GDP_GCC, countries: [QAT], values: [-19.94, -6.82]}
+      GDP_GCC: {how: change, base: 1989, years: [1990, 1991], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-7.89, -12.52]}
+
+  - id: H10
+    name: 2026 regional disruption (IMF projection)
+    category: current
+    episode: [2026, 2026]
+    window: [2022, 2028]
+    source: IMF World Economic Outlook and Regional Economic Outlook, October 2026
+    description: >-
+      Not a past episode: the change the IMF's October 2026 outlook
+      projects for this year against 2025 -- the oil price about 40% higher,
+      Qatar's non-oil growth about 4 points lower and GCC growth about 11
+      points lower -- priced as if it happened again on top of the
+      baseline.
+    main:
+      OIL_PRICE: {how: actual, years: [2026], values: [41.33]}
+      NONOIL_GDP_QAT: {how: change, base: 2025, years: [2026], values: [-4.31]}
+      GDP_GCC: {how: change, base: 2025, years: [2026], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-11.32]}
+
+  - id: H11
+    name: 2001 global slowdown
+    category: history
+    episode: [2001, 2002]
+    window: [1998, 2005]
+    source: IMF World Economic Outlook; BIS policy rates
+    description: >-
+      The end of the dot-com boom and the September 2001 attacks slowed
+      the world economy; the oil price fell and the Federal Reserve cut its
+      rate by more than four points during 2001.
+    main:
+      OIL_PRICE: {how: actual, years: [2001, 2002], values: [-13.98, 2.09]}
+      GDP_WLD: {how: change, base: 2000, years: [2001, 2002], values: [-2.32, -1.97]}
+      US_RATE: {how: actual, years: [2001, 2002], values: [-2.54, -2.06]}
+
+  - id: H12
+    name: 1994 Fed tightening
+    category: history
+    episode: [1994, 1995]
+    window: [1991, 1998]
+    source: BIS central bank policy rates
+    description: >-
+      The Federal Reserve doubled its rate from 3% to 6% between February
+      1994 and February 1995, surprising bond markets. Only the US rate is
+      set; through the peg it is Qatar's too.
+    main:
+      US_RATE: {how: actual, years: [1994, 1995], values: [1.29, 1.52]}
+
+  - id: F1
+    name: Fed 2026 severely adverse (global)
+    category: supervisory
+    source: Board of Governors of the Federal Reserve System, 2026 stress test scenarios
+    description: >-
+      The Federal Reserve's severely adverse scenario for 2026: a severe
+      global recession, with output in advanced economies about 7.5% below
+      baseline and in developing Asia about 3%, and US short-term rates
+      falling to near zero. The scenario's output paths are translated to
+      world GDP growth; the US rate path is its own.
+    translation: >-
+      World GDP: the scenario's advanced-economy and developing-Asia output
+      paths weighted by their shares of world output. US rate: the
+      three-month Treasury rate's fall in year 1.
+    main:
+      GDP_WLD: {values: [-4.5, 1.0]}
+      US_RATE: {values: [-3.6]}
+
+  - id: E1
+    name: EBA 2025 adverse (energy shock)
+    category: supervisory
+    source: European Systemic Risk Board, adverse scenario for the 2025 EU-wide stress test
+    description: >-
+      The ESRB's adverse scenario for European banks in 2025: escalating
+      geopolitical tensions push energy prices up sharply (oil about 57%
+      higher in the first year) while EU output falls by about 6% over two
+      years. For Qatar a higher oil price cushions the fall in world
+      demand.
+    translation: >-
+      Oil: the scenario's oil price path against its baseline. World GDP:
+      the scenario's EU GDP growth deviations, used for world demand.
+    main:
+      OIL_PRICE: {values: [57.0, 0.0, 0.0]}
+      GDP_WLD: {values: [-2.3, -4.2, 0.0]}
+
+  - id: X1
+    name: Severe combined
+    category: hypothetical
+    source: Built from H3, H4 and H8
+    description: >-
+      The worst of three episodes at once: a world recession the size of
+      2009, the 2015–17 oil collapse and the 2016–20 property correction.
+      Not an event that has happened, a test of what the book can bear.
+    main:
+      GDP_WLD: {how: change, base: 2008, years: [2009, 2010], values: [-3.28, 2.34]}
+      OIL_PRICE: {how: actual, years: [2015, 2016, 2017], values: [-47.15, -15.02, 22.45]}
+      PROPERTY_QAT: {how: actual, years: [2016, 2017, 2018, 2019, 2020], values: [-4.1, -9.9, -2.6, -8.1, -5]}
+
+  - id: X2
+    name: Domestic credit crunch
+    category: hypothetical
+    source: Sized on Qatar 2009
+    description: >-
+      Real private credit growth falls by as much as it did in Qatar in
+      2009, with nothing else set: how far a credit shock alone reaches
+      non-oil growth, property and the provision.
+    main:
+      CREDIT_QAT: {how: change, base: 2008, years: [2009], values: [-15.57]}
+
+  - id: X3
+    name: Fiscal consolidation
+    category: hypothetical
+    source: Sized on Qatar 2015–16
+    description: >-
+      Real government spending cut as Qatar cut it in 2015 and 2016 after
+      the oil collapse -- about 20 points below 2014's growth each year --
+      with oil itself left at baseline: a spending shock on its own.
+    main:
+      GOV_SPEND_QAT: {how: change, base: 2014, years: [2015, 2016], values: [-21.64, -19.32]}

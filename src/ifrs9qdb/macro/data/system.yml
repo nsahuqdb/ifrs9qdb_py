@@ -1,0 +1,95 @@
+# Linked effects: how a scenario's main variables move the others.
+#
+# A recursive system, the design the IMF and supervisors use for
+# second-round effects: a variable can move the ones below it in the same
+# year, and any variable can move any other a year later. Each equation is
+# estimated on yearly history with Bayesian model averaging over every
+# subset of its candidate drivers (BIC weights), country effects on the
+# GCC panel, and models with a wrong-signed driver dropped. The own lag is
+# always in unless marked otherwise.
+#
+# Scenarios work in deviations from the baseline, so the intercepts and
+# country effects drop out: a variable's deviation is the sum of each
+# driver's coefficient times that driver's deviation.
+schema_version: '1.0'
+panel: [QAT, SAU, ARE, KWT, OMN, BHR]
+start_year: 2001
+
+# Expected sign of each driver's effect; a model where a driver takes the
+# other sign is dropped.
+signs:
+  GDP_WLD: 1
+  OIL_PRICE: 1
+  US_RATE: -1
+  GOV_SPEND_QAT: 1
+  NONOIL_GDP_QAT: 1
+  CREDIT_QAT: 1
+  PROPERTY_QAT: 1
+  GDP_GCC: 1
+
+variables:
+  GDP_WLD:
+    label: World GDP growth
+    unit: pp
+    level: Global
+    series: IMF:WEO:G001:NGDP_RPCH:A
+    transform: none
+  OIL_PRICE:
+    label: Oil price
+    unit: '%'
+    level: Global
+    series: IMF:WEO:G001:POILAPSP:A
+    transform: pct_change
+    start_year: 1981
+    own_lag: candidate
+    same: [GDP_WLD]
+  US_RATE:
+    label: US policy rate
+    unit: pp
+    level: Global
+    series: BIS:CBPOL:USA:VALUE:M
+    transform: diff
+  GOV_SPEND_QAT:
+    label: Government spending, real
+    unit: pp
+    level: Qatar
+    panel_series: IMF:WEO:{c}:GGX:A
+    transform: pct_change
+    deflate: IMF:WEO:{c}:PCPIPCH:A
+    same: [OIL_PRICE, US_RATE, GDP_WLD]
+    lag: [OIL_PRICE, NONOIL_GDP_QAT, CREDIT_QAT]
+  NONOIL_GDP_QAT:
+    label: Non-oil GDP growth
+    unit: pp
+    level: Qatar
+    panel_series: IMF:REO_MCD:{c}:NGDPXO_RPCH:A
+    transform: none
+    same: [GDP_WLD, OIL_PRICE, US_RATE, GOV_SPEND_QAT]
+    lag: [OIL_PRICE, US_RATE, GOV_SPEND_QAT, CREDIT_QAT]
+  CREDIT_QAT:
+    label: Private credit growth, real
+    unit: pp
+    level: Qatar
+    panel_series: IMF:MFS_ODC:{c}:ODCORP_A_ACO_PS_ODCS.XDC:M
+    transform: pct_change
+    deflate: IMF:WEO:{c}:PCPIPCH:A
+    same: [OIL_PRICE, US_RATE, GDP_WLD, GOV_SPEND_QAT, NONOIL_GDP_QAT]
+    lag: [OIL_PRICE, US_RATE, NONOIL_GDP_QAT]
+  PROPERTY_QAT:
+    label: Property prices
+    unit: '%'
+    level: Qatar
+    concept: PROPERTY_QAT
+    static: qatar_repi_index.csv
+    transform: pct_change
+    same: [OIL_PRICE, US_RATE, NONOIL_GDP_QAT, CREDIT_QAT]
+    lag: [NONOIL_GDP_QAT, CREDIT_QAT]
+  GDP_GCC:
+    label: GCC real GDP growth
+    unit: pp
+    level: GCC
+    panel_series: IMF:WEO:{c}:NGDP_RPCH:A
+    transform: none
+    start_year: 1991
+    same: [GDP_WLD, OIL_PRICE]
+    lag: [OIL_PRICE]
