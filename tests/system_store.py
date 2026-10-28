@@ -24,6 +24,7 @@ TRUE = {
     ("CREDIT_QAT", "CREDIT_QAT", 1): 0.2,
     ("GOV_SPEND_QAT", "OIL_PRICE", 0): 0.1,
     ("GDP_GCC", "GDP_WLD", 0): 0.8,
+    ("GDP_QAT", "NONOIL_GDP_QAT", 0): 0.7,     # Qatar's total GDP: its non-oil part
 }
 
 
@@ -66,13 +67,20 @@ def build(root, seed: int = 7) -> MacroStore:
             credit[t] = (TRUE[("CREDIT_QAT", "NONOIL_GDP_QAT", 1)] * lag(nonoil)
                          + TRUE[("CREDIT_QAT", "CREDIT_QAT", 1)] * lag(credit)
                          + rng.normal(0, 3))
-            gdp[t] = TRUE[("GDP_GCC", "GDP_WLD", 0)] * (wld[t] - 3.5) + rng.normal(0, 2)
+            if c == "QAT":
+                gdp[t] = TRUE[("GDP_QAT", "NONOIL_GDP_QAT", 0)] * nonoil[t] + rng.normal(0, 1)
+            else:
+                gdp[t] = TRUE[("GDP_GCC", "GDP_WLD", 0)] * (wld[t] - 3.5) + rng.normal(0, 2)
         add(f"IMF:WEO:{c}:PCPIPCH:A", "CPI inflation", cpi)
         add(f"IMF:WEO:{c}:GGX:A", "Government expenditure", _level(gx + cpi))
         add(f"IMF:REO_MCD:{c}:NGDPXO_RPCH:A", "Non-oil real GDP growth", 4 + nonoil)
         add(f"IMF:MFS_ODC:{c}:ODCORP_A_ACO_PS_ODCS.XDC:M", "Private credit",
             _level(credit + cpi), last="")
         add(f"IMF:WEO:{c}:NGDP_RPCH:A", "Real GDP growth", 3 + gdp)
+    # shares of world output at PPP, which weight a supervisor's regions
+    for c, w in {"USA": 15.0, "DEU": 3.2, "FRA": 2.2, "ITA": 1.8, "CHN": 18.5, "IND": 7.5,
+                 "IDN": 2.4, "THA": 0.9, "MYS": 0.7, "PAK": 0.9, "JPN": 3.6, "GBR": 2.2}.items():
+        add(f"IMF:WEO:{c}:PPPSH:A", "Share of world GDP at PPP", [w] * T)
     st = MacroStore(root)
     st.save(pd.DataFrame(series), pd.DataFrame(obs), label="synthetic", carry_forward=False)
     return st

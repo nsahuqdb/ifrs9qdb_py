@@ -201,7 +201,11 @@ class ScenarioStore:
             out = []
             for r in rows.fetchall():
                 d = json.loads(r["body"])
-                d.update({"id": r["id"], "category": "mine", "based_on": r["based_on"],
+                # a saved scenario is the user's own, unless it was saved as a
+                # supervisor's (imported from the publisher's tables, or entered)
+                cat = "supervisory" if d.get("category") == "supervisory" else "mine"
+                d.update({"id": r["id"], "category": cat, "saved": True,
+                          "based_on": r["based_on"],
                           "created_at": r["created_at"], "created_by": r["created_by"],
                           "updated_at": r["updated_at"], "updated_by": r["updated_by"]})
                 out.append(d)
@@ -224,7 +228,7 @@ class ScenarioStore:
         if not name:
             raise ValueError("A scenario needs a name.")
         body = scn.to_dict()
-        body["category"] = "mine"
+        body["category"] = "supervisory" if scn.category == "supervisory" else "mine"
         now, user = self._now(), user or "unknown"
         with self._db() as c:
             if self._name_taken(c, name, sid):

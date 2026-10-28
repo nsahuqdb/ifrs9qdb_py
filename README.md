@@ -103,7 +103,8 @@ src/ifrs9qdb/
                   year); system.py the linked effects: a recursive system
                   (macro/data/system.yml) estimated on outturns with
                   Bayesian model averaging and sign restrictions, that moves
-                  a scenario's other variables with its main ones
+                  a scenario's other variables with its main ones (Qatar's
+                  real GDP included, from non-oil growth and oil)
   stresstest/     macro scenarios: a few main variables set year by year
                   (scenarios.py, saved to an SQLite database with every
                   version), the library of 21 historical, GCC and Qatar,
@@ -112,7 +113,10 @@ src/ifrs9qdb/
                   its sources and the episode behind it, every historical
                   number recomputable from the store (library.py:
                   derive, derivation, check_library;
-                  stresstest/data/library.yml), their path into
+                  stresstest/data/library.yml), supervisors' new scenarios
+                  from their published tables (supervisory.py: the Fed's
+                  baseline and severely adverse tables to world GDP and the
+                  US rate), their path into
                   the provision -- the PD model, stage moves, property
                   collateral (transmission.py, stresstest/data/stress.yml)
                   -- and the risk measures (risk.py): the split by main

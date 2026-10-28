@@ -154,6 +154,8 @@ def derivation(sid: str, system, path=None) -> pd.DataFrame:
             continue
         s = _values(system, ref.get("from") or v, ref.get("countries"))
         b = ref.get("base")
+        src = ref.get("from") or v
+        last = system.last_actual(src) if src in system.order else None
         for j, yr in enumerate(ref.get("years") or []):
             rec = float(s[yr]) if yr in s.index else None
             refv = float(s[int(b)]) if (how == "change" and b is not None
@@ -163,7 +165,9 @@ def derivation(sid: str, system, path=None) -> pd.DataFrame:
                          "reference": refv if how == "change" else 0.0,
                          "reference_year": int(b) if how == "change" else None,
                          "shock": held[j] if j < len(held) else None,
-                         "rule": how})
+                         "rule": how,
+                         # a year past the last outturn is the IMF's projection
+                         "projected": bool(last is not None and int(yr) > int(last))})
         n = len(ref.get("years") or [])
         for k, x in enumerate(ref.get("then") or []):
             rows.append({"variable": v, "label": system.label(v), "unit": system.unit(v),

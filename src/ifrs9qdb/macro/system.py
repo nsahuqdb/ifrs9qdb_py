@@ -145,7 +145,7 @@ def load_panel(store, spec: dict | None = None, vintage=None, project_root=None)
             glob[v], last[(v, "G")] = one(m["series"], m.get("transform"))
         elif m.get("panel_series"):
             per = {}
-            for c in countries:
+            for c in (m.get("countries") or countries):
                 per[c], last[(v, c)] = one(m["panel_series"].format(c=c), m.get("transform"),
                                            m["deflate"].format(c=c) if m.get("deflate") else None)
             pan[v] = per

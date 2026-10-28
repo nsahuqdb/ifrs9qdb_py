@@ -50,6 +50,9 @@ scenarios:
       barely moved in 1986: 3.4% against 3.7% in 1985. Its fall from 4.6% in
       1984 had already happened in 1985, before the price war, and growth
       picked up to 3.9% and 4.5% in 1987-88 as cheap oil helped importers.
+      Qatar's real GDP, then mostly oil output, fell 13% in 1985 and grew 3.7%
+      in 1986 (IMF WEO): the price war cut Qatar's revenue rather than its
+      volumes.
     narrative: >-
       The price war is replayed from Y1. Oil falls by about half against the
       forecast in Y1, recovers a quarter in Y2 and falls a fifth again in Y3;
@@ -58,7 +61,8 @@ scenarios:
       above it in Y2 and Y3, as in 1987-88. Qatar feels it through public
       finances: lower hydrocarbon revenue cuts real government spending in
       the same year and the next, which slows non-oil growth; credit and
-      property follow a year behind. Nothing in Qatar is set directly.
+      property follow a year behind, and Qatar's real GDP follows non-oil
+      growth and the oil price. Nothing in Qatar is set directly.
     why:
       OIL_PRICE: The defining shock. The oil price's recorded change in each
         year of 1986-88.
@@ -484,14 +488,16 @@ scenarios:
       Gulf was disrupted; Qatar's real GDP fell 14.6% in 1990.
     narrative: >-
       Oil rises 28% against the forecast in Y1 and falls 15% in Y2. Qatar's
-      non-oil growth is 19.9 and 6.8 points below the forecast and GCC growth 7.9
-      and 12.5 points below. The shock is far larger than anything the
+      real GDP growth is 19.9 and 6.8 points below the forecast, non-oil
+      growth is given the same path, and GCC growth is 7.9 and 12.5 points
+      below. The shock is far larger than anything the
       linked effects were estimated on, so their part is an extrapolation;
       the scenario is a tail case, not a central one.
     why:
       OIL_PRICE: The oil price's recorded change in 1990-91.
-      NONOIL_GDP_QAT: Qatar's real GDP growth in 1990-91 less its 1989 growth;
-        non-oil GDP was not measured then.
+      GDP_QAT: Qatar's real GDP growth in 1990-91 less its 1989 growth.
+      NONOIL_GDP_QAT: The same as Qatar's real GDP, since non-oil GDP was not
+        measured then.
       GDP_GCC: The six countries' average growth in 1990-91 less their 1989
         growth.
     book: >-
@@ -504,7 +510,8 @@ scenarios:
         url: https://www.nber.org/papers/w16790
     main:
       OIL_PRICE: {how: actual, years: [1990, 1991], values: [28.28, -15.33]}
-      NONOIL_GDP_QAT: {how: change, base: 1989, years: [1990, 1991], from: GDP_GCC, countries: [QAT], values: [-19.94, -6.82]}
+      GDP_QAT: {how: change, base: 1989, years: [1990, 1991], countries: [QAT], values: [-19.94, -6.82]}
+      NONOIL_GDP_QAT: {how: change, base: 1989, years: [1990, 1991], from: GDP_QAT, countries: [QAT], values: [-19.94, -6.82]}
       GDP_GCC: {how: change, base: 1989, years: [1990, 1991], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-7.89, -12.52]}
 
   - id: H10
@@ -528,21 +535,26 @@ scenarios:
       October 2027.
     narrative: >-
       Not a past episode: the IMF's own projection, replayed as if it hit
-      again on top of the forecast. In Y1 oil is 41% above the forecast, Qatar's
-      non-oil growth 4.3 points below and GCC growth 11.3 points below. In Y2
-      the reopening brings oil down 9%, non-oil growth 2.5 points above
-      the forecast and GCC growth 7.7 points above. The higher oil price supports
-      government spending in Y1, which is why non-oil growth falls much less
-      than GCC growth.
+      again on top of the forecast. In Y1 LNG exports stop: Qatar's real GDP
+      growth is 17.4 points below the forecast, oil 41% above it, non-oil
+      growth 4.3 points below and GCC growth 11.3 points below. In Y2 the
+      reopening brings output back: Qatar's real GDP growth 17.0 points
+      above the forecast, oil down 9%, non-oil growth 2.5 points above and
+      GCC growth 7.7 points above. The higher oil price supports government
+      spending in Y1, which is why non-oil growth falls much less than total
+      GDP.
     why:
       OIL_PRICE: The IMF's projected change in the oil price for 2026 and
         2027.
+      GDP_QAT: Qatar's projected real GDP growth in 2026-27 less 2025's
+        (-15.6% and +18.8% against 1.8%).
       NONOIL_GDP_QAT: Projected non-oil growth in 2026-27 less 2025's.
       GDP_GCC: The six countries' average projected growth in 2026-27 less
         their 2025 growth.
     book: >-
-      The external book through GCC growth, the internal book through
-      non-oil growth.
+      The external book through GCC growth, of which Qatar's fall is part;
+      the internal book through non-oil growth, which falls far less than
+      total GDP because QDB's borrowers are outside oil and gas.
     limits: >-
       2026-27 are projections, not outturns. The run's own forecast may
       already contain part of this projection; the scenario then asks what a
@@ -556,6 +568,7 @@ scenarios:
         url: https://www.tradingview.com/news/reuters.com,2026-10-26:newsml_Zaw9SpZ3l:0-zawya-gcc-economy-faces-4-8-contraction-in-2026-imf-says/
     main:
       OIL_PRICE: {how: actual, years: [2026, 2027], values: [41.33, -8.71]}
+      GDP_QAT: {how: change, base: 2025, years: [2026, 2027], countries: [QAT], values: [-17.39, 16.95]}
       NONOIL_GDP_QAT: {how: change, base: 2025, years: [2026, 2027], values: [-4.31, 2.54]}
       GDP_GCC: {how: change, base: 2025, years: [2026, 2027], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-11.32, 7.73]}
 
@@ -780,14 +793,17 @@ scenarios:
       2027. Damage at Ras Laffan keeps about 17% of Qatar's LNG capacity out
       for three to five years even after reopening.
     narrative: >-
-      Y1 is the IMF's 2026 shock: oil 41% above the forecast, Qatar's non-oil
-      growth 4.3 points below and GCC growth 11.3 points below. Instead of
-      the 2027 rebound, Y2 repeats it: oil stays at its higher level, and
-      non-oil and GCC growth are again 4.3 and 11.3 points below the forecast.
-      From Y3 the linked effects take over.
+      Y1 is the IMF's 2026 shock: Qatar's real GDP growth 17.4 points below
+      the forecast, oil 41% above it, non-oil growth 4.3 points below and GCC
+      growth 11.3 points below. Instead of the 2027 rebound, Y2 repeats it:
+      LNG exports stay cut, oil stays at its higher level, and Qatar's GDP,
+      non-oil and GCC growth are again 17.4, 4.3 and 11.3 points below the
+      forecast. From Y3 the linked effects take over.
     why:
       OIL_PRICE: The IMF's projected 2026 change, then held at that level (no
         further change) in Y2.
+      GDP_QAT: Qatar's projected 2026 real GDP growth against 2025, in both Y1
+        and Y2.
       NONOIL_GDP_QAT: The projected 2026 change against 2025, in both Y1 and
         Y2.
       GDP_GCC: The six countries' projected 2026 change against 2025, in both
@@ -800,6 +816,7 @@ scenarios:
         url: https://www.thenationalnews.com/business/economy/2026/10/13/imf-cuts-2026-growth-forecasts-for-gulf-economies-due-to-prolonged-hormuz-closure/
     main:
       OIL_PRICE: {how: actual, years: [2026], then: [0.0], values: [41.33, 0]}
+      GDP_QAT: {how: change, base: 2025, years: [2026, 2026], countries: [QAT], values: [-17.39, -17.39]}
       NONOIL_GDP_QAT: {how: change, base: 2025, years: [2026, 2026], values: [-4.31, -4.31]}
       GDP_GCC: {how: change, base: 2025, years: [2026, 2026], countries: [QAT, SAU, ARE, KWT, OMN, BHR], values: [-11.32, -11.32]}
 

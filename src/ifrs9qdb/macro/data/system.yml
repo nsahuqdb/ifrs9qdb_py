@@ -23,6 +23,7 @@ signs:
   US_RATE: -1
   GOV_SPEND_QAT: 1
   NONOIL_GDP_QAT: 1
+  GDP_QAT: 1
   CREDIT_QAT: 1
   PROPERTY_QAT: 1
   GDP_GCC: 1
@@ -131,3 +132,23 @@ variables:
     start_year: 1991
     same: [GDP_WLD, OIL_PRICE]
     lag: [OIL_PRICE]
+  # Last in the order: nothing depends on it, so the Monte Carlo's draws for
+  # every other variable are the same as before it was added.
+  GDP_QAT:
+    label: Qatar real GDP growth
+    about: >-
+      Qatar's total real GDP growth, LNG and oil output included (IMF WEO).
+      Hydrocarbon output is set by LNG capacity and OPEC decisions rather
+      than by demand, so when not set it follows non-oil growth and the oil
+      price as estimated on Qatar's own history; a scenario where output
+      itself is cut (a war, the Hormuz closure, quota cuts) sets it. The
+      provision reads non-oil growth for QDB's borrowers and GCC growth,
+      of which Qatar is part, for the external book.
+    unit: pp
+    level: Qatar
+    panel_series: IMF:WEO:{c}:NGDP_RPCH:A
+    countries: [QAT]
+    transform: none
+    own_lag: candidate
+    same: [GDP_WLD, OIL_PRICE, NONOIL_GDP_QAT]
+    lag: [OIL_PRICE, NONOIL_GDP_QAT]
