@@ -102,7 +102,9 @@ src/ifrs9qdb/
                   config version: the forecasts (five years from the first
                   unconfirmed year), every history year the source has
                   revised or added, and the explicit scenario weights that
-                  follow, all unrounded; system.py the linked effects: a recursive system
+                  follow, all unrounded -- each part only when asked for,
+                  the weights never unless asked, so values set by hand
+                  stay; system.py the linked effects: a recursive system
                   (macro/data/system.yml) estimated on outturns with
                   Bayesian model averaging and sign restrictions, that moves
                   a scenario's other variables with its main ones (Qatar's

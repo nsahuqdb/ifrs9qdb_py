@@ -14,8 +14,8 @@ import yaml
 
 from ifrs9qdb.macro import MacroStore, match_candidates, refresh
 from ifrs9qdb.macro.prng import mulmod, normals, uniforms
-from ifrs9qdb.macro.quarter import (first_forecast_year, propose, render_model_inputs,
-                                    replace_top_level_block)
+from ifrs9qdb.macro.quarter import (PARTS, first_forecast_year, propose,
+                                    render_model_inputs, replace_top_level_block)
 from ifrs9qdb.macro.sources import (DataMapper, ImfSdmx, norm_period, parse_datamapper,
                                     parse_sdmx_csv, read_file, static_seed)
 from ifrs9qdb.macro.store import annualise, to_concept_unit
@@ -323,7 +323,8 @@ class TestQuarter:
 
     def test_the_explicit_weights_are_the_v2_weights_of_the_new_inputs(self, store):
         from ifrs9qdb.etl.macro import compute_internal_scenario_weights
-        p = propose(store, PKG / "config", PKG / "static", "2026-09-30")
+        p = propose(store, PKG / "config", PKG / "static", "2026-09-30",
+                    parts=list(PARTS))
         sev = pd.read_csv(PKG / "static" / "scenario_severity.csv", comment="#")
         want = compute_internal_scenario_weights(p["history_nonoil"]["rows"]["value"],
                                                  p["nonoil"]["values"][:2], sev)
@@ -351,8 +352,44 @@ class TestQuarter:
         assert any("fractions" in w for w in p["warnings"])
         assert p["checks"]["ok"].all()
 
-    def test_the_new_config_keeps_every_comment(self, store):
+    def test_weights_fixed_by_hand_stay_unless_asked(self, store):
         p = propose(store, PKG / "config", PKG / "static", "2026-09-30")
+        assert "weights" not in p["parts"]
+        assert not (p["changes"]["section"] == "Scenario weights").any()
+        old = (PKG / "config" / "model_inputs.yml").read_text()
+        new = render_model_inputs(p)
+        blk = lambda t: replace_top_level_block(t, "macro_source", "")  # noqa: E731
+        assert yaml.safe_load(new)["internal_scenario_weights"] == \
+            yaml.safe_load(old)["internal_scenario_weights"]
+        assert "Rounded snapshot of the auto (V2) weights" in blk(new)
+
+    def test_only_the_parts_asked_for_change(self, store):
+        old = (PKG / "config" / "model_inputs.yml").read_text()
+        p = propose(store, PKG / "config", PKG / "static", "2026-09-30",
+                    parts=["nonoil_history"])
+        assert set(p["changes"]["section"]) == {"History"}
+        new = render_model_inputs(p)
+        for key in ("mev_forecasts", "external_gcc_country_growth",
+                    "external_gcc_country_prices", "internal_scenario_weights"):
+            assert yaml.safe_load(new)[key] == yaml.safe_load(old)[key]
+        assert all(h["changed"] == 0 for h in p["history_gcc"].values())
+        assert p["history_nonoil"]["changed"] > 0
+
+    def test_a_forecast_kept_for_a_test_is_left_in_fractions(self, store, tmp_path):
+        cfg = tmp_path / "config"
+        shutil.copytree(PKG / "config", cfg)
+        y = yaml.safe_load((cfg / "model_inputs.yml").read_text())
+        for k in y["mev_forecasts"]["forecasts"]:
+            y["mev_forecasts"]["forecasts"][k][0] = 0.029
+        (cfg / "model_inputs.yml").write_text(yaml.safe_dump(y, sort_keys=False))
+        p = propose(store, cfg, PKG / "static", "2026-09-30", parts=["gcc_forecast"])
+        assert p["nonoil"]["values"] == [0.029] * 5
+        assert p["checks"]["ok"].all()                     # nothing blocks the write
+        assert any("kept as it is" in w for w in p["warnings"])
+
+    def test_the_new_config_keeps_every_comment(self, store):
+        p = propose(store, PKG / "config", PKG / "static", "2026-09-30",
+                    parts=list(PARTS))
         text = render_model_inputs(p)
         old = (PKG / "config" / "model_inputs.yml").read_text()
         o = yaml.safe_load(old)["internal_scenario_weights"]
@@ -385,6 +422,22 @@ class TestQuarter:
         h = pd.read_csv(d / "static" / "non_oil_gdp_history.csv", comment="#")
         assert np.allclose(h.set_index("year")["value"],
                            p["history_nonoil"]["rows"].set_index("year")["value"])
+
+    def test_a_history_update_alone_leaves_model_inputs_as_it_is(self, store, tmp_path):
+        from ifrs9qdb import snapshots as S
+        from ifrs9qdb.macro.quarter import apply
+        root = tmp_path / "snaps"
+        S.create_snapshot("d1", "", "nsahu", config_dir=PKG / "config",
+                          static_dir=PKG / "static", run_config_path=None,
+                          snapshots_root=root)
+        d = root / "d1"
+        before = (d / "config" / "model_inputs.yml").read_bytes()
+        p = propose(store, d / "config", d / "static", "2026-09-30",
+                    parts=["nonoil_history"])
+        assert apply(p, "d1", snapshots_root=root)["ok"]
+        assert (d / "config" / "model_inputs.yml").read_bytes() == before
+        assert (d / "static" / "gcc_real_gdp_growth.csv").read_bytes() == \
+            (PKG / "static" / "gcc_real_gdp_growth.csv").read_bytes()
 
     def test_dollars_are_read_as_billions(self):
         from ifrs9qdb.macro.store import unit_divisor

@@ -5,7 +5,9 @@ reporting date, and returns what the new config would hold, with every value
 that differs from the config it starts from and the checks that held or
 failed. ``apply`` writes it into a DRAFT config snapshot, where it is tested
 and approved like any other edit. Nothing here runs a calculation or touches
-a run. What it fills:
+a run. What it fills, each part only when it is asked for (``PARTS``), so a
+value set by hand -- a fixed set of weights, a forecast entered for a test --
+stays as it is; the weights are filled only on request:
 
     model_inputs.yml
       mev_forecasts                non-oil GDP growth, the internal PD
@@ -60,11 +62,21 @@ from .catalogue import countries as _countries
 from .store import MacroStore
 
 __all__ = ["propose", "apply", "render_model_inputs", "replace_top_level_block", "GCC",
-           "first_forecast_year"]
+           "first_forecast_year", "PARTS", "DEFAULT_PARTS"]
 
 GCC = ["Bahrain", "Kuwait", "Oman", "Qatar", "Saudi Arabia", "United Arab Emirates"]
 _RECORD_SOURCES = {"IMF", "DM", "NPC"}
 _TOL = 1e-9                 # a change smaller than this is the same value
+
+# What can be filled, each on its own: a value typed by hand (a fixed set of
+# weights, a forecast set for a test) stays as it is unless its part is
+# asked for. The weights are never filled unless asked.
+PARTS = {"nonoil_forecast": "Non-oil GDP forecast",
+         "gcc_forecast": "GCC growth and nominal GDP forecasts",
+         "nonoil_history": "Non-oil GDP history",
+         "gcc_history": "GCC growth and nominal GDP history",
+         "weights": "Internal scenario weights (explicit)"}
+DEFAULT_PARTS = ("nonoil_forecast", "gcc_forecast", "nonoil_history", "gcc_history")
 
 
 def _iso(name: str) -> str:
@@ -169,8 +181,10 @@ def _history_update(cur: pd.DataFrame, rec: pd.DataFrame, keys: list) -> dict:
 def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
             vintage: str | None = None, project_root=None,
             first_year: int | None = None, n_years: int | None = None,
-            nonoil_series: str | None = None) -> dict:
-    """What the new quarter's config would hold. See the module notes."""
+            nonoil_series: str | None = None, parts=None) -> dict:
+    """What the config would hold with ``parts`` (keys of ``PARTS``;
+    ``DEFAULT_PARTS`` when None) filled from the store, everything else as
+    it is. See the module notes."""
     from ..etl.macro import compute_internal_scenario_weights
     config_dir, static_dir = Path(config_dir), Path(static_dir)
     vintage = vintage or store.latest()
@@ -182,6 +196,7 @@ def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
     n = int(n_years or ((model.get("horizons") or {}).get("n_forecasts") or 5))
     notes, checks = [], []
     records = _records(store, vintage)
+    parts = [x for x in PARTS if x in set(DEFAULT_PARTS if parts is None else parts)]
 
     # --- confirmed years and the five-year rule
     hist = _read_values(static_dir / "non_oil_gdp_history.csv")
@@ -208,12 +223,12 @@ def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
     sid_no = nonoil.attrs.get("series_id", "") if len(nonoil) else ""
     m = dict(zip(nonoil["year"], nonoil["value"])) if len(nonoil) else {}
     vals = [m.get(y, np.nan) for y in years]
-    if sid_no and not any(np.isfinite(v) for v in vals):
+    if "nonoil_forecast" in parts and sid_no and not any(np.isfinite(v) for v in vals):
         notes.append(f"{sid_no} has no values for {years[0]}-{years[-1]} (it is a "
                      "history, not a forecast): the current non-oil forecast is kept.")
         sid_no = ""
     if not sid_no:
-        if not notes:
+        if not notes and "nonoil_forecast" in parts:
             notes.append("No non-oil GDP forecast in the store (REO or FRED): the "
                          "current forecast is kept.")
     else:
@@ -234,6 +249,9 @@ def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
         v = v[np.isfinite(v)]
         return bool(in_points and len(v) and np.max(np.abs(v)) < 0.2 and (v != 0).any())
 
+    fill_no = "nonoil_forecast" in parts
+    if not fill_no:
+        sid_no = ""
     if sid_no and fractions(vals):
         vals = [100.0 * v for v in vals]
         notes.append("The store's non-oil forecast looked like fractions against a "
@@ -256,21 +274,31 @@ def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
         if sid_no:
             row[col - 1] = float(vals[i])
         fc_new[int(k)] = row
-    if not sid_no and fractions([fc_new[k][col - 1] for k in fc_new]):
+    kept_fr = fractions([fc_new[k][col - 1] for k in fc_new])
+    if fill_no and not sid_no and kept_fr:
         for k in fc_new:
             fc_new[k][col - 1] *= 100.0
         notes.append("The current non-oil forecast is entered as fractions (0.029 for "
                      "2.9%) against a history in points: it is multiplied by 100. The PD "
                      "model reads 0.029 as 0.029% growth.")
+    elif not fill_no and kept_fr:
+        notes.append("The non-oil forecast in this config looks like fractions (0.029 for "
+                     "2.9%) against a history in points; it is kept as it is, as it is not "
+                     "filled from the store here.")
     nonoil_new = [fc_new[k][col - 1] for k in sorted(fc_new)]
-    checks.append({"check": "Non-oil GDP in percentage points",
-                   "ok": not fractions(nonoil_new)})
+    if fill_no:
+        checks.append({"check": "Non-oil GDP in percentage points",
+                       "ok": not fractions(nonoil_new)})
 
     # --- GCC growth and nominal GDP (the external model's driver and weights)
     gg_old = mi.get("external_gcc_country_growth") or {}
     gp_old = mi.get("external_gcc_country_prices") or {}
     gg_new, gp_new, gsrc = {}, {}, {}
     for name in GCC:
+        if "gcc_forecast" not in parts:
+            gg_new[name] = [float(x) for x in (gg_old.get(name) or [])]
+            gp_new[name] = [float(x) for x in (gp_old.get(name) or [])]
+            continue
         iso = _iso(name)
         g, sg, _ = _concept_values(store, f"GDP_{iso}", years, vintage, project_root)
         p, sp, _ = _concept_values(store, f"NGDPD_{iso}", years, vintage, project_root)
@@ -287,15 +315,19 @@ def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
             gp_new[name] = [float(x) for x in (gp_old.get(name) or [])]
             notes.append(f"{name}: no WEO nominal GDP for {years[0]}-{years[-1]}; "
                          "the current weights are kept.")
-    checks.append({"check": "Every GCC country has a growth path",
-                   "ok": all(len(v) == n for v in gg_new.values())})
-    checks.append({"check": "GCC nominal GDP is positive (weights add up)",
-                   "ok": all(len(v) == n and all(x > 0 for x in v) for v in gp_new.values())})
+    if "gcc_forecast" in parts:
+        checks.append({"check": "Every GCC country has a growth path",
+                       "ok": all(len(v) == n for v in gg_new.values())})
+        checks.append({"check": "GCC nominal GDP is positive (weights add up)",
+                       "ok": all(len(v) == n and all(x > 0 for x in v)
+                                 for v in gp_new.values())})
 
     # --- history: the source's record of every year before the forecast
     rec = pd.DataFrame(columns=["year", "value"])
     sid_h = nonoil.attrs.get("series_id", "") if len(nonoil) else ""
-    if sid_h in records:
+    if "nonoil_history" not in parts:
+        sid_h = ""
+    elif sid_h in records:
         rec = nonoil[nonoil["actual"] & (nonoil["year"] < years[0])][["year", "value"]]
     elif sid_h:
         notes.append(f"{sid_h} is not a record of past years, so the non-oil history "
@@ -307,7 +339,7 @@ def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
                           ("gcc_gdp_current_prices.csv", "NGDPD")):
         cur = _read_values(static_dir / fname)
         rows, srcs = [], set()
-        for name in GCC:
+        for name in (GCC if "gcc_history" in parts else []):
             a = store.concept_annual(f"{prefix}_{_iso(name)}", vintage, project_root)
             sid = a.attrs.get("series_id", "")
             if not len(a) or sid not in records or str(sid).startswith("STATIC"):
@@ -328,7 +360,7 @@ def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
     sev = _read_values(static_dir / "scenario_severity.csv")
     w_new = {}
     h_after = h_up["rows"]["value"].to_numpy(float) if len(h_up["rows"]) else np.array([])
-    if len(sev) and len(h_after) >= 2:
+    if "weights" in parts and len(sev) and len(h_after) >= 2:
         nw = int(iw.get("n_forecast_years", 2))
         with _warnings.catch_warnings(record=True) as caught:
             _warnings.simplefilter("always")
@@ -339,8 +371,9 @@ def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
         notes += [str(c.message) for c in caught]
     w_new = {k: float(v) for k, v in w_new.items()}
     w_old = {k: float(v) for k, v in (iw.get("explicit_weights") or {}).items()}
+    fill_w = "weights" in parts
     ew = mi.get("external_scenario_weights") or {}
-    if ew.get("mode", "explicit") == "explicit":
+    if fill_w and ew.get("mode", "explicit") == "explicit":
         notes.append("The external scenario weights are explicit in this config and are "
                      "not recomputed; with mode auto_gcc_cdf the run works them out from "
                      "the GCC path.")
@@ -359,30 +392,32 @@ def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
     changes = []
     old_no = [float((fc_old.get(k) or fc_old.get(str(k)) or [np.nan] * col)[col - 1])
               for k in fc_keys[:n]] if fc_old else [np.nan] * n
-    changes += rows_for("Forecast", "Non-oil GDP growth, Qatar", old_no, nonoil_new)
-    for name in GCC:
+    if fill_no:
+        changes += rows_for("Forecast", "Non-oil GDP growth, Qatar", old_no, nonoil_new)
+    for name in (GCC if "gcc_forecast" in parts else []):
         changes += rows_for("Forecast", f"Real GDP growth, {name}",
                             gg_old.get(name) or [], gg_new[name])
-    for name in GCC:
+    for name in (GCC if "gcc_forecast" in parts else []):
         changes += rows_for("Forecast", f"Nominal GDP (USD bn), {name}",
                             gp_old.get(name) or [], gp_new[name])
     for r in h_up["changes"].itertuples():
         changes.append({"section": "History", "item": "Non-oil GDP growth, Qatar",
                         "year": int(r.year), "current": r.current, "proposed": r.proposed,
                         "change": _diff(r.proposed, r.current)})
-    for k in w_new:
+    for k in (w_new if fill_w else []):
         o = w_old.get(k, np.nan)
         changes.append({"section": "Scenario weights", "item": f"Internal: {k}",
                         "year": None, "current": o, "proposed": w_new[k],
                         "change": _diff(w_new[k], o)})
-    ch = pd.DataFrame(changes)
+    ch = pd.DataFrame(changes, columns=["section", "item", "year", "current", "proposed",
+                                        "change"])
     if len(ch):
         a, b = ch["current"].astype(float), ch["proposed"].astype(float)
         moved = ~(np.isclose(a, b, rtol=_TOL, atol=_TOL) | (a.isna() & b.isna()))
 
     release = store.meta(vintage).get("created", "")
     return {
-        "ok": True, "vintage": vintage, "release": release,
+        "ok": True, "vintage": vintage, "release": release, "parts": parts,
         "years": years, "rule": rule["rule"], "first_year": years[0],
         "last_confirmed": rule["last_confirmed"],
         "nonoil": {"series_id": sid_no, "values": nonoil_new, "column": col},
@@ -392,7 +427,7 @@ def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
         "history_gcc": gcc_hist,
         "weights": {"internal": {"mode": iw.get("mode", "explicit"),
                                  "n_forecast_years": int(iw.get("n_forecast_years", 2)),
-                                 "current": w_old, "proposed": w_new},
+                                 "current": w_old, "proposed": w_new, "write": fill_w},
                     "external": {"mode": ew.get("mode", "explicit")}},
         "changes": ch, "changed": int(moved.sum()) if len(ch) else 0,
         "warnings": notes, "checks": pd.DataFrame(checks),
@@ -442,24 +477,29 @@ def render_model_inputs(p: dict) -> str:
     internal weights replaced, a ``macro_source`` block naming where they
     came from, every other line and comment kept."""
     t = p["model_inputs_text"]
-    t = replace_top_level_block(t, "external_gcc_country_growth",
-                                _dump("external_gcc_country_growth", p["gcc_growth"]))
-    t = replace_top_level_block(t, "external_gcc_country_prices",
-                                _dump("external_gcc_country_prices", p["gcc_prices"]))
-    t = replace_top_level_block(t, "mev_forecasts",
-                                _dump("mev_forecasts", {"forecasts": p["mev_forecasts"]}))
+    parts = p.get("parts") or list(DEFAULT_PARTS)
+    if "gcc_forecast" in parts:
+        t = replace_top_level_block(t, "external_gcc_country_growth",
+                                    _dump("external_gcc_country_growth", p["gcc_growth"]))
+        t = replace_top_level_block(t, "external_gcc_country_prices",
+                                    _dump("external_gcc_country_prices", p["gcc_prices"]))
+    if "nonoil_forecast" in parts:
+        t = replace_top_level_block(t, "mev_forecasts",
+                                    _dump("mev_forecasts", {"forecasts": p["mev_forecasts"]}))
     w = (p.get("weights") or {}).get("internal") or {}
-    if w.get("proposed"):
+    if "weights" in parts and w.get("proposed"):
         old = (yaml.safe_load(p["model_inputs_text"]) or {}).get("internal_scenario_weights")
         t = replace_top_level_block(t, "internal_scenario_weights",
                                     _weights_block(old, w["proposed"], p["vintage"]))
     src = {"vintage": p["vintage"], "store_created": p["release"],
+           "filled": [PARTS[x] for x in parts],
            "first_forecast_year": int(p["first_year"]),
            "years": [int(y) for y in p["years"]],
            "non_oil_gdp": p["nonoil"]["series_id"],
            "non_oil_history": (p.get("history_nonoil") or {}).get("series_id", ""),
            "gcc": sorted(set(p["gcc_sources"].values())),
-           "filled": _dt.datetime.now().strftime("%Y-%m-%d %H:%M")}
+           "date": _dt.datetime.now().strftime("%Y-%m-%d %H:%M")}
+    src = {k: v for k, v in src.items() if v not in ("", [], None)}
     t = replace_top_level_block(t, "macro_source", _dump("macro_source", src))
     return t
 
@@ -491,12 +531,16 @@ def apply(p: dict, snapshot_label: str, snapshots_root=None, edited_by=None) -> 
     if not p.get("ok"):
         return {"ok": False, "message": p.get("reason", "Nothing to apply.")}
     out = []
-    r = save_snapshot_yaml(snapshot_label, "config/model_inputs.yml",
-                           render_model_inputs(p), snapshots_root=snapshots_root,
-                           edited_by=edited_by)
-    if not r.get("ok"):
-        return r
-    out.append(r["message"])
+    parts = p.get("parts") or list(DEFAULT_PARTS)
+    # model_inputs.yml only when a part of it is filled: a history update
+    # alone leaves it as it is
+    if {"nonoil_forecast", "gcc_forecast", "weights"} & set(parts):
+        r = save_snapshot_yaml(snapshot_label, "config/model_inputs.yml",
+                               render_model_inputs(p), snapshots_root=snapshots_root,
+                               edited_by=edited_by)
+        if not r.get("ok"):
+            return r
+        out.append(r["message"])
     d = snapshot_dir(snapshot_label, snapshots_root)
     files = [("static/non_oil_gdp_history.csv", p.get("history_nonoil") or {})]
     files += [(f"static/{f}", h) for f, h in (p.get("history_gcc") or {}).items()]
