@@ -590,7 +590,8 @@ def read_static_csv_with_header(path) -> dict:
     header = lines[:i]
     try:
         data = pd.read_csv(p, comment="#", skip_blank_lines=True,
-                           dtype={c: str for c in _CODE_COLUMNS})
+                           dtype={c: str for c in _CODE_COLUMNS},
+                           float_precision="round_trip")
     except Exception:
         data = pd.DataFrame()
     return {"comment_header": header, "data": _normalise_code_columns(data)}
@@ -637,15 +638,17 @@ def write_static_csv_with_header(path, df: pd.DataFrame,
 
 def save_snapshot_csv(label: str, relpath: str, df: pd.DataFrame,
                       snapshots_root=None, edited_by=None,
-                      audit=None) -> dict:
-    """Write a CSV into a draft snapshot, preserving its comment header."""
+                      audit=None, comment_header=None) -> dict:
+    """Write a CSV into a draft snapshot, preserving its comment header (or
+    writing ``comment_header`` when given)."""
     root = _root(snapshots_root)
     bad = _editable_guard(label, relpath, root)
     if bad:
         return bad
     full = root / label / relpath
-    existing = read_static_csv_with_header(full)
-    write_static_csv_with_header(full, df, existing["comment_header"])
+    if comment_header is None:
+        comment_header = read_static_csv_with_header(full)["comment_header"]
+    write_static_csv_with_header(full, df, comment_header)
     if audit is not None:
         try:
             audit.record("snapshot_edit", relpath, snapshot=label,

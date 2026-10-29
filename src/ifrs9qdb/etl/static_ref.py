@@ -156,7 +156,8 @@ def _read_dir(directory: str, stamp: tuple = ()) -> tuple:
         # comment lines is safer than a fixed skiprows, which would break the
         # moment someone adds or removes a line of explanation.
         try:
-            frame = pd.read_csv(p, comment="#", skip_blank_lines=True)
+            frame = pd.read_csv(p, comment="#", skip_blank_lines=True,
+                                float_precision="round_trip")
             items.append((name, _read_percent_signs(frame, _declared_units(p))))
         except Exception as exc:
             raise ValueError(f"could not read {p.name}: {exc}") from exc

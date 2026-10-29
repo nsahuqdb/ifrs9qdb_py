@@ -294,17 +294,115 @@ class TestQuarter:
         assert set(p["gcc_growth"]) == {"Bahrain", "Kuwait", "Oman", "Qatar",
                                         "Saudi Arabia", "United Arab Emirates"}
         assert p["checks"]["ok"].all()
-        assert len(p["changes"]) == 5 * 13
+        assert (p["changes"]["section"] == "Forecast").sum() == 5 * 13
+
+    def test_the_history_takes_every_revised_and_new_year(self, store):
+        p = propose(store, PKG / "config", PKG / "static", "2026-09-30")
+        a = store.concept_annual("NONOIL_GDP_QAT").set_index("year")["value"]
+        h = p["history_nonoil"]
+        rows = h["rows"].set_index("year")["value"]
+        assert rows.index.min() == 2015                    # the file keeps its first year
+        assert rows.index.max() == 2025                    # the last year before the forecast
+        assert np.allclose(rows.loc[2015:2025], a.loc[2015:2025])
+        assert h["added"] == 1 and h["revised"] == 10
+        hist = p["changes"][p["changes"]["section"] == "History"]
+        assert len(hist) == 11 and np.isnan(hist["current"].iloc[-1])
+
+    def test_a_value_the_file_already_has_is_not_a_revision(self, store, tmp_path):
+        static = tmp_path / "static"
+        shutil.copytree(PKG / "static", static)
+        a = store.concept_annual("NONOIL_GDP_QAT")
+        a = a[a["actual"] & (a["year"] >= 2015)]
+        # the history as the store has it, written with percent signs as a
+        # spreadsheet saves it, and to ten digits
+        body = "\n".join(f"{y},{v:.10g}%" for y, v in zip(a["year"], a["value"]))
+        (static / "non_oil_gdp_history.csv").write_text(
+            "# units: percentage_points\nyear,value\n" + body + "\n")
+        p = propose(store, PKG / "config", static, "2026-09-30")
+        assert p["history_nonoil"]["changed"] == 0
+
+    def test_the_explicit_weights_are_the_v2_weights_of_the_new_inputs(self, store):
+        from ifrs9qdb.etl.macro import compute_internal_scenario_weights
+        p = propose(store, PKG / "config", PKG / "static", "2026-09-30")
+        sev = pd.read_csv(PKG / "static" / "scenario_severity.csv", comment="#")
+        want = compute_internal_scenario_weights(p["history_nonoil"]["rows"]["value"],
+                                                 p["nonoil"]["values"][:2], sev)
+        got = p["weights"]["internal"]["proposed"]
+        assert got == pytest.approx(want, abs=1e-15)
+        assert sum(got.values()) == pytest.approx(1.0, abs=1e-12)
+
+    def test_a_forecast_entered_as_fractions_is_put_in_points(self, store, tmp_path):
+        # no non-oil series in the store, so the config's forecast is kept --
+        # and it is in fractions, as LIC run 330's was
+        d = Path(store.vdir) / store.latest()
+        ser = pd.read_csv(d / "series.csv", dtype=str, keep_default_na=False)
+        ser[~ser["series_id"].str.contains("NOIL")].to_csv(d / "series.csv", index=False)
+        cfg = tmp_path / "config"
+        shutil.copytree(PKG / "config", cfg)
+        y = yaml.safe_load((cfg / "model_inputs.yml").read_text())
+        fr = [-0.0019, 0.0292, 0.0303, 0.0378, 0.0310]
+        for i, k in enumerate(sorted(y["mev_forecasts"]["forecasts"])):
+            y["mev_forecasts"]["forecasts"][k][0] = fr[i]
+        (cfg / "model_inputs.yml").write_text(yaml.safe_dump(y, sort_keys=False))
+        from ifrs9qdb.macro import store as store_mod
+        store_mod._FILES.clear()
+        p = propose(store, cfg, PKG / "static", "2026-09-30")
+        assert p["nonoil"]["values"] == pytest.approx([100 * v for v in fr])
+        assert any("fractions" in w for w in p["warnings"])
+        assert p["checks"]["ok"].all()
 
     def test_the_new_config_keeps_every_comment(self, store):
         p = propose(store, PKG / "config", PKG / "static", "2026-09-30")
         text = render_model_inputs(p)
         old = (PKG / "config" / "model_inputs.yml").read_text()
-        comments = [ln for ln in old.splitlines() if ln.strip().startswith("#")]
+        o = yaml.safe_load(old)["internal_scenario_weights"]
+        block = replace_top_level_block(old, "internal_scenario_weights", "")
+        comments = [ln for ln in block.splitlines() if ln.strip().startswith("#")]
         assert all(c in text for c in comments)
         y = yaml.safe_load(text)
         assert y["macro_source"]["first_forecast_year"] == 2026
-        assert y["internal_scenario_weights"] == yaml.safe_load(old)["internal_scenario_weights"]
+        w = y["internal_scenario_weights"]
+        assert w["mode"] == o["mode"] and w["n_forecast_years"] == o["n_forecast_years"]
+        # written unrounded: the YAML reads back the very numbers proposed
+        assert w["explicit_weights"] == p["weights"]["internal"]["proposed"]
+        assert y["mev_forecasts"]["forecasts"][1][0] == p["nonoil"]["values"][0]
+
+    def test_the_draft_gets_the_history_with_where_it_came_from(self, store, tmp_path):
+        from ifrs9qdb import snapshots as S
+        from ifrs9qdb.macro.quarter import apply
+        root = tmp_path / "snaps"
+        S.create_snapshot("d1", "", "nsahu", config_dir=PKG / "config",
+                          static_dir=PKG / "static", run_config_path=None,
+                          snapshots_root=root)
+        d = root / "d1"
+        p = propose(store, d / "config", d / "static", "2026-09-30")
+        r = apply(p, "d1", snapshots_root=root)
+        assert r["ok"], r
+        text = (d / "static" / "non_oil_gdp_history.csv").read_text()
+        assert "# units: percentage_points" in text
+        assert f"# extracted_from: macro store vintage {p['vintage']}" in text
+        assert "# source: IMF:REO_MCD:QAT:NGDP_NOIL_RPCH:A" in text
+        h = pd.read_csv(d / "static" / "non_oil_gdp_history.csv", comment="#")
+        assert np.allclose(h.set_index("year")["value"],
+                           p["history_nonoil"]["rows"].set_index("year")["value"])
+
+    def test_dollars_are_read_as_billions(self):
+        from ifrs9qdb.macro.store import unit_divisor
+        assert unit_divisor("USD", "USD bn", [2.15e11, 2.3e11]) == 1e9
+        assert unit_divisor("U.S. dollars, billions", "USD bn", [215.6]) == 1.0
+        assert unit_divisor("USD", "% change", [2.15e11]) == 1.0
+        assert 55320437000 / unit_divisor("USD", "USD bn", [55320437000]) == 55.320437
+
+    def test_the_store_keeps_every_digit(self, store):
+        s = pd.DataFrame([{"series_id": "IMF:WEO:QAT:NGDP_RPCH:A", "source": "IMF",
+                           "dataset": "WEO", "country": "QAT", "indicator": "NGDP_RPCH",
+                           "freq": "A", "name": "x", "unit": "", "last_actual": "2025",
+                           "release": "new"}])
+        o = pd.DataFrame({"series_id": ["IMF:WEO:QAT:NGDP_RPCH:A"] * 2,
+                          "period": ["2026", "2027"], "value": [2.9192865516638, 0.1 + 0.2]})
+        v = store.save(s, o, label="digits")
+        got = store.observations(v, ["IMF:WEO:QAT:NGDP_RPCH:A"])["value"].tolist()
+        assert got == [2.9192865516638, 0.1 + 0.2]
 
     def test_replace_a_block(self):
         t = "# head\na: 1\nb:\n  - 1\n  - 2\n\n# c comment\nc: 3\n"

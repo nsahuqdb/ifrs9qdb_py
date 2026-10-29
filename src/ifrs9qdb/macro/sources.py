@@ -36,7 +36,7 @@ The sources:
                nominal GDP), so a new store is never empty.
 
 Nothing here touches a run: the store is read by the stress screens and by
-the new-quarter config fill, which writes a draft config for approval.
+the config update, which writes a draft config for approval.
 
 Every network call goes through one ``transport(url, headers)`` returning
 ``(status, bytes)``; the default is urllib with the environment's proxy and

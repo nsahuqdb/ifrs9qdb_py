@@ -89,6 +89,27 @@ def to_concept_unit(annual: pd.Series, transform: str) -> pd.Series:
     return annual.astype(float)
 
 
+def unit_divisor(series_unit: str, concept_unit: str, values) -> float:
+    """What a series is divided by to be in its concept's unit. Only money
+    in billions needs it: the IMF's API gives nominal GDP in US dollars
+    (215,559,615,000 for Qatar in 2025), the WEO's tables and the config in
+    billions (215.56). A division by a power of ten, not a multiplication by
+    its inverse, so 55,320,437,000 becomes 55.320437 and not
+    55.320437000000005."""
+    cu = str(concept_unit or "").strip().lower()
+    if not cu.endswith(" bn"):
+        return 1.0
+    su = str(series_unit or "").strip().lower()
+    if "billion" in su or su.endswith(" bn") or su == "9":
+        return 1.0
+    if "million" in su or su.endswith(" mn") or su == "6":
+        return 1e3
+    v = np.abs(np.asarray(values, dtype=float))
+    v = v[np.isfinite(v)]
+    # in units: no country's output reaches a million billion dollars
+    return 1e9 if len(v) and float(np.median(v)) > 1e6 else 1.0
+
+
 _FILES: "dict[str, tuple]" = {}
 _FILES_KEEP = 4                       # two vintages' series and observations
 
@@ -214,8 +235,9 @@ class MacroStore:
         d = self.vdir / vid
         d.mkdir(parents=True, exist_ok=False)
         series.to_csv(d / "series.csv", index=False)
-        obs.to_csv(d / "observations.csv.gz", index=False, compression="gzip",
-                   float_format="%.10g")
+        # every value as the source gave it: no float_format, which cut each
+        # to ten significant digits (2.9192865516638 was kept as 2.919286552)
+        obs.to_csv(d / "observations.csv.gz", index=False, compression="gzip")
         meta = {"vintage": vid,
                 "created": _dt.datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
                 "by": by or _who(), "label": label or "", "parent": parent,
@@ -243,8 +265,10 @@ class MacroStore:
         p = self.vdir / v / "observations.csv.gz" if v else None
         if not v or not p.is_file():
             return empty_frames()[1]
+        # round_trip: pandas' fast parser can miss the last digit
         o, idx = _read_cached(p, lambda: pd.read_csv(p, dtype={"series_id": str,
-                                                              "period": str}),
+                                                              "period": str},
+                                                     float_precision="round_trip"),
                               index="series_id")
         if ids is None:
             return o.copy()
@@ -330,7 +354,10 @@ class MacroStore:
             return pd.DataFrame({"year": pd.Series(dtype=int),
                                  "value": pd.Series(dtype=float),
                                  "actual": pd.Series(dtype=bool)})
-        a = to_concept_unit(self.annual(sid, vintage), row["transform"])
+        a = self.annual(sid, vintage)
+        su = s.loc[s["series_id"] == sid, "unit"]
+        a = a / unit_divisor(su.iloc[0] if len(su) else "", row.get("unit", ""), a.to_numpy())
+        a = to_concept_unit(a, row["transform"])
         la = s.loc[s["series_id"] == sid, "last_actual"]
         la = period_year(la.iloc[0]) if len(la) and str(la.iloc[0]).strip() else None
         out = pd.DataFrame({"year": a.index.astype(int), "value": a.to_numpy()})

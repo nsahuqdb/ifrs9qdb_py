@@ -98,9 +98,11 @@ src/ifrs9qdb/
                   without a key); and files from QCB, the Planning and
                   Statistics Authority and the Ministry of Finance -- as dated
                   vintages;
-                  quarter.py fills a new quarter's forecasts into a draft
-                  config version (five years from the first unconfirmed
-                  year); system.py the linked effects: a recursive system
+                  quarter.py fills a config's macro inputs into a draft
+                  config version: the forecasts (five years from the first
+                  unconfirmed year), every history year the source has
+                  revised or added, and the explicit scenario weights that
+                  follow, all unrounded; system.py the linked effects: a recursive system
                   (macro/data/system.yml) estimated on outturns with
                   Bayesian model averaging and sign restrictions, that moves
                   a scenario's other variables with its main ones (Qatar's
