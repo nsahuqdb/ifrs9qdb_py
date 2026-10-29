@@ -198,13 +198,17 @@ def sensitivity_curve(rc: RunContext, v: str, sizes=(-3, -2, -1, 0, 1, 2, 3),
 
 
 def pd_link_range(rc: RunContext, scn) -> dict:
-    """A scenario priced with the PD model's slope on non-oil growth at each
-    end of the range QDB's default history supports (stress.yml pd_link)."""
+    """A scenario priced with the PD model's slope on its main variable (the
+    model's coefficient) at each end of the range QDB's default history
+    supports (stress.yml pd_link.range)."""
     if isinstance(scn, dict):
         scn = Scenario.from_dict(scn)
     pl = rc.cfg.get("pd_link") or {}
-    b = float(pl.get("slope", -0.0414))
-    lo, hi = (float(x) for x in pl.get("range", [-0.019, -0.048]))
+    if pl.get("slope") is None or not pl.get("range"):
+        raise ValueError("No PD model slope or range: the run's model.yml has no weighted "
+                         "internal variable, or stress.yml no pd_link.range.")
+    b = float(pl["slope"])
+    lo, hi = (float(x) for x in pl["range"])
     out = {"slope": b, "range": [lo, hi], "central": _total(rc, scn)["change"]}
     out["low"] = _total(rc, scn, lo / b)["change"]
     out["high"] = _total(rc, scn, hi / b)["change"]
@@ -331,7 +335,7 @@ def build_proxy(rc: RunContext, progress=None) -> Proxy:
 
     xs = np.asarray(cfg.get("driver_grid", [-20, -15, -10, -6, -4, -2, -1, 0, 1, 2, 4]), float)
     pl = rc.cfg.get("pd_link") or {}
-    drv = rc.drivers_internal.get(pl.get("internal", "NONOIL_GDP_QAT"))
+    drv = rc.drivers_internal.get(pl.get("internal"))
 
     def grid(kind):
         if (kind == "int" and drv is None) or (kind == "ext" and not rc.drivers_external):
@@ -543,8 +547,7 @@ def _draws(rc: RunContext, P: Proxy, n: int, seed: int) -> np.ndarray:
     idx = {v: i for i, v in enumerate(rc.system.order)}
     pl = rc.cfg.get("pd_link") or {}
     out = np.zeros((n, rc.H, 2 + len(P.coll)))
-    for j, v in enumerate([pl.get("internal", "NONOIL_GDP_QAT"), pl.get("external", "GDP_GCC")]
-                          + P.coll):
+    for j, v in enumerate([pl.get("internal"), pl.get("external")] + P.coll):
         if v in idx:
             out[:, :, j] = A[:, idx[v], :]
     return out

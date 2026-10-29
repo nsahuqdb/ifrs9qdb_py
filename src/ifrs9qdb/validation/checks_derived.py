@@ -258,7 +258,7 @@ def _stpd_bound(stpd=None):
     return _bad(f"max pd_lifetime = {mx:.6f}, {int((p > 1).sum())} rows above 1, "
                 f"{int((p > 1.001).sum())} rows above 1.001. Likely cause: scenario "
                 "weights summing to >1 (typo in workbook explicit_weights — switch "
-                "to mode='auto_non_oil_gdp_cdf' in model_inputs.yml).",
+                "to mode='auto' in model_inputs.yml).",
                 int((p > 1.001).sum()))
 
 
@@ -348,7 +348,7 @@ def _scen_internal_sum(internal_weights=None):
     s = float(w.sum())
     return _ok() if abs(s - 1) < 1e-4 else _bad(
         f"Sum = {s:.6f} (expected ~1.0; if explicit V4 weights, sum=1.0003 due to "
-        "AE8 typo — switch model_inputs.yml mode to 'auto_non_oil_gdp_cdf')")
+        "AE8 typo — switch model_inputs.yml mode to 'auto')")
 
 
 def _scen_internal_nonneg(internal_weights=None):

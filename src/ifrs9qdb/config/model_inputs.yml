@@ -1,7 +1,7 @@
 # Per-quarter model inputs: scenario weights + MEV forecasts.
 # Update mev_forecasts each reporting quarter. See CONFIG_GUIDE.md.
 internal_scenario_weights:
-  mode: auto_non_oil_gdp_cdf
+  mode: auto
   n_forecast_years: 2
   # Rounded snapshot of the auto (V2) weights for the forecasts below, with
   # Base Case taking the residual so they sum to exactly 1; used only when
@@ -14,7 +14,7 @@ internal_scenario_weights:
     Slight Uptrend: 0.1792
     Significant Uptrend: 0.1509
 external_scenario_weights:
-  mode: auto_gcc_cdf
+  mode: auto
   explicit_weights:
     Significant Downturn: 0.15709
     Slight Downturn: 0.1877

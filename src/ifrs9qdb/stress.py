@@ -1233,7 +1233,7 @@ def pd_chain(inputs: EngineInputs, report: pd.DataFrame, run_path,
     from .etl.macro import resolve_internal_scenario_weights
     try:
         held = {k: float(v) for k, v in
-                resolve_internal_scenario_weights(raw0, static).items()}
+                resolve_internal_scenario_weights(raw0, static, model).items()}
     except Exception:
         held = None
     base_internal = held or (raw.get("internal_scenario_weights") or {}).get("explicit_weights")
@@ -1286,7 +1286,7 @@ def pd_chain(inputs: EngineInputs, report: pd.DataFrame, run_path,
                          "explicit_weights": {k: w[k] / tot for k in names}}
     try:                               # what the rebuilt chain weights by
         used_internal = {k: float(v) for k, v in
-                         resolve_internal_scenario_weights(raw, static).items()}
+                         resolve_internal_scenario_weights(raw, static, model).items()}
     except Exception:
         used_internal = None
 
@@ -1346,7 +1346,7 @@ def mev_stress(inputs: EngineInputs, report: pd.DataFrame, run_path,
 
     ``weight_mode`` decides what happens to the scenario weights, and it is a
     genuine choice rather than a detail. The internal weights run on
-    ``auto_non_oil_gdp_cdf``, derived from the first forecast years of this
+    ``auto``, derived from the first forecast years of this
     very matrix, so editing non-oil GDP moves the weights AND the curves:
 
         auto    leave the config alone; the weights follow the new path

@@ -737,7 +737,7 @@ def run_etl_phase2(state: PhaseState, overrides: dict | None = None) -> RunResul
                                 resolve_external_scenario_weights,
                                 resolve_internal_scenario_weights)
             try:
-                iw = resolve_internal_scenario_weights(model_inputs, static)
+                iw = resolve_internal_scenario_weights(model_inputs, static, model_cfg)
                 gh = gcc_weighted_history(static.get("gcc_real_gdp_growth"),
                                           static.get("gcc_gdp_current_prices"))
                 ew = resolve_external_scenario_weights(

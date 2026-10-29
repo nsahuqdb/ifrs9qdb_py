@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
+from ..etl.macro import main_variable
 from ..macro.catalogue import concepts as _concepts
 from ..stress import REPRICE_KEYS, _ingredients, frozen_config, pd_chain, reprice, summarise_repricing
 from .config import read_stress_config
@@ -169,6 +170,24 @@ def _rt(v) -> int:
     return 2 if (t.startswith("External") or t in ("2", "2.0")) else 1
 
 
+def pd_link(cfg: dict, model_cfg: dict, linked: dict) -> dict:
+    """stress.yml's ``pd_link`` with the internal PD driver and its slope
+    taken from the run's own model: its main variable (the largest weight in
+    model.yml), the system variable the catalogue links to it (``linked``:
+    system variable -> model variable) and its coefficient, exactly. Nothing
+    about the model is copied into stress.yml, which keeps what is the stress
+    test's own (the GCC link, the slope's range)."""
+    pl = dict((cfg or {}).get("pd_link") or {})
+    mv = main_variable(model_cfg, "internal") if model_cfg else None
+    if mv:
+        hit = next((c for c, v in linked.items() if v == mv["variable"]), None)
+        if hit:
+            pl["internal"] = hit
+        if mv.get("coefficient") is not None:
+            pl["slope"] = float(mv["coefficient"])
+    return pl
+
+
 def prepare(inputs, report: pd.DataFrame, run_path, system, cfg: dict | None = None,
             project_root=None) -> RunContext:
     """Read a run for stress scenarios: its contracts, sectors, curves,
@@ -199,10 +218,10 @@ def prepare(inputs, report: pd.DataFrame, run_path, system, cfg: dict | None = N
         base_curves = ch["base_curves"]
         notes.append("This run was priced by another version of the calculation, so "
                      "scenarios are measured from its config rebuilt on this one.")
-    di, de = {}, {}
+    di, de, var_of = {}, {}, {}
     cat = _concepts(project_root)
+    model_cfg = (fz.get("model") or {}) if fz.get("ok") else {}
     if fz.get("ok"):
-        model_cfg = fz["model"] or {}
         varcfg = model_cfg.get("variables") or {}
         active = set()
         for m in (model_cfg.get("models") or {}).values():
@@ -224,11 +243,13 @@ def prepare(inputs, report: pd.DataFrame, run_path, system, cfg: dict | None = N
                 mult = float((varcfg[mv] or {}).get("stress_unit_multiplier") or 1.0)
                 if col:
                     di[r["concept"]] = (int(col), mult, mv in active)
+                    var_of[r["concept"]] = mv
 
-    drv = di.get((cfg.get("pd_link") or {}).get("internal", "NONOIL_GDP_QAT"))
+    cfg = {**cfg, "pd_link": pd_link(cfg, model_cfg, var_of)}
+    drv = di.get(cfg["pd_link"].get("internal"))
     if drv is None or not drv[2]:
-        notes.append("This run's internal PD model does not use non-oil GDP, so scenarios "
-                     "reach the internal book through stages and collateral only.")
+        notes.append("This run's internal PD model reads no variable the scenarios move, "
+                     "so they reach the internal book through stages and collateral only.")
     base = reprice(inputs, report, pd_curves=base_curves)
     mi = (fz.get("raw") or {}) if fz.get("ok") else {}
     first = int(((mi.get("macro_source") or {}).get("first_forecast_year")) or 0) or None
@@ -263,8 +284,8 @@ def channel_paths(rc: RunContext, paths: dict) -> dict:
     def get(v):
         p = paths.get(v)
         return z.copy() if p is None else np.asarray(p, float)[:rc.H]
-    out = {"internal": get(pl.get("internal", "NONOIL_GDP_QAT")),
-           "external": get(pl.get("external", "GDP_GCC"))}
+    out = {"internal": get(pl.get("internal")),
+           "external": get(pl.get("external"))}
     for c in rc.coll_share:
         out[c] = get(c)
     return out
@@ -289,7 +310,7 @@ def driver_edits(rc: RunContext, ch: dict, slope_scale: float = 1.0) -> tuple[di
     model variable's forecast column, GCC growth into every country's."""
     mev, gcc = {}, {}
     p = np.asarray(ch["internal"], float) * float(slope_scale)
-    drv = rc.drivers_internal.get((rc.cfg.get("pd_link") or {}).get("internal", "NONOIL_GDP_QAT"))
+    drv = rc.drivers_internal.get((rc.cfg.get("pd_link") or {}).get("internal"))
     if drv is not None and np.any(np.abs(p) > 1e-12):
         col, mult, _ = drv
         mev[col] = list(p / mult)

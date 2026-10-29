@@ -14,16 +14,21 @@ schema_version: '2.0'
 # years revert as the PD chain reverts.
 horizon_years: 5
 
-# 1. PD model. Non-oil GDP moves the internal PD model and GCC growth the
-# external one (the run's own models, rebuilt by stress.pd_chain). The
-# internal model's slope on non-oil growth is -0.0414 per point (V4,
-# RiskMatrix 2021, standard error 0.0178); QDB's yearly default rates
-# 2014-2024 (the codex method's portfolio) put it between -0.019 and -0.048.
-# The sensitivity screen prices a scenario at both ends of that range.
+# 1. PD model. The run's own models move the PD curves (rebuilt by
+# stress.pd_chain). Which scenario variable reaches the internal model, and
+# its slope, are the model's own, read from the run's model.yml: its main
+# variable (the largest weight), the system variable the catalogue links to
+# it (model_variable), and its coefficient -- nothing about the model is
+# copied here. What is the stress test's own:
+#   external  the system variable each GCC country's growth follows in the
+#             external model
+#   range     the slope's range the sensitivity screen prices a scenario at:
+#             QDB's yearly default rates 2014-2024 (the codex method's
+#             portfolio) put the V4 slope on non-oil growth between -0.019
+#             and -0.048 a point (the model's: -0.0414, standard error
+#             0.0178). Re-estimate it when the model is recalibrated.
 pd_link:
-  internal: NONOIL_GDP_QAT   # the system variable the internal PD model reads
-  external: GDP_GCC          # the one each GCC country's growth follows in the external model
-  slope: -0.0414
+  external: GDP_GCC
   range: [-0.019, -0.048]
 
 # 2. Stage moves. A Stage 1 contract moves to Stage 2 within a year with

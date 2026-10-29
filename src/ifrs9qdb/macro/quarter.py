@@ -50,6 +50,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from ..etl.macro import EXTERNAL_AUTO, INTERNAL_AUTO
 from .catalogue import concepts as _concepts
 from .store import MacroStore
 
@@ -63,8 +64,8 @@ _TOL = 1e-9                 # a change smaller than this is the same value
 # model_inputs.yml with its automatic mode.
 MODELS = {"internal": "Internal rated", "external": "External rated"}
 _RATING = {"internal": "internal", "external": "external"}
-_WEIGHTS = {"internal": ("internal_scenario_weights", "auto_non_oil_gdp_cdf"),
-            "external": ("external_scenario_weights", "auto_gcc_cdf")}
+_WEIGHTS = {"internal": ("internal_scenario_weights", INTERNAL_AUTO),
+            "external": ("external_scenario_weights", EXTERNAL_AUTO)}
 # the catalogue's links written before they named the model variable
 _OLD_LINK = {"group": "GCC", "weight": "GCCW"}
 
@@ -401,9 +402,9 @@ def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
     for k in chosen:
         block, auto = _WEIGHTS[k]
         cur_mode = str((mi.get(block) or {}).get("mode", "explicit"))
-        if k not in keep and cur_mode != auto:
+        if k not in keep and cur_mode not in auto:
             weights.append({"model": MODELS[k], "block": block, "current": cur_mode,
-                            "proposed": auto})
+                            "proposed": auto[0]})
 
     # --- the fractions slip: a forecast in fractions against a history in points
     for e in plan:

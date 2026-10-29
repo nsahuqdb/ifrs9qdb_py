@@ -101,7 +101,7 @@ def scenario_weights(config_path) -> pd.DataFrame:
     """The explicit scenario weights, both scales side by side.
 
     These are what the config FILE states. The engine may compute them instead
-    -- the internal scale runs on ``auto_non_oil_gdp_cdf``, where the explicit
+    -- the internal scale runs on ``auto``, where the explicit
     block is a rounded snapshot of the calculation -- so this is what was
     written down, not necessarily what was applied.
     """

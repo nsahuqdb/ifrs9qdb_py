@@ -226,3 +226,64 @@ class TestAgainstTheReferenceStPD:
         assert len(external) > 0
         de = (external["PDLifetime_got"] - external["PDLifetime_ref"]).abs()
         assert de.max() < 1e-12, f"external scale out by {de.max():.3e}"
+
+
+class TestTheWeightsFollowTheModelConfig:
+    """The automatic weights read their variable from model.yml, and the
+    plain mode name gives what the old, variable-named ones gave."""
+
+    def test_the_main_variable_is_the_models_own(self, cfg):
+        from ifrs9qdb.etl.macro import main_variable
+        model, _ = cfg
+        mv = main_variable(model, "internal")
+        assert mv["variable"] == "VAR_NON_OIL_GDP_GROWTH" and mv["column"] == 1
+        # the coefficient exactly as model.yml has it, not a rounded copy
+        assert mv["coefficient"] == -0.0414145067387472
+        assert main_variable(model, "external")["variable"] == "VAR_GCC_REAL_GDP_GROWTH"
+
+    def test_reading_the_model_changes_nothing(self, cfg, static):
+        model, inputs = cfg
+        assert resolve_internal_scenario_weights(inputs, static, model) == \
+            resolve_internal_scenario_weights(inputs, static)
+
+    @pytest.mark.parametrize("old,new", [("auto_non_oil_gdp_cdf", "auto")])
+    def test_the_old_mode_name_gives_the_same_weights(self, cfg, static, old, new):
+        model, inputs = cfg
+        a = {**inputs, "internal_scenario_weights": {
+            **inputs["internal_scenario_weights"], "mode": old}}
+        b = {**inputs, "internal_scenario_weights": {
+            **inputs["internal_scenario_weights"], "mode": new}}
+        assert resolve_internal_scenario_weights(a, static, model) == \
+            resolve_internal_scenario_weights(b, static, model)
+        gh = gcc_weighted_history(static["gcc_real_gdp_growth"],
+                                  static["gcc_gdp_current_prices"])
+        fc = external_gcc_forecast(inputs, static, 5)
+        ea = {**inputs, "external_scenario_weights": {"mode": "auto_gcc_cdf"}}
+        eb = {**inputs, "external_scenario_weights": {"mode": "auto"}}
+        assert resolve_external_scenario_weights(ea, static, gh, fc)["per_year"].equals(
+            resolve_external_scenario_weights(eb, static, gh, fc)["per_year"])
+
+    def test_a_new_main_variable_brings_its_own_column_and_history(self, cfg, static,
+                                                                   tmp_path):
+        import shutil
+        from ifrs9qdb.etl.static_ref import PACKAGED_STATIC
+        model, inputs = cfg
+        d = tmp_path / "static"
+        shutil.copytree(PACKAGED_STATIC, d)
+        (d / "test_history.csv").write_text(
+            (PACKAGED_STATIC / "non_oil_gdp_history.csv").read_text())
+        st = load_static_reference(d)
+        m = yaml.safe_load(yaml.safe_dump(model))
+        comps = m["models"]["internal_v4_production"]["mev_components"]
+        for c in comps:
+            c["weight"] = 0.0
+        comps.append({"variable": "VAR_TEST", "coefficient": -0.02, "weight": 1.0})
+        m["variables"]["VAR_TEST"] = {"history_file": "data-raw/static/test_history.csv",
+                                      "forecast_source": {"path": "mev_forecasts.forecasts",
+                                                          "column_index": 4}}
+        i = yaml.safe_load(yaml.safe_dump(inputs))
+        for k, row in i["mev_forecasts"]["forecasts"].items():
+            row.append(row[0])                 # column 4 holds what column 1 held
+            row[0] = 99.0                      # and column 1 is no longer read
+        assert resolve_internal_scenario_weights(i, st, m) == \
+            resolve_internal_scenario_weights(inputs, static)

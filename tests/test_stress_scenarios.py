@@ -282,3 +282,31 @@ class TestRisk:
         top = r["scenarios"].iloc[0]
         assert top["full_change"] == pytest.approx(t, rel=0.02)
         assert 0 <= r["probability"] <= 1
+
+
+class TestThePdLinkIsTheModels:
+    def test_the_driver_and_slope_come_from_model_yml(self):
+        import yaml
+        from ifrs9qdb.macro.catalogue import concepts
+        from ifrs9qdb.stresstest.config import read_stress_config
+        from ifrs9qdb.stresstest.transmission import pd_link
+        pkg = Path(__import__("ifrs9qdb").__file__).parent
+        model = yaml.safe_load((pkg / "config" / "model.yml").read_text())
+        cat = concepts()
+        linked = dict(zip(cat["concept"], cat["model_variable"]))
+        cfg = read_stress_config()
+        assert "slope" not in cfg["pd_link"] and "internal" not in cfg["pd_link"]
+        pl = pd_link(cfg, model, linked)
+        assert pl["internal"] == "NONOIL_GDP_QAT"
+        assert pl["slope"] == -0.0414145067387472          # the model's, every digit
+        assert pl["external"] == "GDP_GCC" and pl["range"] == [-0.019, -0.048]
+
+    def test_a_recalibrated_model_moves_the_slope_with_it(self):
+        import yaml
+        from ifrs9qdb.stresstest.transmission import pd_link
+        pkg = Path(__import__("ifrs9qdb").__file__).parent
+        model = yaml.safe_load((pkg / "config" / "model.yml").read_text())
+        model["models"]["internal_v4_production"]["mev_components"][0]["coefficient"] = -0.05
+        pl = pd_link({"pd_link": {"slope": -0.0414}}, model,
+                     {"NONOIL_GDP_QAT": "VAR_NON_OIL_GDP_GROWTH"})
+        assert pl["slope"] == -0.05                        # a project copy cannot go stale

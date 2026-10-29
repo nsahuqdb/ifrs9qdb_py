@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
-__all__ = ["StaticReference", "load_static_reference", "PACKAGED_STATIC"]
+__all__ = ["StaticReference", "load_static_reference", "read_static_file", "PACKAGED_STATIC"]
 
 PACKAGED_STATIC = Path(__file__).parent.parent / "static"
 
@@ -176,9 +176,22 @@ def _stamp(d: Path) -> tuple:
     return tuple(out)
 
 
+def read_static_file(path) -> pd.DataFrame:
+    """One static file, read as the reference reads it: comment header
+    skipped, every digit kept, percent signs in the unit its header
+    declares."""
+    p = Path(path)
+    frame = pd.read_csv(p, comment="#", skip_blank_lines=True, float_precision="round_trip")
+    return _read_percent_signs(frame, _declared_units(p))
+
+
 def load_static_reference(directory=None) -> StaticReference:
-    """Load the reference tables, from a run's frozen copy or the package."""
+    """Load the reference tables, from a run's frozen copy or the package.
+    ``directory`` on the result is the folder read, for a file the fixed
+    list does not hold (a new model variable's history)."""
     d = Path(directory) if directory else PACKAGED_STATIC
     if not d.is_dir():
         d = PACKAGED_STATIC
-    return StaticReference(dict(_read_dir(str(d), _stamp(d))))
+    out = StaticReference(dict(_read_dir(str(d), _stamp(d))))
+    out.directory = d
+    return out

@@ -297,7 +297,8 @@ __all__ += ["build_term_structure", "build_stpd_from_static", "stress_mevs", "co
             "apply_scenario_weights_per_year",
             "compute_external_scenario_weights",
             "compute_external_scenario_weights_per_year",
-            "resolve_internal_scenario_weights",
+            "resolve_internal_scenario_weights", "main_variable", "INTERNAL_AUTO",
+            "EXTERNAL_AUTO",
             "resolve_external_scenario_weights", "resolve_scenario_weights"]
 
 
@@ -588,7 +589,7 @@ def resolve_scenario_weights(static, model_cfg, model_inputs):
     """
     gcc_hist, ext_fc = _gcc_inputs(static, model_inputs,
                                    _n_forecasts(model_cfg, model_inputs))
-    return (resolve_internal_scenario_weights(model_inputs, static),
+    return (resolve_internal_scenario_weights(model_inputs, static, model_cfg),
             resolve_external_scenario_weights(model_inputs, static, gcc_hist,
                                               ext_fc))
 
@@ -863,13 +864,63 @@ def compute_external_scenario_weights_per_year(weighted_gcc_forecasts,
     return {"per_year": per_year, "average": per_year.mean(axis=0)}
 
 
-def resolve_internal_scenario_weights(model_inputs, static) -> dict:
+# The automatic modes. Before 0.43 they were named after the variable they
+# were first built on; those names are still read.
+INTERNAL_AUTO = ("auto", "auto_non_oil_gdp_cdf")
+EXTERNAL_AUTO = ("auto", "auto_gcc_cdf")
+
+
+def main_variable(model_cfg, rating: str = "internal") -> dict | None:
+    """The variable a rating model leans on most: its ``mev_component`` with
+    the largest weight (the first listed on a tie), with its coefficient and
+    where model.yml says its forecast and history live. None when the model
+    has no weighted variable."""
+    best = None
+    for m in ((model_cfg or {}).get("models") or {}).values():
+        if not str((m or {}).get("rating_type", "")).lower().startswith(rating):
+            continue
+        for c in (m.get("mev_components") or []):
+            w = abs(float(c.get("weight") or 0))
+            if w > 0 and (best is None or w > best[0]):
+                best = (w, c)
+    if best is None:
+        return None
+    c = best[1]
+    vc = ((model_cfg.get("variables") or {}).get(c.get("variable")) or {})
+    fs = vc.get("forecast_source") or {}
+    return {"variable": c.get("variable"), "coefficient": c.get("coefficient"),
+            "weight": c.get("weight"), "path": fs.get("path") or "mev_forecasts.forecasts",
+            "column": int(fs.get("column_index") or 1), "history_file": vc.get("history_file")}
+
+
+def _history_values(static, history_file) -> np.ndarray:
+    """A history file's values: from the static reference when it holds the
+    file, else read from the reference's folder."""
+    from pathlib import Path
+
+    from .static_ref import _FILES, read_static_file
+    name = Path(str(history_file)).name
+    key = next((k for k, f in _FILES.items() if f == name), None)
+    if key and key in static:
+        return np.asarray(static[key]["value"], dtype=float)
+    d = getattr(static, "directory", None)
+    if d and (Path(d) / name).is_file():
+        return np.asarray(read_static_file(Path(d) / name)["value"], dtype=float)
+    raise ValueError(f"The scenario weights' variable has its history in {name}, which "
+                     "is not in the static reference.")
+
+
+def resolve_internal_scenario_weights(model_inputs, static, model_cfg=None) -> dict:
     """The internal weights a run should use, honouring the configured mode.
 
-    ``auto_non_oil_gdp_cdf`` computes them from the domestic history and the
-    forecast; ``explicit`` takes the block as written. Falling back to an equal
-    split when neither resolves would be the worst outcome available -- it
-    looks like a weighting and is not one -- so this raises instead.
+    ``auto`` computes them from where the forecast of the internal model's
+    main variable (``main_variable``; ``variable`` in the block names another)
+    falls on its history -- the column and the history file model.yml gives
+    it; ``explicit`` takes the block as written. Without ``model_cfg`` the
+    variable is the first forecast column with non_oil_gdp_history.csv, as
+    before. Falling back to an equal split when neither resolves would be the
+    worst outcome available -- it looks like a weighting and is not one -- so
+    this raises instead.
     """
     block = (model_inputs.get("internal_scenario_weights") or {})
     mode = block.get("mode", "explicit")
@@ -881,16 +932,29 @@ def resolve_internal_scenario_weights(model_inputs, static) -> dict:
                              "explicit_weights were supplied")
         return dict(explicit)
 
-    if mode == "auto_non_oil_gdp_cdf":
-        fcb = model_inputs["mev_forecasts"]["forecasts"]
+    if mode in INTERNAL_AUTO:
         n = int(block.get("n_forecast_years", 2))
-        gdp = [float(fcb[y][0]) for y in sorted(fcb, key=lambda k: int(k))][:n]
-        hist = np.asarray(static["non_oil_gdp_history"]["value"], dtype=float)
+        path, col, hist = "mev_forecasts.forecasts", 1, None
+        if model_cfg:
+            mv = main_variable(model_cfg, "internal") or {}
+            var = block.get("variable") or mv.get("variable")
+            vc = ((model_cfg.get("variables") or {}).get(var) or {})
+            fs = vc.get("forecast_source") or {}
+            path = fs.get("path") or path
+            col = int(fs.get("column_index") or col)
+            if vc.get("history_file"):
+                hist = _history_values(static, vc["history_file"])
+        fcb = model_inputs
+        for k in path.split("."):
+            fcb = fcb[k]
+        gdp = [float(fcb[y][col - 1]) for y in sorted(fcb, key=lambda k: int(k))][:n]
+        if hist is None:
+            hist = np.asarray(static["non_oil_gdp_history"]["value"], dtype=float)
         return compute_internal_scenario_weights(hist, gdp,
                                                  static["scenario_severity"])
 
     raise ValueError(f"unknown internal_scenario_weights.mode: {mode!r} "
-                     "(expected 'explicit' or 'auto_non_oil_gdp_cdf')")
+                     "(expected 'explicit' or 'auto')")
 
 
 def resolve_external_scenario_weights(model_inputs, static, gcc_history,
@@ -899,7 +963,7 @@ def resolve_external_scenario_weights(model_inputs, static, gcc_history,
 
     ``explicit`` repeats one vector across every year, which is what the R does
     when the block is written out by hand, or takes one vector per year from
-    ``explicit_weights_per_year``; ``auto_gcc_cdf`` derives a vector per year
+    ``explicit_weights_per_year``; ``auto`` derives a vector per year
     from the regional forecast.
     """
     block = (model_inputs.get("external_scenario_weights") or {})
@@ -934,12 +998,12 @@ def resolve_external_scenario_weights(model_inputs, static, gcc_history,
         per_year.index = [f"year_{i}" for i in range(1, len(per_year) + 1)]
         return {"per_year": per_year, "average": w}
 
-    if mode == "auto_gcc_cdf":
+    if mode in EXTERNAL_AUTO:
         return compute_external_scenario_weights_per_year(
             gcc_forecasts, gcc_history, static["scenario_severity"])
 
     raise ValueError(f"unknown external_scenario_weights.mode: {mode!r} "
-                     "(expected 'explicit' or 'auto_gcc_cdf')")
+                     "(expected 'explicit' or 'auto')")
 
 
 GCC_HISTORY_FIRST_YEAR = 1982

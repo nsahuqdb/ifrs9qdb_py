@@ -340,13 +340,12 @@ class TestQuarter:
     def test_the_weights_go_to_auto_unless_kept(self, store, tmp_path):
         cfg = tmp_path / "config"
         shutil.copytree(PKG / "config", cfg)
-        t = (cfg / "model_inputs.yml").read_text().replace(
-            "mode: auto_non_oil_gdp_cdf", "mode: explicit", 1)
+        t = (cfg / "model_inputs.yml").read_text().replace("mode: auto\n", "mode: explicit\n", 1)
         (cfg / "model_inputs.yml").write_text(t)
         p = propose(store, cfg, PKG / "static", "2026-09-30")
         assert [w["model"] for w in p["weights"]] == ["Internal rated"]
         y = yaml.safe_load(render_model_inputs(p))
-        assert y["internal_scenario_weights"]["mode"] == "auto_non_oil_gdp_cdf"
+        assert y["internal_scenario_weights"]["mode"] == "auto"
         # the explicit weights typed by hand are still in the file
         assert y["internal_scenario_weights"]["explicit_weights"] == \
             yaml.safe_load(t)["internal_scenario_weights"]["explicit_weights"]
