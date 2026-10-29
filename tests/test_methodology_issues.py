@@ -719,3 +719,81 @@ class TestM17TheMonthlyGridLosesPayments:
         e = lp["EADLifetime"].to_numpy(dtype=float)
         assert (np.diff(e) >= 0).all() and e[-1] > e[0], (
             "a grace-period facility should show exposure growing")
+
+
+# ----------------------------------------------------------------- M18 -----
+class TestM18ExternalWeightsFollowTheForecast:
+    """M18 (OPEN): the external weights still use the V1 band construction, so
+    a GCC recession moves weight onto the UPTRENDS. These tests pin the
+    current behaviour and fail when the external scale moves to V2."""
+
+    @staticmethod
+    def weights(static, forecast):
+        from ifrs9qdb.etl.macro import compute_external_scenario_weights, gcc_weighted_history
+        h = gcc_weighted_history(static["gcc_real_gdp_growth"],
+                                 static["gcc_gdp_current_prices"])
+        return compute_external_scenario_weights(forecast, h, static["scenario_severity"])
+
+    def test_a_gcc_recession_favours_the_uptrend(self, static):
+        w = self.weights(static, -5.02)                 # Oct 2026 WEO, 2026
+        assert w["Significant Uptrend"] == pytest.approx(0.6946, abs=1e-4)
+        assert w["Significant Downturn"] < 0.002
+
+    def test_the_rebound_favours_the_downturn(self, static):
+        w = self.weights(static, 9.28)                  # Oct 2026 WEO, 2027
+        assert w["Significant Downturn"] == pytest.approx(0.5446, abs=1e-4)
+
+    def test_the_mean_still_gives_the_band_widths(self, static):
+        from ifrs9qdb.etl.macro import gcc_weighted_history
+        h = gcc_weighted_history(static["gcc_real_gdp_growth"],
+                                 static["gcc_gdp_current_prices"])
+        w = self.weights(static, float(np.mean(h)))
+        assert w["Base Case"] == pytest.approx(0.50, abs=1e-6)
+
+    def test_each_year_has_its_vector_and_the_average_follows(self, static):
+        from ifrs9qdb.etl.macro import (compute_external_scenario_weights_per_year,
+                                        gcc_weighted_history)
+        h = gcc_weighted_history(static["gcc_real_gdp_growth"],
+                                 static["gcc_gdp_current_prices"])
+        r = compute_external_scenario_weights_per_year([-5.02, 9.28, 6.31, 4.17, 3.60], h,
+                                                       static["scenario_severity"])
+        assert len(r["per_year"]) == 5
+        assert r["average"].to_dict() == pytest.approx(r["per_year"].mean().to_dict())
+
+
+# ----------------------------------------------------------------- M19 -----
+class TestM19TheRankUsesTheWholeHistory:
+    """M19 (OPEN): the engine ranks against every year it takes the mean and
+    sd from; the Excel ETL ranks against one year fewer."""
+
+    def test_the_factor_ranks_against_the_full_history(self, static):
+        from ifrs9qdb.etl.macro import (external_combined_sf, gcc_weighted_history,
+                                        percentrank_exc)
+        h = gcc_weighted_history(static["gcc_real_gdp_growth"],
+                                 static["gcc_gdp_current_prices"])
+        x = 1.0
+        assert external_combined_sf([x], h)[0] == pytest.approx(
+            norm.ppf(percentrank_exc(h, x)))
+        assert external_combined_sf([x], h)[0] != pytest.approx(
+            norm.ppf(percentrank_exc(h[:-1], x)))
+
+
+# ----------------------------------------------------------------- M20 -----
+class TestM20AFractionReadsAsNoGrowth:
+    """M20 (OPEN, an input): the model takes non-oil GDP in points; 0.029
+    entered for 2.9% is read as 0.029% growth, with a warning only."""
+
+    def test_the_logit_reads_the_number_as_given(self):
+        from ifrs9qdb.etl.macro import compute_logit_pds
+        spec = [{"intercept": -1.54749454211729, "coefficient": -0.0414145067387472,
+                 "stress_unit_multiplier": 1}]
+        pts = compute_logit_pds([[2.91929]], spec)[0, 0]
+        frac = compute_logit_pds([[0.0291929]], spec)[0, 0]
+        assert pts == pytest.approx(-1.54749454211729 - 0.0414145067387472 * 2.91929)
+        assert frac - pts == pytest.approx(0.0414145067387472 * (2.91929 - 0.0291929))
+
+    def test_it_warns_and_does_not_stop(self):
+        from ifrs9qdb.etl.macro import check_gdp_units
+        hist = [9.06, 5.84, -0.99, 2.25, 2.19, -4.49, 2.83, 5.68, 2.10, 3.40, 4.44]
+        with pytest.warns(RuntimeWarning, match="fractions"):
+            check_gdp_units(hist, [-0.0019, 0.0292])

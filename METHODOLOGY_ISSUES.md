@@ -18,6 +18,11 @@ closed the one link in the EAD chain this register could not previously check.
 M15 is the largest item here and the only one whose cause is outside the model:
 a date the ETL misreads, which the model then prices as fact.
 
+M18 to M22 were added on 29 October 2026, from the Q3 2026 parallel run and
+the IMF's October 2026 releases. M18 is the external-scale counterpart of M1
+and the most urgent: the October GCC figures make it bite in Q4. M21 and M22
+are decisions rather than defects.
+
 Every figure below is reproducible from `tests/test_methodology_issues.py`,
 which pins the CURRENT behaviour. Those tests are written to fail when an item
 is fixed, so a fix cannot land silently.
@@ -46,6 +51,11 @@ or a naming and documentation problem that keeps producing wrong readings.
 | M15 | Every schedule beyond 2029 is silently discarded, cutting lifetime | **A** |
 | M16 | The EAD curve adds each instalment's interest to the balance | **B** |
 | M17 | The rising curve is half defect and half correct | **C** |
+| M18 | External scenario weights still move the wrong way with the forecast | **A** |
+| M19 | The external percentile rank uses a shorter history than its mean and sd (Excel) | **B** |
+| M20 | Non-oil GDP entered as a fraction where the model is in points | **A** |
+| M21 | Q4 non-oil GDP source: the IMF's own post-war path, and a revised history | **C** |
+| M22 | What follows a model change: the weights' single variable and the stress slope range | **C** |
 
 ---
 
@@ -114,7 +124,7 @@ points the other way, so the provision is currently anti-cyclical by
 construction.
 
 **Also affected.** `compute_external_scenario_weights` uses the same band
-construction on GCC growth and needs checking the same way.
+construction on GCC growth: confirmed and sized in M18, not yet changed.
 
 ---
 
@@ -786,6 +796,173 @@ That is half right, which is the worst kind. About 45% of the rises are the
 genuine accrual it describes; the rest are M16's projected interest. The check
 found a real symptom and its own message classified it as normal. See §2 of
 `INPUT_DATA_ISSUES.md`.
+
+---
+
+## M18 — External scenario weights still move the wrong way with the forecast · **A**
+
+*M1 for the external scale. M1 fixed the internal weights in 0.29.0 and noted
+that the external ones use the same band construction; they do, and they were
+not changed.*
+
+`compute_external_scenario_weights` in `etl/macro.py`, called once per forecast
+year by `compute_external_scenario_weights_per_year`. That part is right and is
+the methodology: each of the five forecast years has its own weight vector,
+from where that year's GDP-weighted GCC growth forecast falls on the 1982–
+history, and maturities beyond year 5 take the average of the five
+(`apply_scenario_weights_per_year`; the Excel ETL's Calculations D69:H74). The
+monthly cumulative PD is then capped at 1 (M3). What is wrong is the band
+construction inside each year, which is the V1 one M1 fixed for the internal
+scale:
+
+```python
+cdf = norm.cdf(f + z_sorted * sigma, loc=mu, scale=sigma)    # now (V1)
+cdf = norm.cdf(mu + sigma * z_sorted, loc=f, scale=sigma)    # V2, as M1
+```
+
+**Measured on the packaged GCC history** (1982–2024, mean 3.0217, sd 4.4912),
+one forecast year:
+
+| GCC growth forecast | Sig. Downturn | Slight Downturn | Base | Slight Uptrend | Sig. Uptrend |
+| --- | --- | --- | --- | --- | --- |
+| +9.28% *(Oct 2026 WEO, 2027)* | **0.5446** | 0.2194 | 0.2168 | 0.0156 | 0.0037 |
+| +3.02% *(the history's mean)* | 0.0999 | 0.1499 | 0.5000 | 0.1501 | 0.1001 |
+| 0.00% | 0.0253 | 0.0636 | 0.4117 | 0.2280 | 0.2713 |
+| −5.02% *(Oct 2026 WEO, 2026)* | 0.0011 | 0.0058 | 0.1253 | 0.1732 | **0.6946** |
+| −10.00% | 0.0000 | 0.0002 | 0.0129 | 0.0398 | **0.9472** |
+
+A GCC recession of −5% puts 69% of the weight on Significant Uptrend; the
+rebound after it puts 54% on Significant Downturn. V2 gives the same table read
+backwards. On the 26q3-lic reference files (history to 2025) the October path
+gives 69.7% Significant Uptrend in year 1 and 51.8% Significant Downturn in
+year 2.
+
+**What it costs**, investment curves on the 26q3-lic config and reference files,
+V1 against V2 (cumulative PD, relative):
+
+| Bucket | 12 months, Q3 path | 60 months, Q3 path | 12 months, Oct 2026 path | 60 months, Oct 2026 path |
+| --- | --- | --- | --- | --- |
+| 6 | −41.0% | +14.4% | −77.1% | −59.0% |
+| 9 | −39.0% | +14.4% | −73.9% | −52.8% |
+| 12 | −33.7% | +13.4% | −64.8% | −35.9% |
+| 15 | −24.6% | +9.2% | −48.1% | −11.5% |
+| 18 | −16.3% | +1.1% | −30.9% | −4.9% |
+
+The Q3 path (1.82, 4.87, 4.00, 4.06, 3.78) sits just below the mean in year 1,
+so V1 already understates the 12-month external PD by 16–41% and overstates the
+long end. The October path (−5.02, 9.28, 6.31, 4.17, 3.60) makes it large:
+the external Stage 1 provision would be understated by up to three quarters.
+
+**The Excel ETL does the same** (V1, one vector a year, the average beyond
+year 5), so LIC reproduces it; changing it is a methodology decision, as the
+internal one was. A correct treatment is V2, with the per-year vectors and the
+average kept. `TestM18ExternalWeightsFollowTheForecast` pins the current
+direction.
+
+---
+
+## M19 — The external percentile rank uses a shorter history than its mean and sd · **B**
+
+*Found reconciling LIC run 330's investment curves (Q3 2026 validation,
+"External PD: Excel formula check").*
+
+In the Excel ETL the external scaling factor is
+`NORM.S.INV(PERCENTRANK.EXC('GCC GDP'!D28:AT28, growth))`: the rank is taken
+against 1982–2024, while the history's mean and sd use `D28:AU28`, 1982–2025.
+Column AU was added with its own formulas and the PERCENTRANK range in all six
+sheets was not extended. The engine ranks against the same years it takes the
+mean and sd from (`external_combined_sf` on `gcc_weighted_history`, 1982 to
+the last year in the file).
+
+**Size.** With the rank on 1982–2024 the engine reproduces the Excel StPD to
+1e-6 in every year; with 1982–2025 it is up to 2.7% higher. On LIC run 330 the
+investment book is +30,487 in Stage 1 and +7,291 in Stage 2 from this alone.
+
+**Decision.** Copy the Excel's range (a config setting for the rank's last
+year), or have the Excel corrected. The engine's reading is the consistent one.
+`TestM19TheRankUsesTheWholeHistory` pins it.
+
+---
+
+## M20 — Non-oil GDP entered as a fraction where the model is in points · **A**
+
+*Q3 2026: why run 14 and LIC run 330 overstate Stage 2.*
+
+The V4 model is calibrated in percentage points: model.yml has non-oil GDP in
+`percentage_points` with multiplier 1 and sd 9.8877, and the Excel ETL's
+Inputs_Lending Portfolio W5:W9 hold −0.18876, 2.91929, 3.03143, 3.78499,
+3.10496 (Base Case D9 `= W5 + H5 × z`, the logit
+`−1.5474945 − 0.041414507 × 3.78499` gives D27 = 0.153911). LIC runs 326 and
+330, and the 26q3-lic snapshot, were given the same numbers as fractions
+(−0.0019, 0.0292, …). Nothing fails: the model reads 2.9% growth as 0.029%.
+
+**Size.** The scaling factor is about 0.12 in every year instead of
+0.125 / 0.054 / 0.051 / 0.034 / 0.049. QDB 3- (TTC 8.01%), V2 weights,
+cumulative PD:
+
+| Year | Points (correct) | Fractions | Difference |
+| --- | --- | --- | --- |
+| 1 | 11.59% | 11.50% | −0.7% |
+| 2 | 20.55% | 21.57% | +5.0% |
+| 3 | 28.50% | 30.40% | +6.7% |
+| 4 | 35.37% | 38.16% | +7.9% |
+| 5 | 41.70% | 44.99% | +7.9% |
+
+LIC run 330: Stage 1 0.88m too low, Stage 2 8.98m too high. In the engine's
+automatic weights the fraction also looks like zero growth against a history
+in points and moves weight to the downturns (32.1 / 23.6 / 37.6 / 5.0 / 1.8
+against the workbook's 22.1 / 19.4 / 43.0 / 9.7 / 5.7).
+
+**Where it stands.** An input, not code: the engine warns
+(`check_gdp_units`), the config update writes points, and the IMF's own figures
+are in points. A correct treatment would make the warning a stop unless the
+run states it is reproducing such a run. `TestM20AFractionReadsAsNoGrowth`
+pins what the model does with a fraction.
+
+---
+
+## M21 — Q4 non-oil GDP source: the IMF's own post-war path · **C**
+
+*A decision, not a defect.*
+
+Q2 and Q3 2026 used a war-adjusted non-oil path derived in
+`Qatar_NonOil_GDP_Update_2026-2030.xlsx`, because the IMF's regional outlook
+still had its October 2025 numbers. The IMF's October 2026 Regional Economic
+Outlook (22 October 2026; on FRED 23 October) now publishes its own:
+
+| | 2026 | 2027 | 2028 | 2029 | 2030 |
+| --- | --- | --- | --- | --- | --- |
+| Q3 war-adjusted input | −0.19 | 2.92 | 3.03 | 3.78 | 3.10 |
+| IMF October 2026 | −1.22 | 5.64 | 2.59 | 2.59 | 2.59 |
+
+It also revises the history the weights are measured on: 2020 −4.49 → −3.17,
+2024 3.40 → 4.43, 2025 4.44 → 3.10 (an estimate). On run 14's config the
+internal V2 weights move from 22.1 / 19.4 / 43.0 / 9.7 / 5.7 to roughly
+25.9 / 14.1 / 31.6 / 12.7 / 15.8 with both updated. The GCC paths change as
+much (Qatar 2026 −8.6% → −15.6%, Kuwait −0.6% → −16.7%; see M18 for what that
+does to the external weights) and the GCC history is revised (Saudi Arabia
+2022 7.5% → 12.0%).
+
+**Decision.** Whether Q4 takes the IMF's path and revised history (the config
+update does it, by model, when asked) or keeps a derived path.
+
+---
+
+## M22 — What follows a model change · **C**
+
+*Two places where a recalibration needs a decision, not only new numbers.*
+
+1. **The scenario weights rest on one variable.** The V2 method is defined on
+   one series. The engine takes the internal model's main variable (the largest
+   weight in model.yml; `internal_scenario_weights.variable` can name another).
+   With today's model that is non-oil GDP, the only weighted variable (M14). A
+   model with several weighted variables needs the method to say which drives
+   the weights, or how they combine.
+2. **The stress slope range is absolute.** The sensitivity screen prices a
+   scenario at slopes −0.019 and −0.048 a point (stress.yml `pd_link.range`),
+   estimated from QDB's default rates 2014–2024 around V4's −0.0414. The slope
+   itself is now read from model.yml, so a recalibration moves it; the range has
+   to be re-estimated with it.
 
 ---
 
