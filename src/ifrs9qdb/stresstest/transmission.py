@@ -210,10 +210,14 @@ def prepare(inputs, report: pd.DataFrame, run_path, system, cfg: dict | None = N
                 for comp in (m.get("mev_components") or []):
                     if float(comp.get("weight") or 0) != 0:
                         active.add(comp.get("variable"))
+        # the external model's driver: the variable set one path per group
+        grouped = {v for v, c in varcfg.items()
+                   if ((c or {}).get("forecast_source") or {}).get("aggregation")}
         for _, r in cat.iterrows():
             mv = str(r["model_variable"] or "")
-            if mv.startswith("GCC:"):
-                de[r["concept"]] = mv[4:]
+            base, _, grp = mv.partition(":")
+            if grp and (base in grouped or base == "GCC"):
+                de[r["concept"]] = grp
             elif mv in varcfg:
                 fs = (varcfg[mv] or {}).get("forecast_source") or {}
                 col = fs.get("column_index")

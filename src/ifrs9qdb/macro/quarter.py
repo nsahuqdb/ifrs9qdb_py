@@ -1,90 +1,75 @@
-"""A new quarter's macro inputs, filled from the store.
+"""A config's macro inputs, filled from the store when asked.
 
 ``propose`` reads a config (a snapshot's, or the live one), the store and the
-reporting date, and returns what the new config would hold, with every value
-that differs from the config it starts from and the checks that held or
-failed. ``apply`` writes it into a DRAFT config snapshot, where it is tested
-and approved like any other edit. Nothing here runs a calculation or touches
-a run. What it fills, each part only when it is asked for (``PARTS``), so a
-value set by hand -- a fixed set of weights, a forecast entered for a test --
-stays as it is; the weights are filled only on request:
+reporting date, and returns what the config would hold with the chosen
+rating models' variables taken from the store -- their forecasts and their
+history -- and every value that moves. ``apply`` writes it into a DRAFT
+config snapshot, where it is tested and approved like any other edit.
+Nothing here runs a calculation or touches a run.
 
-    model_inputs.yml
-      mev_forecasts                non-oil GDP growth, the internal PD
-                                   model's driver, five years
-      external_gcc_country_growth  each GCC country's real GDP growth and
-      external_gcc_country_prices  nominal GDP (USD bn), five years
-      internal_scenario_weights    explicit_weights: the V2 weights of the
-                                   new history and forecast, the figures
-                                   auto_non_oil_gdp_cdf works out at run time
-    static/non_oil_gdp_history.csv every year of the file the source has
-                                   revised, and the years it now has before
-                                   the forecast
-    static/gcc_real_gdp_growth.csv, gcc_gdp_current_prices.csv
-                                   the same for each GCC country (IMF WEO)
+Nothing is named here. A rating model (internal or external, by its
+``rating_type`` in model.yml) brings its ``mev_components``; each variable's
+own entry in model.yml says where its forecast lives in model_inputs.yml
+(``forecast_source``: a column of a yearly table, or one path per group
+weighted by another variable) and which file holds its history
+(``history_file``; a weight variable's file is the one whose header names
+it). The catalogue (macro/data/concepts.csv, ``model_variable``) links each
+variable -- or each group of it, ``VARIABLE:group`` -- to a series in the
+store. A model change is a change to model.yml and the catalogue, not here.
+
+What is not chosen stays as it is in the file, as does a variable the store
+does not hold. A chosen model's scenario weights move to the automatic mode
+(worked out at run time from the history and forecast) unless they are kept.
 
 The five-year rule. The forecast starts at the first year with no confirmed
-annual figure and runs five years: in 2026Q3, 2026 is not confirmed, so the
-forecast is 2026-2030 and the IMF's 2031 is not used. "Confirmed" is the
-latest of the IMF's own marker (the WEO's last actual year) and the last year
-in the non-oil history file. A first year before the reporting year is
-allowed -- a year can still be unconfirmed a quarter after it ends -- and is
-reported, so nobody approves it without seeing it.
+annual figure and runs ``horizons.n_forecasts`` years: in 2026Q3, 2026 is not
+confirmed, so the forecast is 2026-2030. "Confirmed" is the latest of the
+sources' own markers (the WEO's last actual year) and the last year in the
+history files. It is never after the reporting year.
 
 History. A history is only taken from a source that keeps a record: one that
 marks its own last actual year (the WEO), the IMF's other datasets (the
-regional outlook, whose non-oil series the history file is built from, gives
-no marker, so its years before the forecast are its record) or a Planning and
-Statistics Authority table. A projection republished elsewhere (FRED) never
-enters a history. A file keeps its first year: earlier years in the store are
-not added.
+regional outlook gives no marker, so its years before the forecast are its
+record) or a Planning and Statistics Authority table. A projection
+republished elsewhere (FRED) never enters a history. A file keeps its first
+year.
 
-Units. The PD model is calibrated in percentage points (2.9, not 0.029): a
-forecast that looks like fractions against a history in points is flagged
-and scaled, which is the mistake that once separated our PD curve from
-LIC's. Nominal GDP is in billions of US dollars; weights must be positive and
-every country present.
-
-Precision. Every value is written as the store holds it: nothing is rounded.
+Units. The store's values are in the units the config takes (growth in
+percentage points, nominal GDP in USD bn); a forecast that looks like
+fractions against a history in points is flagged. Every value is written as
+the store holds it: nothing is rounded.
 """
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import re
-import warnings as _warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import yaml
 
-from .catalogue import countries as _countries
+from .catalogue import concepts as _concepts
 from .store import MacroStore
 
-__all__ = ["propose", "apply", "render_model_inputs", "replace_top_level_block", "GCC",
-           "first_forecast_year", "PARTS", "DEFAULT_PARTS"]
+__all__ = ["propose", "apply", "render_model_inputs", "replace_top_level_block",
+           "first_forecast_year", "MODELS", "model_variables"]
 
-GCC = ["Bahrain", "Kuwait", "Oman", "Qatar", "Saudi Arabia", "United Arab Emirates"]
 _RECORD_SOURCES = {"IMF", "DM", "NPC"}
 _TOL = 1e-9                 # a change smaller than this is the same value
 
-# What can be filled, each on its own: a value typed by hand (a fixed set of
-# weights, a forecast set for a test) stays as it is unless its part is
-# asked for. The weights are never filled unless asked.
-PARTS = {"nonoil_forecast": "Non-oil GDP forecast",
-         "gcc_forecast": "GCC growth and nominal GDP forecasts",
-         "nonoil_history": "Non-oil GDP history",
-         "gcc_history": "GCC growth and nominal GDP history",
-         "weights": "Internal scenario weights (explicit)"}
-DEFAULT_PARTS = ("nonoil_forecast", "gcc_forecast", "nonoil_history", "gcc_history")
+# The two rating models, by rating_type, and the weights block each has in
+# model_inputs.yml with its automatic mode.
+MODELS = {"internal": "Internal rated", "external": "External rated"}
+_RATING = {"internal": "internal", "external": "external"}
+_WEIGHTS = {"internal": ("internal_scenario_weights", "auto_non_oil_gdp_cdf"),
+            "external": ("external_scenario_weights", "auto_gcc_cdf")}
+# the catalogue's links written before they named the model variable
+_OLD_LINK = {"group": "GCC", "weight": "GCCW"}
 
 
-def _iso(name: str) -> str:
-    c = _countries()
-    hit = c[c["name"] == name]
-    return hit["code"].iloc[0] if len(hit) else name
-
-
+# ---------------------------------------------------------------- reading --
 def _read_values(path: Path) -> pd.DataFrame:
     """A static file's rows, its values as numbers: a column written with
     percent signs ("9.06%", as the history files are) is read in the unit
@@ -96,6 +81,96 @@ def _read_values(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path, comment="#", skip_blank_lines=True,
                      float_precision="round_trip")
     return _read_percent_signs(df, _declared_units(path))
+
+
+def _header_of(path: Path) -> dict:
+    """A static file's ``# key: value`` header lines."""
+    out = {}
+    for ln in Path(path).read_text(encoding="utf-8-sig").splitlines():
+        s = ln.strip()
+        if s and not s.startswith("#"):
+            break
+        m = re.match(r"#\s*([A-Za-z_]+)\s*:\s*(.*)$", s)
+        if m:
+            out[m.group(1).lower()] = m.group(2).strip()
+    return out
+
+
+def _file_for(static_dir: Path, variable: str, given=None) -> str | None:
+    """The history file of a variable: the one model.yml gives, else the
+    static file whose header names the variable."""
+    if given:
+        return Path(str(given)).name
+    for p in sorted(Path(static_dir).glob("*.csv")):
+        if _header_of(p).get("variable_id", "").split(",")[0].strip() == variable:
+            return p.name
+    return None
+
+
+def _get(d: dict, path: str):
+    for k in str(path).split("."):
+        d = (d or {}).get(k) if isinstance(d, dict) else None
+    return d
+
+
+def _set(d: dict, path: str, value) -> None:
+    keys = str(path).split(".")
+    for k in keys[:-1]:
+        d = d.setdefault(k, {})
+    d[keys[-1]] = value
+
+
+def model_variables(model: dict, key: str) -> list:
+    """The variables of a rating model ("internal" or "external"), in the
+    order model.yml lists them."""
+    out = []
+    for m in (model.get("models") or {}).values():
+        if str((m or {}).get("rating_type", "")).lower().startswith(_RATING[key]):
+            for c in (m.get("mev_components") or []):
+                v = c.get("variable")
+                if v and v not in out:
+                    out.append(v)
+    return out
+
+
+def _links(cat: pd.DataFrame, variable: str, old: str | None = None) -> dict:
+    """The catalogue's concepts for a variable: {None: concept} for a single
+    series, {group: concept} for one per group."""
+    out = {}
+    for _, r in cat.iterrows():
+        base, _, grp = str(r["model_variable"] or "").partition(":")
+        if base == variable or (old and base == old and grp):
+            out[grp or None] = r["concept"]
+    return out
+
+
+def _plan(model: dict, cat: pd.DataFrame, static_dir: Path, key: str) -> list:
+    """What a rating model's variables take from the store, one entry per
+    variable (a weighted variable brings its weight variable too)."""
+    vcfg = model.get("variables") or {}
+    out = []
+    for v in model_variables(model, key):
+        c = vcfg.get(v) or {}
+        fs = c.get("forecast_source") or {}
+        if fs.get("aggregation"):
+            grp = c.get("history_group_column") or "country"
+            out.append({"model": key, "variable": v, "grouped": True, "path": fs.get("path"),
+                        "group_col": grp, "units": c.get("units"),
+                        "history": _file_for(static_dir, v, c.get("history_file")),
+                        "concepts": _links(cat, v, _OLD_LINK["group"])})
+            w = (c.get("history_aggregation") or {}).get("weight_variable")
+            if w and fs.get("weight_path"):
+                out.append({"model": key, "variable": w, "grouped": True,
+                            "path": fs.get("weight_path"), "group_col": grp, "units": "",
+                            "history": _file_for(static_dir, w),
+                            "concepts": _links(cat, w, _OLD_LINK["weight"]), "weight": True})
+        elif fs.get("column_index"):
+            out.append({"model": key, "variable": v, "grouped": False, "path": fs.get("path"),
+                        "column": int(fs["column_index"]), "units": c.get("units"),
+                        "label": c.get("display_name") or v,
+                        "history": _file_for(static_dir, v, c.get("history_file")),
+                        "concepts": _links(cat, v)})
+    return out
 
 
 def first_forecast_year(reporting_date: str, last_confirmed: int | None) -> dict:
@@ -114,13 +189,6 @@ def first_forecast_year(reporting_date: str, last_confirmed: int | None) -> dict
                  "history once it is published.")
     return {"first": first, "reporting_year": ry, "last_confirmed": int(last_confirmed),
             "rule": rule}
-
-
-def _concept_values(store, cid, years, vintage, project_root):
-    a = store.concept_annual(cid, vintage, project_root)
-    sid = a.attrs.get("series_id", "")
-    m = dict(zip(a["year"], a["value"]))
-    return [m.get(y, np.nan) for y in years], sid, a
 
 
 def _records(store: MacroStore, vintage) -> set:
@@ -144,23 +212,25 @@ def _history_update(cur: pd.DataFrame, rec: pd.DataFrame, keys: list) -> dict:
     has from the file's first year on replaces or joins the file's rows;
     rows the record lacks are kept. Returns the new rows and what moved."""
     cols = keys + ["value"]
+    grp = keys[0] if len(keys) > 1 else None
 
     def tidy(d):
-        d = d[cols].copy() if len(d) else pd.DataFrame({c: [] for c in cols})
+        d = d[cols].copy() if len(d) and all(c in d for c in cols) else \
+            pd.DataFrame({c: [] for c in cols})
         d = d.dropna(subset=["year", "value"])
         d["year"] = d["year"].astype(int)
         d["value"] = d["value"].astype(float)
-        if "country" in d:
-            d["country"] = d["country"].astype(str)
+        if grp:
+            d[grp] = d[grp].astype(str)
         return d
 
     cur, rec = tidy(cur), tidy(rec)
     if len(cur) and len(rec):
-        if keys == ["year"]:
+        if grp is None:
             rec = rec[rec["year"] >= cur["year"].min()]
         else:
-            first = cur.groupby("country")["year"].min()
-            rec = rec[rec["year"] >= rec["country"].map(first).fillna(-1)]
+            first = cur.groupby(grp)["year"].min()
+            rec = rec[rec["year"] >= rec[grp].map(first).fillna(-1)]
     j = rec.merge(cur, on=keys, how="left", suffixes=("", "_old"))
     new_row = j["value_old"].isna()
     # a value the source gives to ten digits is the file's value, not a revision
@@ -173,19 +243,18 @@ def _history_update(cur: pd.DataFrame, rec: pd.DataFrame, keys: list) -> dict:
     ch = j[new_row | moved].rename(columns={"value_old": "current", "value": "proposed"})
     ch["change"] = [_diff(a, b) for a, b in zip(ch["proposed"], ch["current"])]
     return {"rows": rows, "changes": ch.reset_index(drop=True),
-            "added": int(new_row.sum()), "revised": int(moved.sum()),
-            "changed": int(new_row.sum() + moved.sum()),
-            "largest": float(ch["change"].abs().max()) if moved.any() else 0.0}
+            "changed": int(new_row.sum() + moved.sum())}
 
 
+# ---------------------------------------------------------------- propose --
 def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
             vintage: str | None = None, project_root=None,
             first_year: int | None = None, n_years: int | None = None,
-            nonoil_series: str | None = None, parts=None) -> dict:
-    """What the config would hold with ``parts`` (keys of ``PARTS``;
-    ``DEFAULT_PARTS`` when None) filled from the store, everything else as
-    it is. See the module notes."""
-    from ..etl.macro import compute_internal_scenario_weights
+            models=None, keep_weights=None) -> dict:
+    """What the config would hold with ``models`` (keys of ``MODELS``; both
+    when None) filled from the store, the weights of the models in
+    ``keep_weights`` kept as they are and the others set to automatic. See
+    the module notes."""
     config_dir, static_dir = Path(config_dir), Path(static_dir)
     vintage = vintage or store.latest()
     if not vintage:
@@ -194,247 +263,191 @@ def propose(store: MacroStore, config_dir, static_dir, reporting_date: str,
     mi = yaml.safe_load(mi_text) or {}
     model = yaml.safe_load((config_dir / "model.yml").read_text(encoding="utf-8")) or {}
     n = int(n_years or ((model.get("horizons") or {}).get("n_forecasts") or 5))
-    notes, checks = [], []
+    chosen = [k for k in MODELS if k in set(MODELS if models is None else models)]
+    keep = set(keep_weights or [])
+    cat = _concepts(project_root)
     records = _records(store, vintage)
-    parts = [x for x in PARTS if x in set(DEFAULT_PARTS if parts is None else parts)]
+    notes, checks = [], []
 
-    # --- confirmed years and the five-year rule
-    hist = _read_values(static_dir / "non_oil_gdp_history.csv")
-    if len(hist):
-        hist = hist[["year", "value"]].dropna(subset=["year"])
-        hist["year"] = hist["year"].astype(int)
-        hist["value"] = pd.to_numeric(hist["value"], errors="coerce")
-    hist_last = int(hist["year"].max()) if len(hist) else None
-    nonoil = store.concept_annual("NONOIL_GDP_QAT", vintage, project_root,
-                                  series_id=nonoil_series)
-    weo_q = store.concept_annual("GDP_QAT", vintage, project_root)
-    marks = [hist_last]
-    for a in (nonoil, weo_q):
-        if len(a) and not a["actual"].all():
-            marks.append(int(a.loc[a["actual"], "year"].max()) if a["actual"].any() else None)
-    last_conf = max([m for m in marks if m is not None], default=None)
-    rule = first_forecast_year(reporting_date, last_conf)
+    plan = [e for k in chosen for e in _plan(model, cat, static_dir, k)]
+    series = {}
+
+    def annual(cid):
+        if cid not in series:
+            series[cid] = store.concept_annual(cid, vintage, project_root)
+        return series[cid]
+
+    # --- the five-year rule: the latest confirmed year anywhere in the plan
+    marks = []
+    for e in plan:
+        if e["history"] and not e["grouped"]:
+            h = _read_values(static_dir / e["history"])
+            if len(h) and "year" in h:
+                marks.append(int(pd.to_numeric(h["year"], errors="coerce").max()))
+        for cid in e["concepts"].values():
+            a = annual(cid)
+            if len(a) and not a["actual"].all() and a["actual"].any():
+                marks.append(int(a.loc[a["actual"], "year"].max()))
+    rule = first_forecast_year(reporting_date, max(marks) if marks else None)
     if first_year:
         rule["first"] = int(first_year)
-        rule["rule"] = f"The forecast starts in {first_year}, as set, and runs to {int(first_year) + n - 1}."
+        rule["rule"] = (f"The forecast starts in {first_year}, as set, and runs to "
+                        f"{int(first_year) + n - 1}.")
     years = list(range(rule["first"], rule["first"] + n))
+    label = lambda cid: str(cat.loc[cat["concept"] == cid, "label"].iloc[0])  # noqa: E731
 
-    # --- non-oil forecast (the internal model's driver)
-    sid_no = nonoil.attrs.get("series_id", "") if len(nonoil) else ""
-    m = dict(zip(nonoil["year"], nonoil["value"])) if len(nonoil) else {}
-    vals = [m.get(y, np.nan) for y in years]
-    if "nonoil_forecast" in parts and sid_no and not any(np.isfinite(v) for v in vals):
-        notes.append(f"{sid_no} has no values for {years[0]}-{years[-1]} (it is a "
-                     "history, not a forecast): the current non-oil forecast is kept.")
-        sid_no = ""
-    if not sid_no:
-        if not notes and "nonoil_forecast" in parts:
-            notes.append("No non-oil GDP forecast in the store (REO or FRED): the "
-                         "current forecast is kept.")
-    else:
-        miss = [y for y, v in zip(years, vals) if not np.isfinite(v)]
-        if miss:
-            notes.append(f"Non-oil GDP has no value for {', '.join(map(str, miss))} "
-                         f"in {sid_no}: the last available year is repeated.")
-            last = next((v for v in reversed(vals) if np.isfinite(v)), np.nan)
-            fill = []
-            for v in vals:
-                fill.append(v if np.isfinite(v) else (fill[-1] if fill else last))
-            vals = fill
-    h_vals = hist["value"].to_numpy(float) if len(hist) else np.array([])
-    in_points = len(h_vals) > 1 and np.nanmean(np.abs(h_vals)) > 1
+    new_mi = copy.deepcopy(mi)
+    touched, fc_rows, hist_rows, files, used, kept = [], [], [], {}, set(), []
 
-    def fractions(v) -> bool:
-        v = np.asarray(v, dtype=float)
-        v = v[np.isfinite(v)]
-        return bool(in_points and len(v) and np.max(np.abs(v)) < 0.2 and (v != 0).any())
-
-    fill_no = "nonoil_forecast" in parts
-    if not fill_no:
-        sid_no = ""
-    if sid_no and fractions(vals):
-        vals = [100.0 * v for v in vals]
-        notes.append("The store's non-oil forecast looked like fractions against a "
-                     "history in points; it was multiplied by 100.")
-
-    # the column of mev_forecasts that holds non-oil GDP
-    col = 1
-    for vid, v in (model.get("variables") or {}).items():
-        if vid == "VAR_NON_OIL_GDP_GROWTH":
-            col = int(((v or {}).get("forecast_source") or {}).get("column_index", 1))
-    fc_old = (mi.get("mev_forecasts") or {}).get("forecasts") or {}
-    fc_keys = sorted(fc_old, key=lambda k: int(k)) if fc_old else list(range(1, n + 1))
-    fc_new = {}
-    for i, k in enumerate(fc_keys[:n] if len(fc_keys) >= n else range(1, n + 1)):
-        row = [float(x) for x in (fc_old.get(k) or fc_old.get(str(k)) or [])]
-        if not row:
-            row = [0.0] * max(col, 1)
-        while len(row) < col:
-            row.append(0.0)
-        if sid_no:
-            row[col - 1] = float(vals[i])
-        fc_new[int(k)] = row
-    kept_fr = fractions([fc_new[k][col - 1] for k in fc_new])
-    if fill_no and not sid_no and kept_fr:
-        for k in fc_new:
-            fc_new[k][col - 1] *= 100.0
-        notes.append("The current non-oil forecast is entered as fractions (0.029 for "
-                     "2.9%) against a history in points: it is multiplied by 100. The PD "
-                     "model reads 0.029 as 0.029% growth.")
-    elif not fill_no and kept_fr:
-        notes.append("The non-oil forecast in this config looks like fractions (0.029 for "
-                     "2.9%) against a history in points; it is kept as it is, as it is not "
-                     "filled from the store here.")
-    nonoil_new = [fc_new[k][col - 1] for k in sorted(fc_new)]
-    if fill_no:
-        checks.append({"check": "Non-oil GDP in percentage points",
-                       "ok": not fractions(nonoil_new)})
-
-    # --- GCC growth and nominal GDP (the external model's driver and weights)
-    gg_old = mi.get("external_gcc_country_growth") or {}
-    gp_old = mi.get("external_gcc_country_prices") or {}
-    gg_new, gp_new, gsrc = {}, {}, {}
-    for name in GCC:
-        if "gcc_forecast" not in parts:
-            gg_new[name] = [float(x) for x in (gg_old.get(name) or [])]
-            gp_new[name] = [float(x) for x in (gp_old.get(name) or [])]
-            continue
-        iso = _iso(name)
-        g, sg, _ = _concept_values(store, f"GDP_{iso}", years, vintage, project_root)
-        p, sp, _ = _concept_values(store, f"NGDPD_{iso}", years, vintage, project_root)
-        if sg and all(np.isfinite(g)):
-            gg_new[name] = [float(x) for x in g]
-            gsrc[name] = sg
-        else:
-            gg_new[name] = [float(x) for x in (gg_old.get(name) or [])]
-            notes.append(f"{name}: no WEO growth for {years[0]}-{years[-1]} in the "
-                         "store; the current path is kept.")
-        if sp and all(np.isfinite(p)):
-            gp_new[name] = [float(x) for x in p]
-        else:
-            gp_new[name] = [float(x) for x in (gp_old.get(name) or [])]
-            notes.append(f"{name}: no WEO nominal GDP for {years[0]}-{years[-1]}; "
-                         "the current weights are kept.")
-    if "gcc_forecast" in parts:
-        checks.append({"check": "Every GCC country has a growth path",
-                       "ok": all(len(v) == n for v in gg_new.values())})
-        checks.append({"check": "GCC nominal GDP is positive (weights add up)",
-                       "ok": all(len(v) == n and all(x > 0 for x in v)
-                                 for v in gp_new.values())})
-
-    # --- history: the source's record of every year before the forecast
-    rec = pd.DataFrame(columns=["year", "value"])
-    sid_h = nonoil.attrs.get("series_id", "") if len(nonoil) else ""
-    if "nonoil_history" not in parts:
-        sid_h = ""
-    elif sid_h in records:
-        rec = nonoil[nonoil["actual"] & (nonoil["year"] < years[0])][["year", "value"]]
-    elif sid_h:
-        notes.append(f"{sid_h} is not a record of past years, so the non-oil history "
-                     "is kept as it is.")
-    h_up = _history_update(hist, rec, ["year"])
-    h_up["series_id"] = sid_h if sid_h in records else ""
-    gcc_hist = {}
-    for fname, prefix in (("gcc_real_gdp_growth.csv", "GDP"),
-                          ("gcc_gdp_current_prices.csv", "NGDPD")):
-        cur = _read_values(static_dir / fname)
-        rows, srcs = [], set()
-        for name in (GCC if "gcc_history" in parts else []):
-            a = store.concept_annual(f"{prefix}_{_iso(name)}", vintage, project_root)
-            sid = a.attrs.get("series_id", "")
-            if not len(a) or sid not in records or str(sid).startswith("STATIC"):
-                continue
-            srcs.add(sid)
-            a = a[a["actual"] & (a["year"] < years[0])]
-            rows += [{"country": name, "year": int(y), "value": float(v)}
-                     for y, v in zip(a["year"], a["value"])]
-        new = pd.DataFrame(rows, columns=["country", "year", "value"])
-        up = _history_update(cur, new, ["country", "year"]) if len(new) else \
-            {"rows": cur, "changes": pd.DataFrame(), "added": 0, "revised": 0,
-             "changed": 0, "largest": 0.0}
-        up["sources"] = sorted(srcs)
-        gcc_hist[fname] = up
-
-    # --- scenario weights: the V2 weights of the new history and forecast
-    iw = mi.get("internal_scenario_weights") or {}
-    sev = _read_values(static_dir / "scenario_severity.csv")
-    w_new = {}
-    h_after = h_up["rows"]["value"].to_numpy(float) if len(h_up["rows"]) else np.array([])
-    if "weights" in parts and len(sev) and len(h_after) >= 2:
-        nw = int(iw.get("n_forecast_years", 2))
-        with _warnings.catch_warnings(record=True) as caught:
-            _warnings.simplefilter("always")
-            try:
-                w_new = compute_internal_scenario_weights(h_after, nonoil_new[:nw], sev)
-            except ValueError as exc:
-                notes.append(str(exc))
-        notes += [str(c.message) for c in caught]
-    w_new = {k: float(v) for k, v in w_new.items()}
-    w_old = {k: float(v) for k, v in (iw.get("explicit_weights") or {}).items()}
-    fill_w = "weights" in parts
-    ew = mi.get("external_scenario_weights") or {}
-    if fill_w and ew.get("mode", "explicit") == "explicit":
-        notes.append("The external scenario weights are explicit in this config and are "
-                     "not recomputed; with mode auto_gcc_cdf the run works them out from "
-                     "the GCC path.")
-
-    # --- the change list
-    def rows_for(section, item, old, new):
-        out = []
+    def fc(model_key, name, old, new):
         for i, y in enumerate(years):
-            o = old[i] if i < len(old) else np.nan
-            v = new[i] if i < len(new) else np.nan
-            out.append({"section": section, "item": item, "year": y, "current": o,
-                        "proposed": v,
-                        "change": _diff(v, o)})
-        return out
+            o = float(old[i]) if i < len(old) and old[i] is not None else np.nan
+            v = float(new[i]) if i < len(new) else np.nan
+            fc_rows.append({"model": MODELS[model_key], "variable": name, "year": y,
+                            "current": o, "proposed": v, "change": _diff(v, o)})
 
-    changes = []
-    old_no = [float((fc_old.get(k) or fc_old.get(str(k)) or [np.nan] * col)[col - 1])
-              for k in fc_keys[:n]] if fc_old else [np.nan] * n
-    if fill_no:
-        changes += rows_for("Forecast", "Non-oil GDP growth, Qatar", old_no, nonoil_new)
-    for name in (GCC if "gcc_forecast" in parts else []):
-        changes += rows_for("Forecast", f"Real GDP growth, {name}",
-                            gg_old.get(name) or [], gg_new[name])
-    for name in (GCC if "gcc_forecast" in parts else []):
-        changes += rows_for("Forecast", f"Nominal GDP (USD bn), {name}",
-                            gp_old.get(name) or [], gp_new[name])
-    for r in h_up["changes"].itertuples():
-        changes.append({"section": "History", "item": "Non-oil GDP growth, Qatar",
-                        "year": int(r.year), "current": r.current, "proposed": r.proposed,
-                        "change": _diff(r.proposed, r.current)})
-    for k in (w_new if fill_w else []):
-        o = w_old.get(k, np.nan)
-        changes.append({"section": "Scenario weights", "item": f"Internal: {k}",
-                        "year": None, "current": o, "proposed": w_new[k],
-                        "change": _diff(w_new[k], o)})
-    ch = pd.DataFrame(changes, columns=["section", "item", "year", "current", "proposed",
-                                        "change"])
-    if len(ch):
-        a, b = ch["current"].astype(float), ch["proposed"].astype(float)
-        moved = ~(np.isclose(a, b, rtol=_TOL, atol=_TOL) | (a.isna() & b.isna()))
+    for e in plan:
+        mk = e["model"]
+        # --- the forecast
+        if not e["grouped"]:
+            cid = e["concepts"].get(None)
+            table = _get(mi, e["path"]) or {}
+            keys = sorted(table, key=lambda k: int(k))[:n] if table else list(range(1, n + 1))
+            col = e["column"]
+            old = []
+            for k in keys:
+                row = table.get(k) or table.get(str(k)) or []
+                old.append(float(row[col - 1]) if len(row) >= col else np.nan)
+            if not cid:
+                kept.append(e["label"])
+                continue
+            a = annual(cid)
+            m = dict(zip(a["year"], a["value"]))
+            vals = [m.get(y, np.nan) for y in years]
+            if not any(np.isfinite(v) for v in vals):
+                kept.append(e["label"])
+            else:
+                if not all(np.isfinite(v) for v in vals):
+                    last = None
+                    for i, v in enumerate(vals):
+                        last = v if np.isfinite(v) else last
+                        vals[i] = last if last is not None else v
+                    notes.append(f"{e['label']}: the store stops before {years[-1]}; its "
+                                 "last year is repeated.")
+                new_table = copy.deepcopy(_get(new_mi, e["path"]) or {})
+                for i, k in enumerate(keys if len(keys) == n else range(1, n + 1)):
+                    row = list(new_table.get(k) or new_table.get(str(k)) or [])
+                    row += [0.0] * (col - len(row))
+                    row[col - 1] = float(vals[i])
+                    new_table.pop(str(k), None)
+                    new_table[int(k)] = row
+                _set(new_mi, e["path"], new_table)
+                touched.append(str(e["path"]).split(".")[0])
+                used.add(a.attrs.get("series_id", ""))
+                fc(mk, e["label"], old, vals)
+        else:
+            cur = _get(mi, e["path"]) or {}
+            new_paths = copy.deepcopy(cur)
+            for grp, cid in e["concepts"].items():
+                if grp is None:
+                    continue
+                a = annual(cid)
+                m = dict(zip(a["year"], a["value"]))
+                vals = [m.get(y, np.nan) for y in years]
+                if not len(a) or not all(np.isfinite(v) for v in vals):
+                    kept.append(label(cid))
+                    continue
+                new_paths[grp] = [float(v) for v in vals]
+                used.add(a.attrs.get("series_id", ""))
+                fc(mk, label(cid), cur.get(grp) or [], vals)
+            if new_paths != cur:
+                _set(new_mi, e["path"], new_paths)
+                touched.append(str(e["path"]).split(".")[0])
+            if e.get("weight"):
+                checks.append({"check": f"{MODELS[mk]}: every weight is positive",
+                               "ok": all(len(v) == n and all(x > 0 for x in v)
+                                         for v in new_paths.values())})
+
+        # --- the history
+        if not e["history"]:
+            continue
+        cur = _read_values(static_dir / e["history"])
+        rows = []
+        for grp, cid in e["concepts"].items():
+            a = annual(cid)
+            if not len(a) or a.attrs.get("series_id") not in records \
+                    or str(a.attrs.get("series_id", "")).startswith("STATIC"):
+                continue
+            a = a[a["actual"] & (a["year"] < years[0])]
+            rows += [{**({e.get("group_col"): grp} if grp else {}), "year": int(y),
+                      "value": float(v)} for y, v in zip(a["year"], a["value"])]
+        if not rows:
+            continue
+        keys = [e["group_col"], "year"] if e["grouped"] else ["year"]
+        up = _history_update(cur, pd.DataFrame(rows), keys)
+        if up["changed"]:
+            srcs = sorted({annual(c).attrs.get("series_id", "") for c in e["concepts"].values()
+                           if annual(c).attrs.get("series_id") in records})
+            files[f"static/{e['history']}"] = {"rows": up["rows"], "changed": up["changed"],
+                                               "source": ", ".join(srcs)}
+            for r in up["changes"].to_dict(orient="records"):
+                name = label(e["concepts"][r[e["group_col"]]]) if e["grouped"] else e["label"]
+                hist_rows.append({"model": MODELS[mk], "variable": name, "year": int(r["year"]),
+                                  "current": r["current"], "proposed": r["proposed"],
+                                  "change": r["change"]})
+
+    # --- the scenario weights: automatic unless kept
+    weights = []
+    for k in chosen:
+        block, auto = _WEIGHTS[k]
+        cur_mode = str((mi.get(block) or {}).get("mode", "explicit"))
+        if k not in keep and cur_mode != auto:
+            weights.append({"model": MODELS[k], "block": block, "current": cur_mode,
+                            "proposed": auto})
+
+    # --- the fractions slip: a forecast in fractions against a history in points
+    for e in plan:
+        if e["grouped"] or e.get("units") != "percentage_points" or not e["history"]:
+            continue
+        h = _read_values(static_dir / e["history"])
+        hv = pd.to_numeric(h.get("value", pd.Series(dtype=float)), errors="coerce").dropna()
+        t = _get(new_mi, e["path"]) or {}
+        fv = np.array([float((t.get(k) or [np.nan] * e["column"])[e["column"] - 1])
+                       for k in t], dtype=float)
+        fv = fv[np.isfinite(fv)]
+        if len(hv) > 1 and hv.abs().mean() > 1 and len(fv) and np.abs(fv).max() < 0.2 \
+                and (fv != 0).any():
+            notes.append(f"{e['label']}: the forecast looks like fractions (0.029 for 2.9%) "
+                         "against a history in points. The PD model reads 0.029 as 0.029% "
+                         "growth.")
+
+    cols = ["model", "variable", "year", "current", "proposed", "change"]
+    fcd = pd.DataFrame(fc_rows, columns=cols)
+    hd = pd.DataFrame(hist_rows, columns=cols)
+
+    def n_moved(d):
+        if not len(d):
+            return 0
+        a, b = d["current"].astype(float), d["proposed"].astype(float)
+        return int((~(np.isclose(a, b, rtol=_TOL, atol=_TOL) | (a.isna() & b.isna()))).sum())
 
     release = store.meta(vintage).get("created", "")
     return {
-        "ok": True, "vintage": vintage, "release": release, "parts": parts,
+        "ok": True, "vintage": vintage, "release": release, "models": chosen,
+        "keep_weights": sorted(keep & set(chosen)),
         "years": years, "rule": rule["rule"], "first_year": years[0],
         "last_confirmed": rule["last_confirmed"],
-        "nonoil": {"series_id": sid_no, "values": nonoil_new, "column": col},
-        "mev_forecasts": fc_new,
-        "gcc_growth": gg_new, "gcc_prices": gp_new, "gcc_sources": gsrc,
-        "history_nonoil": h_up,
-        "history_gcc": gcc_hist,
-        "weights": {"internal": {"mode": iw.get("mode", "explicit"),
-                                 "n_forecast_years": int(iw.get("n_forecast_years", 2)),
-                                 "current": w_old, "proposed": w_new, "write": fill_w},
-                    "external": {"mode": ew.get("mode", "explicit")}},
-        "changes": ch, "changed": int(moved.sum()) if len(ch) else 0,
-        "warnings": notes, "checks": pd.DataFrame(checks),
+        "forecast": fcd, "history": hd, "weights": weights,
+        "changed": n_moved(fcd) + n_moved(hd) + len(weights),
+        "warnings": notes, "checks": pd.DataFrame(checks, columns=["check", "ok"]),
+        "kept": kept,
+        "series": sorted(s for s in used if s),
         "model_inputs_text": mi_text,
+        "_model_inputs": new_mi, "_touched": list(dict.fromkeys(touched)), "_files": files,
     }
 
 
+# ----------------------------------------------------------------- writing --
 def replace_top_level_block(text: str, key: str, block: str) -> str:
     """Replace one top-level YAML key's block (its line and everything
     indented under it) with ``block``, keeping every other line -- and every
@@ -454,54 +467,47 @@ def replace_top_level_block(text: str, key: str, block: str) -> str:
     return "\n".join(lines[:start] + new + lines[end:]) + "\n"
 
 
+def _set_mode(text: str, block: str, mode: str) -> str:
+    """``block``'s ``mode:`` line set to ``mode``, every other line of the
+    block -- the explicit weights, the comments -- kept."""
+    lines = text.splitlines()
+    start = next((i for i, ln in enumerate(lines) if re.match(rf"^{re.escape(block)}\s*:", ln)),
+                 None)
+    if start is None:
+        return "\n".join(lines + [f"{block}:", f"  mode: {mode}"]) + "\n"
+    i = start + 1
+    while i < len(lines) and (lines[i].startswith((" ", "\t")) or not lines[i].strip()):
+        if re.match(r"^\s+mode\s*:", lines[i]):
+            ind = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+            lines[i] = f"{ind}mode: {mode}"
+            return "\n".join(lines) + "\n"
+        i += 1
+    lines.insert(start + 1, f"  mode: {mode}")
+    return "\n".join(lines) + "\n"
+
+
 def _dump(key, value) -> str:
     return yaml.safe_dump({key: value}, sort_keys=False, default_flow_style=False,
                           allow_unicode=True)
 
 
-def _weights_block(old: dict, proposed: dict, vintage: str) -> str:
-    """The internal_scenario_weights block with the new explicit weights, its
-    mode and every other setting kept."""
-    b = dict(old or {})
-    b["explicit_weights"] = {k: float(v) for k, v in proposed.items()}
-    lines = _dump("internal_scenario_weights", b).splitlines()
-    i = next(j for j, ln in enumerate(lines) if ln.startswith("  explicit_weights:"))
-    note = ["  # The V2 weights of the history and forecast filled from the macro store",
-            f"  # (vintage {vintage}), unrounded. Used only when mode is explicit;",
-            "  # auto_non_oil_gdp_cdf works out the same weights at run time."]
-    return "\n".join(lines[:i] + note + lines[i:]) + "\n"
-
-
 def render_model_inputs(p: dict) -> str:
-    """The new model_inputs.yml text: the forecast blocks and the explicit
-    internal weights replaced, a ``macro_source`` block naming where they
+    """The new model_inputs.yml text: the blocks the chosen models fill and
+    the weights' mode replaced, a ``macro_source`` block naming where they
     came from, every other line and comment kept."""
     t = p["model_inputs_text"]
-    parts = p.get("parts") or list(DEFAULT_PARTS)
-    if "gcc_forecast" in parts:
-        t = replace_top_level_block(t, "external_gcc_country_growth",
-                                    _dump("external_gcc_country_growth", p["gcc_growth"]))
-        t = replace_top_level_block(t, "external_gcc_country_prices",
-                                    _dump("external_gcc_country_prices", p["gcc_prices"]))
-    if "nonoil_forecast" in parts:
-        t = replace_top_level_block(t, "mev_forecasts",
-                                    _dump("mev_forecasts", {"forecasts": p["mev_forecasts"]}))
-    w = (p.get("weights") or {}).get("internal") or {}
-    if "weights" in parts and w.get("proposed"):
-        old = (yaml.safe_load(p["model_inputs_text"]) or {}).get("internal_scenario_weights")
-        t = replace_top_level_block(t, "internal_scenario_weights",
-                                    _weights_block(old, w["proposed"], p["vintage"]))
+    for key in p.get("_touched") or []:
+        t = replace_top_level_block(t, key, _dump(key, p["_model_inputs"][key]))
+    for w in p.get("weights") or []:
+        t = _set_mode(t, w["block"], w["proposed"])
     src = {"vintage": p["vintage"], "store_created": p["release"],
-           "filled": [PARTS[x] for x in parts],
+           "models": [MODELS[k] for k in p.get("models") or []],
            "first_forecast_year": int(p["first_year"]),
            "years": [int(y) for y in p["years"]],
-           "non_oil_gdp": p["nonoil"]["series_id"],
-           "non_oil_history": (p.get("history_nonoil") or {}).get("series_id", ""),
-           "gcc": sorted(set(p["gcc_sources"].values())),
+           "series": list(p.get("series") or []),
            "date": _dt.datetime.now().strftime("%Y-%m-%d %H:%M")}
     src = {k: v for k, v in src.items() if v not in ("", [], None)}
-    t = replace_top_level_block(t, "macro_source", _dump("macro_source", src))
-    return t
+    return replace_top_level_block(t, "macro_source", _dump("macro_source", src))
 
 
 def _header(lines: list, source: str, vintage: str) -> list:
@@ -524,17 +530,14 @@ def _header(lines: list, source: str, vintage: str) -> list:
 
 
 def apply(p: dict, snapshot_label: str, snapshots_root=None, edited_by=None) -> dict:
-    """Write a proposal into a DRAFT snapshot: model_inputs.yml, and the
-    history files the source has revised or extended."""
+    """Write a proposal into a DRAFT snapshot: model_inputs.yml when a
+    forecast or a weights mode moves, and the history files that move."""
     from ..snapshots import read_static_csv_with_header, save_snapshot_csv, save_snapshot_yaml
     from ..snapshots import snapshot_dir
     if not p.get("ok"):
         return {"ok": False, "message": p.get("reason", "Nothing to apply.")}
     out = []
-    parts = p.get("parts") or list(DEFAULT_PARTS)
-    # model_inputs.yml only when a part of it is filled: a history update
-    # alone leaves it as it is
-    if {"nonoil_forecast", "gcc_forecast", "weights"} & set(parts):
+    if p.get("_touched") or p.get("weights"):
         r = save_snapshot_yaml(snapshot_label, "config/model_inputs.yml",
                                render_model_inputs(p), snapshots_root=snapshots_root,
                                edited_by=edited_by)
@@ -542,15 +545,10 @@ def apply(p: dict, snapshot_label: str, snapshots_root=None, edited_by=None) -> 
             return r
         out.append(r["message"])
     d = snapshot_dir(snapshot_label, snapshots_root)
-    files = [("static/non_oil_gdp_history.csv", p.get("history_nonoil") or {})]
-    files += [(f"static/{f}", h) for f, h in (p.get("history_gcc") or {}).items()]
-    for rel, h in files:
-        if not h.get("changed") or not len(h.get("rows", [])):
-            continue
-        src = h.get("series_id") or ", ".join(h.get("sources") or [])
+    for rel, h in (p.get("_files") or {}).items():
         head = read_static_csv_with_header(d / rel)["comment_header"]
         r = save_snapshot_csv(snapshot_label, rel, h["rows"], snapshots_root=snapshots_root,
                               edited_by=edited_by,
-                              comment_header=_header(head, src, p["vintage"]))
+                              comment_header=_header(head, h["source"], p["vintage"]))
         out.append(r.get("message", ""))
-    return {"ok": True, "message": "; ".join(m for m in out if m)}
+    return {"ok": True, "message": "; ".join(m for m in out if m) or "nothing to write"}
