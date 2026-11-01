@@ -250,8 +250,11 @@ class TestWorkbook:
         p = tmp_path / "c1.xlsx"
         customer_ecl_workbook(run, "C1", p)
         wb = openpyxl.load_workbook(p)
-        assert wb.sheetnames == ["Summary", "Settings", "Lines", "Overrides",
-                                 "Staging", "LGD", "PD", "EAD", "ECL"]
+        assert wb.sheetnames == ["Summary", "Lines", "Overrides", "Staging", "LGD",
+                                 "PD internal", "PD curves", "EAD", "ECL", "Settings"]
+        # the settings, and the overrides when the customer has none, are hidden
+        assert [ws.title for ws in wb if ws.sheet_state == "hidden"] == [
+            "Overrides", "Settings"]
         rows = summary_rows(wb)
         assert len(rows) == 5
         assert all(str(r["ECL (this workbook)"]).startswith("=") for r in rows)
@@ -260,6 +263,64 @@ class TestWorkbook:
     def test_bytes_when_no_destination(self, run):
         b = customer_ecl_workbook(run, "C3")
         assert b[:2] == b"PK"
+
+
+class TestThePdCalculation:
+    """The PD tabs rebuild the curves from the run's model, forecasts and
+    weights: one per rating scale and bucket, not one per portfolio."""
+
+    @pytest.mark.parametrize("cust", ["C1", "ISSUER"])
+    def test_the_calculated_curves_are_the_runs(self, run, cust):
+        pm = customer_ecl_facts(run, cust)["pd_model"]
+        assert pm["source"] == "Calculated" and pm["largest_difference"] < 1e-12
+
+    def test_one_curve_per_scale_and_bucket(self, run, tmp_path):
+        f = customer_ecl_facts(run, "C1")
+        assert {l["portfolio"] for l in f["lines"]} >= {"Business Finance", "Off BS"}
+        assert list(f["pd_model"]["calc_curves"]) == [(1, "11")]
+        p = tmp_path / "c1.xlsx"
+        write_customer_workbook(f, p)
+        wb = openpyxl.load_workbook(p)
+        assert wb["PD internal"]["A1"].value.startswith("PD internal")
+        assert "PD external" not in wb.sheetnames
+        keys = [c.value for c in wb["PD curves"][_keys_row(wb["PD curves"])]][1:]
+        assert keys[0] == "Internal | bucket 11"
+
+    def test_a_run_whose_stpd_is_not_the_models_prices_on_its_own(self, tmp_path):
+        r = make_run(tmp_path, tamper_stpd=True)
+        pm = customer_ecl_facts(r, "C1")["pd_model"]
+        assert pm["source"] == "Run's StPD" and "differs" in pm["reason"]
+
+    @pytest.mark.skipif(SOFFICE is None, reason="LibreOffice is needed to recalculate")
+    @pytest.mark.parametrize("cust", ["C1", "ISSUER"])
+    def test_recalculated_the_curves_equal_the_runs_stpd(self, run, tmp_path, cust):
+        f = customer_ecl_facts(run, cust)
+        p = tmp_path / f"{cust}.xlsx"
+        write_customer_workbook(f, p)
+        ws = recalc(p, tmp_path)["PD curves"]
+        hr = _keys_row(ws)
+        keys = [c.value for c in ws[hr]]
+        st = pd.read_csv(run / "Output" / "StPD.csv")
+        n = 0
+        for col, k in enumerate(keys[1:], start=2):
+            if not str(k).startswith(("Internal |", "External |")):
+                continue
+            rt = 1 if k.startswith("Internal") else 2
+            pf = "Business Finance" if rt == 1 else "Investments"
+            ref = st[(st.PortfolioCode == pf) & (st.PDBucketDim1 == int(k.split()[-1]))
+                     ].sort_values("MonthLifetime")["PDLifetime"].to_numpy()
+            got = np.array([ws.cell(hr + 2 + m, col).value for m in range(600)], float)
+            np.testing.assert_allclose(got, ref, rtol=0, atol=1e-12)
+            n += 1
+        assert n == len(f["pd_model"]["calc_curves"]) > 0
+
+
+def _keys_row(ws) -> int:
+    """The row of the PD curves tab holding the curve labels."""
+    for r in range(1, 80):
+        if ws.cell(r, 1).value == "Month":
+            return r
+    raise AssertionError("no Month header")
 
 
 @pytest.mark.skipif(SOFFICE is None, reason="LibreOffice is needed to recalculate")

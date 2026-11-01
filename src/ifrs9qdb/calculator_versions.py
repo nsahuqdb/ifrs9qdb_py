@@ -1,5 +1,12 @@
 """The calculator registry: which version of the calculation code a run used.
 
+The calculator version IS the engine version (``ifrs9qdb.__version__``): one
+number, not a second label to keep in step with it. The running version is
+registered -- its code fingerprinted and archived -- the first time a run uses
+it (:func:`ensure_current_registered`), so the registry is the list of engine
+versions that have produced runs, and an older one can be run again from its
+archive. Entries made before this (``v1.0``) stay, for the runs that name them.
+
 Deployment does not always go through git -- a bank release can be a copied
 directory -- so the code version is tracked here explicitly rather than being
 inferred from a SHA.
@@ -37,7 +44,7 @@ __all__ = ["registry_path", "read_calculator_versions",
            "get_calculator_version", "compute_code_fingerprint",
            "calculator_version_for_run", "register_calculator_version",
            "set_active_calculator_version", "calc_version_code_dir",
-           "PACKAGED_FINGERPRINT"]
+           "engine_version", "ensure_current_registered", "PACKAGED_FINGERPRINT"]
 
 PACKAGED_FINGERPRINT = Path(__file__).parent / "CODE_FINGERPRINT"
 
@@ -86,14 +93,33 @@ def list_calculator_versions(root=None) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
 
 
+def engine_version() -> str:
+    """The running engine's version: the calculator version."""
+    from . import __version__
+    return __version__
+
+
 def current_calculator_version(root=None) -> dict | None:
-    reg = read_calculator_versions(root)
-    if not reg["active"]:
-        return None
-    for v in reg["versions"]:
-        if v.get("id") == reg["active"]:
-            return v
-    return None
+    """The registry's entry for the running engine version, or None before
+    a run has used it."""
+    return get_calculator_version(engine_version(), root)
+
+
+def ensure_current_registered(root=None) -> dict | None:
+    """The running engine version in the registry: registered, fingerprinted
+    and archived the first time, and made the active one. Returns its entry
+    (None when the registry cannot be written)."""
+    v = engine_version()
+    entry = get_calculator_version(v, root)
+    try:
+        if entry is None:
+            entry = register_calculator_version(
+                v, label=v, description=f"ifrs9qdb {v}", make_active=True, root=root)
+        elif read_calculator_versions(root)["active"] != v:
+            set_active_calculator_version(v, root)
+    except (OSError, ValueError):
+        entry = get_calculator_version(v, root)
+    return entry
 
 
 def get_calculator_version(id: str, root=None) -> dict | None:
@@ -144,10 +170,9 @@ def calculator_version_for_run(id: str | None = None, root=None,
     nothing to compare against, which is different from False and should not be
     displayed as a mismatch.
     """
-    reg = read_calculator_versions(root)
     if not id:
-        id = reg["active"]
-    entry = get_calculator_version(id, root) if id else None
+        id = engine_version()
+    entry = get_calculator_version(id, root)
     current = compute_code_fingerprint(code_dir)
     registered = (entry or {}).get("code_hash") or ""
     matches = None if (current is None or not registered) \

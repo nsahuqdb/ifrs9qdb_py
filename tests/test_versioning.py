@@ -116,11 +116,11 @@ class TestTheRegistry:
         src.mkdir()
         (src / "engine.py").write_text("def price(): return 1\n")
         register_calculator_version("v1.0", root=tmp_path, code_dir=src)
-        assert calculator_version_for_run(root=tmp_path,
+        assert calculator_version_for_run("v1.0", root=tmp_path,
                                           code_dir=src)["matches_registered"]
 
         (src / "engine.py").write_text("def price(): return 2\n")
-        r = calculator_version_for_run(root=tmp_path, code_dir=src)
+        r = calculator_version_for_run("v1.0", root=tmp_path, code_dir=src)
         assert r["matches_registered"] is False
         assert r["code_hash"] != r["registered_hash"]
 
@@ -137,10 +137,37 @@ class TestTheRegistry:
         (src / "a.py").write_text("x = 1\n")
         register_calculator_version("v1.0", root=tmp_path, code_dir=src)
         register_calculator_version("v1.1", root=tmp_path, code_dir=src)
-        assert current_calculator_version(tmp_path)["id"] == "v1.1"
+        assert read_calculator_versions(tmp_path)["active"] == "v1.1"
         set_active_calculator_version("v1.0", tmp_path)
-        assert current_calculator_version(tmp_path)["id"] == "v1.0"
+        assert read_calculator_versions(tmp_path)["active"] == "v1.0"
         assert list_calculator_versions(tmp_path)["active"].sum() == 1
+
+
+class TestTheCalculatorIsTheEngine:
+    """One version number: the calculator version is ifrs9qdb.__version__."""
+
+    def test_a_run_names_the_engine_version(self, tmp_path):
+        from ifrs9qdb import __version__
+        assert calculator_version_for_run(root=tmp_path)["id"] == __version__
+
+    def test_the_engine_version_is_registered_once_and_archived(self, tmp_path):
+        from ifrs9qdb import __version__
+        from ifrs9qdb.calculator_versions import ensure_current_registered
+        assert current_calculator_version(tmp_path) is None
+        e = ensure_current_registered(tmp_path)
+        assert e["id"] == __version__ and e["archived"]
+        assert ensure_current_registered(tmp_path)["id"] == __version__
+        reg = read_calculator_versions(tmp_path)
+        assert reg["active"] == __version__ and len(reg["versions"]) == 1
+        assert current_calculator_version(tmp_path)["id"] == __version__
+        assert calculator_version_for_run(root=tmp_path)["registered_hash"]
+
+    def test_the_running_version_runs_the_live_code(self, tmp_path):
+        from ifrs9qdb import __version__
+        from ifrs9qdb.calculator_versions import ensure_current_registered
+        from ifrs9qdb.runs import archived_code_for
+        ensure_current_registered(tmp_path)
+        assert archived_code_for(__version__, tmp_path) is None
 
     def test_an_unknown_version_cannot_be_made_active(self, tmp_path):
         with pytest.raises(ValueError, match="unknown"):

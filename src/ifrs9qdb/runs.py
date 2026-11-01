@@ -30,15 +30,17 @@ def archived_code_for(calc_id: str | None, root=None):
     """The archived code a run with this calculator version should execute,
     or None to run the live code -- R's make_calc_run_env() decision.
 
-    None when no version is named (the active default), when the version has
-    no archive, or when it is the active version and the live code already
-    matches its registered fingerprint (the live code IS that version).
+    None when no version is named or it is the running engine version (the
+    live code IS that version; drift from its archive is reported, not run
+    around), when the version has no archive, or when it is the active version
+    and the live code already matches its registered fingerprint.
     """
     from .calculator_versions import (calc_version_code_dir,
                                       compute_code_fingerprint,
+                                      engine_version,
                                       get_calculator_version,
                                       read_calculator_versions)
-    if not calc_id:
+    if not calc_id or calc_id == engine_version():
         return None
     d = calc_version_code_dir(calc_id, root)
     if d is None or not any(Path(d).rglob("*.py")):

@@ -12,9 +12,14 @@ the files the run priced:
                 customer in the run, with who, when and why
     Staging     the staging rules, the manual stage and customer contagion
     LGD         collateral value x allocation x (1 - haircut), then the LGD
-    PD          the rating -> bucket map and the run's monthly cumulative PD
-                curve for each portfolio and bucket the customer uses
-                (StPD.csv), as inputs
+    PD internal the internal PiT PD model on its forecasts: scaling factor per
+                scenario and year, then per bucket the annual PiT, cumulative
+                and marginal PD, weighted over the scenarios
+    PD external the same for externally rated positions, from GCC growth and
+                the Basel formula, with weights that change by year
+    PD curves   the rating -> bucket map and the monthly cumulative PD curves:
+                calculated (one per rating scale and bucket) beside the run's
+                StPD.csv, the difference, and which of the two the ECL uses
     EAD         months to maturity, the amortisation shape and the horizon
     ECL         month by month: EAD x LGD x marginal PD / (1 + EIR)^(t/12)
     Summary     the provision per position and in total, against the report
@@ -24,9 +29,10 @@ THE BOUNDARY
     its frozen config and its override log -- the same point the report is
     priced from. How the ETL built those files from the raw extracts is the
     ETL's own record (validation and readiness reports), not repeated here.
-    Three inputs are taken as the run has them: the PD curves (StPD.csv: the
-    macro model and scenario weights are a portfolio question, the same for
-    every customer), a repayment schedule's monthly EAD
+    The PD curves are calculated from the run's model, forecasts and scenario
+    weights (the weights as the run resolved them), and compared with the
+    run's StPD.csv; when the two differ the ECL uses the run's. Two inputs are
+    taken as the run has them: a repayment schedule's monthly EAD
     (LifeTimeParameterOther) and the overlays.
 
 ONE ANSWER
@@ -434,6 +440,7 @@ def customer_ecl_facts(run_dir, customer_id) -> dict:
                        "stpd": None if stpd is None else np.asarray(stpd, dtype=float)})
 
     rules, default = ead_fallback_rules(model_cfg)
+    pdm = _pd_model(root, static, lines, curves)
     return {
         "run_id": root.name, "run_dir": str(root),
         "customer_id": cust, "customer_name": name,
@@ -450,7 +457,147 @@ def customer_ecl_facts(run_dir, customer_id) -> dict:
                      "default_shape": str(default)},
         "lines": lines, "overrides": _overrides(root, cust),
         "collateral": _collateral(out_dir, [l["cid"] for l in lines]),
-        "ratings_map": rmap, "curves": curves,
+        "ratings_map": rmap, "curves": curves, "pd_model": pdm,
+    }
+
+
+CALC, RUN = "Calculated", "Run's StPD"      # the two sources of the PD curves
+
+
+def _gcc_years(static, n: int) -> list:
+    """The years of the GDP-weighted GCC growth history (gcc_weighted_history
+    keeps the values only): from 1982, at least two countries with growth and
+    GDP. Blank labels when they do not line up with the ``n`` values."""
+    from .etl.macro import GCC_HISTORY_FIRST_YEAR
+    try:
+        g, p = static.get("gcc_real_gdp_growth"), static.get("gcc_gdp_current_prices")
+        lo = lambda d: {c.lower(): c for c in d.columns}
+        gl, pl = lo(g), lo(p)
+        a = pd.DataFrame({"year": pd.to_numeric(g[gl["year"]], errors="coerce"),
+                          "country": g[gl["country"]],
+                          "v": pd.to_numeric(g[gl.get("value", gl.get("growth"))],
+                                             errors="coerce")}).dropna()
+        b = pd.DataFrame({"year": pd.to_numeric(p[pl["year"]], errors="coerce"),
+                          "country": p[pl["country"]],
+                          "w": pd.to_numeric(p[pl.get("value", pl.get("gdp"))],
+                                             errors="coerce")}).dropna()
+        m = a[a["year"] >= GCC_HISTORY_FIRST_YEAR].merge(b, on=["year", "country"])
+        n_by = m.groupby("year").size()
+        years = [int(y) for y in n_by[n_by >= 2].index]
+        return years if len(years) == n else [None] * n
+    except Exception:
+        return [None] * n
+
+
+def _pd_model(root: Path, static, lines: list, curves: list) -> dict | None:
+    """What the PD tabs compute from: the run's PiT PD model, its forecasts
+    and scenario weights, the regional growth the external scale follows, and
+    the TTC PD of each bucket the customer uses. The curves the same chain
+    gives (build_stpd_from_static) are compared with the run's StPD: the
+    workbook prices on the calculated curves when they are the run's, else
+    on the run's own (a run whose StPD came from elsewhere)."""
+    from .etl.macro import (_gcc_inputs, build_stpd_from_static,
+                            resolve_scenario_weights)
+    from .etl.model_registry import mev_model_weights, resolve_model, run_model_id
+    from .etl.pipeline import load_model_config
+    from .etl.report import _KEYSEP
+    if static is None:
+        return None
+    cu = root / "config_used" / "config"
+    try:
+        model_cfg, inputs = load_model_config(cu if cu.is_dir() else None)
+        mid = run_model_id(root)
+        resolved = resolve_model(model_cfg, mid)
+        w_mev = mev_model_weights(resolved, inputs)
+        fc = inputs["mev_forecasts"]["forecasts"]
+        years = sorted(fc, key=lambda k: int(k))
+        hz = model_cfg.get("horizons", {}) or {}
+        n_fc = int(hz.get("n_forecasts", model_cfg.get("n_forecasts", len(years))))
+        max_mat = int(hz.get("max_maturity", model_cfg.get("max_maturity", 50)))
+        scen = static["scenario_severity"]
+        names = [str(x) for x in scen["scenario"]]
+        w_int, w_ext = resolve_scenario_weights(static, model_cfg, inputs)
+        gcc_hist, ext_fc = _gcc_inputs(static, inputs, n_fc)
+        calc = build_stpd_from_static(static, model_cfg, inputs, "", model_id=mid)
+    except Exception as exc:                      # noqa: BLE001
+        return {"ok": False, "source": RUN,
+                "reason": f"The PD model could not be rebuilt from the run's config "
+                          f"({exc}); the ECL uses the run's StPD."}
+
+    ext_ok = bool(np.asarray(gcc_hist).size) and ext_fc is not None
+    pf = static["portfolios"]
+    pf_col = "portfolio_code" if "portfolio_code" in pf.columns else pf.columns[0]
+    rt_col = next((c for c in pf.columns if "rating" in c.lower()), None)
+    from .etl.macro import _matching_type
+    buckets, calc_curves = {1: [], 2: []}, {}
+    for rt in (1, 2):
+        used = sorted({l["bucket"] for l in lines if l.get("rt") == str(rt)
+                       and l.get("bucket") is not None}, key=float)
+        if not used:
+            continue
+        ttc = static.ttc_for(rt)
+        rmap = static.ratings_for(rt)
+        hier = dict(zip(rmap["rating"].astype(str),
+                        pd.to_numeric(rmap["hierarchy"], errors="coerce")))
+        by_b = {}
+        for r in ttc.itertuples():
+            b = hier.get(str(r.rating))
+            if b is not None and np.isfinite(b) and b not in by_b:
+                by_b[float(b)] = (str(r.rating), float(r.ttc_pd))
+        pfs = (pf.loc[_matching_type(pf[rt_col], rt), pf_col].tolist()
+               if rt_col is not None else pf[pf_col].tolist())
+        for b in used:
+            rating, ttc_pd = by_b.get(float(b), (None, None))
+            bkey = str(int(b)) if float(b).is_integer() else str(b)
+            buckets[rt].append({"bucket": b, "key": bkey, "rating": rating, "ttc": ttc_pd})
+            sub = calc[(calc["PortfolioCode"].isin(pfs))
+                       & (calc["PDBucketDim1"].astype(float) == float(b))]
+            if len(sub):
+                sub = sub[sub["PortfolioCode"] == sub["PortfolioCode"].iloc[0]]
+                calc_curves[(rt, bkey)] = np.concatenate(
+                    [[0.0], sub.sort_values("MonthLifetime")["PDLifetime"].to_numpy(float)])
+
+    # the run's curves against the calculated ones
+    worst, missing = 0.0, []
+    for c in curves:
+        bkey = str(int(c["bucket"])) if float(c["bucket"]).is_integer() else str(c["bucket"])
+        mine = calc_curves.get((c["rt"], bkey))
+        if c["stpd"] is None:
+            continue
+        if mine is None or (c["rt"] == 2 and not ext_ok):
+            missing.append(c["label"])
+            continue
+        n = min(len(mine), len(c["stpd"]))
+        worst = max(worst, float(np.max(np.abs(mine[:n] - c["stpd"][:n]))))
+    ok = not missing and worst <= 1e-10
+    reason = ("" if ok else
+              f"No calculated curve for {', '.join(missing)}: the ECL uses the run's StPD."
+              if missing else
+              f"The run's StPD differs from the calculated curves (by up to {worst:.3g}): "
+              "the ECL uses the run's StPD; switch to Calculated to price on the model.")
+    pe = w_ext["per_year"]
+    return {
+        "ok": True, "source": CALC if ok else RUN, "reason": reason,
+        "largest_difference": worst,
+        "model_id": resolved["model"]["id"],
+        "mevs": [{"name": m.get("name") or m.get("variable_id"),
+                  "intercept": float(m["intercept"]), "coefficient": float(m["coefficient"]),
+                  "sd": float(m["standard_deviation"]),
+                  "unit": float(m["stress_unit_multiplier"]), "weight": float(w)}
+                 for m, w in zip(resolved["model"]["mevs"], w_mev)],
+        "anchor": float(model_cfg["ttc_anchor_pd"]), "n_fc": n_fc, "max_mat": max_mat,
+        "years": [int(y) for y in years[:n_fc]],
+        "forecasts": [[float(v) for v in fc[y]] for y in years[:n_fc]],
+        "scenarios": list(zip(names, pd.to_numeric(scen["severity_z"]).astype(float))),
+        "w_int": [float(w_int[n]) for n in names],
+        "int_mode": (inputs.get("internal_scenario_weights") or {}).get("mode", "explicit"),
+        "ext_ok": ext_ok,
+        "gcc_hist": [float(v) for v in np.asarray(gcc_hist, dtype=float)],
+        "gcc_years": _gcc_years(static, int(np.asarray(gcc_hist).size)),
+        "ext_fc": [] if ext_fc is None else [float(v) for v in np.asarray(ext_fc, float)],
+        "w_ext": [[float(pe.iloc[i][n]) for n in names] for i in range(len(pe))],
+        "ext_mode": (inputs.get("external_scenario_weights") or {}).get("mode", "explicit"),
+        "buckets": buckets, "calc_curves": calc_curves,
     }
 
 
@@ -544,15 +691,25 @@ def write_customer_workbook(facts: dict, dest=None):
     L = facts["lines"]
     st = facts["settings"]
 
+    pdm = facts.get("pd_model") or {}
+    scales = {l.get("rt") for l in L}
     ws_sum = B.sheet("Summary")
-    ws_set = B.sheet("Settings")
     ws_ln = B.sheet("Lines")
     ws_ov = B.sheet("Overrides")
     ws_stg = B.sheet("Staging")
     ws_lgd = B.sheet("LGD")
-    ws_pd = B.sheet("PD")
+    ws_pi = B.sheet("PD internal") if pdm.get("ok") and "1" in scales else None
+    ws_pe = (B.sheet("PD external") if pdm.get("ok") and pdm.get("ext_ok")
+             and "2" in scales else None)
+    ws_pd = B.sheet("PD curves")
     ws_ead = B.sheet("EAD")
     ws_ecl = B.sheet("ECL")
+    ws_set = B.sheet("Settings")
+    # what a reviewer does not need to open: the settings, and the overrides
+    # tab when the customer has none (Excel: right-click a tab, Unhide)
+    ws_set.sheet_state = "hidden"
+    if len(facts["overrides"]) == 0:
+        ws_ov.sheet_state = "hidden"
 
     # ---------------------------------------------------------- Settings
     B.title(ws_set, "Settings the run priced with",
@@ -647,8 +804,11 @@ def write_customer_workbook(facts: dict, dest=None):
     S["ln_first"], S["ln_last"] = HR + 1, HR + len(L)
 
     # ---------------------------------------------------------- PD
-    pm = _write_pd(B, ws_pd, facts)
-    # the rating's bucket and the PD curve it reads, on Lines, by formula
+    wm = {1: _write_pd_internal(B, ws_pi, pdm) if ws_pi is not None else {},
+          2: _write_pd_external(B, ws_pe, pdm) if ws_pe is not None else {}}
+    pm = _write_pd(B, ws_pd, facts, wm)
+    # the rating's bucket and the PD curve it reads, on Lines, by formula: the
+    # calculated curve of its scale and bucket, or the run's of its portfolio
     for l in L:
         rr = LR[l["line"]]
         rt = (f"IF(OR(LEFT({_a(rr, C['Rating type'], fixed=False)},8)=\"External\","
@@ -660,7 +820,8 @@ def write_customer_workbook(facts: dict, dest=None):
               "int")
         bk = _a(rr, C["Rating bucket"], fixed=False)
         B.put(ws_ln, rr, C["PD curve"],
-              f"=IF({bk}=\"\",\"\",{_a(rr, C['Portfolio'], fixed=False)}&\" | bucket \"&{bk})")
+              f"=IF({bk}=\"\",\"\",IF({pm['source']}=\"{CALC}\",{rt},"
+              f"{_a(rr, C['Portfolio'], fixed=False)})&\" | bucket \"&{bk})")
     B.widths(ws_ln, {"A": 6, "B": 11, "C": 14, "D": 12, "E": 12, "F": 16,
                      "G": 11, "H": 10, "I": 12, "J": 12, "K": 16, "L": 14,
                      "M": 11, "N": 9})
@@ -801,16 +962,295 @@ def write_customer_workbook(facts: dict, dest=None):
     return None
 
 
-def _write_pd(B, ws, facts) -> dict:
-    """The rating -> bucket map and the run's monthly cumulative PD curves,
-    one column per portfolio and bucket the customer uses, months 0-600."""
-    B.title(ws, "PD: the run's monthly cumulative PD curves",
-            "From the run's Output folder: Ratings.csv maps a rating to its "
-            "bucket (Hierarchy); StPD.csv gives the cumulative PD by month for "
-            "each portfolio and bucket. A position reads the column of its "
-            "portfolio and bucket (the PD curve column on Lines). The curves come from the "
-            "macro model and the scenario weights, the same for every customer.")
+def _trunc3(x: str) -> str:
+    """Truncated (not rounded) to 3 significant digits, as PERCENTRANK.EXC
+    returns its rank: x is a number in (0, 1)."""
+    return f"ROUNDDOWN({x},2-INT(LOG10({x})))"
+
+
+def _write_scale_blocks(B, ws, r, pdm, rt, sf_cell, weight_of, pit_formula, note):
+    """The annual chain for each bucket of one rating scale the customer
+    uses: per scenario the PiT PD by year (the forecast years from the
+    scaling factor, later years reverting to the TTC PD in log space), the
+    cumulative PD by survival and the marginal, then the scenario-weighted
+    marginal the monthly curve is built from. Returns ({bucket key: the
+    weighted-marginal range}, the next free row)."""
+    names = [n for n, _ in pdm["scenarios"]]
+    n_s, mm = len(names), pdm["max_mat"]
+    n_fy = pdm["n_fc"] if rt == 1 else len(pdm["ext_fc"])
+    ws.cell(r, 1, "TTC PD by bucket").font = B.f_sub
+    hdr = ["Bucket", "Rating (TTC table)", "TTC PD"] + (["Asset correlation R"] if rt == 2 else [])
+    B.header(ws, r + 1, 1, hdr)
+    ttc_cell, rr_cell = {}, {}
+    for k, bk in enumerate(pdm["buckets"][rt]):
+        rr = r + 2 + k
+        B.put(ws, rr, 1, bk["bucket"], "int", inp=True)
+        B.put(ws, rr, 2, bk["rating"] or "no TTC PD", inp=True)
+        B.put(ws, rr, 3, bk["ttc"], "pd", inp=True)
+        ttc_cell[bk["key"]] = _a(rr, 3)
+        if rt == 2:
+            t = _a(rr, 3)
+            B.put(ws, rr, 4, f"=0.24-0.12*(1-EXP(-50*{t}))/(1-EXP(-50))", "x")
+            rr_cell[bk["key"]] = _a(rr, 4)
+    r = r + 3 + len(pdm["buckets"][rt])
+    B.note(ws, r, 1, note)
+    r += 2
+    out = {}
+    for bk in pdm["buckets"][rt]:
+        if bk["ttc"] is None:
+            continue
+        T = ttc_cell[bk["key"]]
+        ws.cell(r, 1, f"Bucket {bk['key']} ({bk['rating']}), TTC PD "
+                      f"{bk['ttc']:.6g}").font = B.f_sub
+        hr = r + 1
+        cols = ["Year"]
+        for nm in names:
+            cols += [f"{nm}: PiT PD", f"{nm}: cumulative", f"{nm}: marginal"]
+        cols += ["Weighted marginal"]
+        B.header(ws, hr, 1, cols)
+        first = hr + 1
+        for y in range(1, mm + 1):
+            rr = first + y - 1
+            B.put(ws, rr, 1, y, "int")
+            terms = []
+            for k, nm in enumerate(names):
+                cp, cc, cm = 2 + 3 * k, 3 + 3 * k, 4 + 3 * k
+                pit = _a(rr, cp, fixed=False)
+                if y <= n_fy:
+                    f = pit_formula(T, rr_cell.get(bk["key"]), sf_cell(k, y))
+                else:
+                    anc = _a(first + n_fy - 1, cp)
+                    f = (f"=LN(({y}-{n_fy})/({mm}-{n_fy})*(EXP({T})-EXP({anc}))"
+                         f"+EXP({anc}))")
+                B.put(ws, rr, cp, f, "pd")
+                prev = None if y == 1 else _a(rr - 1, cc, fixed=False)
+                B.put(ws, rr, cc, f"=1-(1-{pit})" if prev is None
+                      else f"=1-(1-{prev})*(1-{pit})", "pd")
+                B.put(ws, rr, cm, f"={_a(rr, cc, fixed=False)}" if prev is None
+                      else f"={_a(rr, cc, fixed=False)}-{prev}", "pd")
+                terms.append(f"{weight_of(k, y)}*{_a(rr, cm, fixed=False)}")
+            B.put(ws, rr, 2 + 3 * n_s, "=" + "+".join(terms), "pd", key=True)
+        out[bk["key"]] = _rng(first, 2 + 3 * n_s, first + mm - 1, 2 + 3 * n_s, ws.title)
+        r = first + mm + 1
+    return out, r
+
+
+def _write_pd_internal(B, ws, pdm) -> dict:
+    """The internal scale: the run's PiT PD model on its forecasts."""
+    B.title(ws, f"PD internal: the internal rating model ({pdm['model_id']})",
+            "Each scenario moves each variable by its severity x its standard "
+            "deviation; the variable's PD is EXP(x)/(EXP(x)+1) with x = intercept + "
+            "coefficient x (variable / unit multiplier); its scaling factor is "
+            "NORMSINV(PD) - NORMSINV(TTC anchor PD), and the variables combine by "
+            "their weights. Blue cells are the run's inputs (model.yml, "
+            "model_inputs.yml, the static reference).")
+    mev, names = pdm["mevs"], [n for n, _ in pdm["scenarios"]]
     r = 4
+    ws.cell(r, 1, "Model").font = B.f_sub
+    B.header(ws, r + 1, 1, ["Variable", "Intercept", "Coefficient",
+                            "Standard deviation", "Unit multiplier", "Weight"])
+    M = []
+    for k, m in enumerate(mev):
+        rr = r + 2 + k
+        B.put(ws, rr, 1, m["name"], inp=True)
+        for c, key in enumerate(("intercept", "coefficient", "sd", "unit", "weight"), 2):
+            B.put(ws, rr, c, m[key], "num", inp=True)
+        M.append({key: _a(rr, c) for c, key in
+                  enumerate(("intercept", "coefficient", "sd", "unit", "weight"), 2)})
+    r = r + 2 + len(mev) + 1
+    B.put(ws, r, 1, "TTC anchor PD")
+    B.put(ws, r, 2, pdm["anchor"], "num", inp=True)
+    anchor = _a(r, 2)
+    B.put(ws, r + 1, 1, "Forecast years modelled")
+    B.put(ws, r + 1, 2, pdm["n_fc"], "int", inp=True)
+    B.put(ws, r + 2, 1, "Years in the curve")
+    B.put(ws, r + 2, 2, pdm["max_mat"], "int", inp=True)
+    r += 4
+    ws.cell(r, 1, "Forecasts").font = B.f_sub
+    B.header(ws, r + 1, 1, ["Year"] + [m["name"] for m in mev])
+    F = {}
+    for i, (y, row) in enumerate(zip(pdm["years"], pdm["forecasts"])):
+        rr = r + 2 + i
+        B.put(ws, rr, 1, y, "int", inp=True)
+        for k, v in enumerate(row):
+            B.put(ws, rr, 2 + k, v, "num", inp=True)
+            F[(i + 1, k)] = _a(rr, 2 + k)
+    r = r + 2 + len(pdm["years"]) + 1
+    ws.cell(r, 1, "Scenarios").font = B.f_sub
+    B.header(ws, r + 1, 1, ["Scenario", "Severity z", "Weight"])
+    Z, W = [], []
+    for k, ((nm, z), w) in enumerate(zip(pdm["scenarios"], pdm["w_int"])):
+        rr = r + 2 + k
+        B.put(ws, rr, 1, nm, inp=True)
+        B.put(ws, rr, 2, z, "num", inp=True)
+        B.put(ws, rr, 3, w, "num", inp=True)
+        Z.append(_a(rr, 2))
+        W.append(_a(rr, 3))
+    B.put(ws, r + 2 + len(names), 1, "Total")
+    B.put(ws, r + 2 + len(names), 3, f"=SUM({W[0]}:{W[-1]})", "num")
+    B.note(ws, r + 3 + len(names), 1,
+           "The weights the run used" + (": worked out by the run from where the "
+           "forecast sits on the history (mode auto)." if pdm["int_mode"] != "explicit"
+           else ", as written in model_inputs.yml (mode explicit)."))
+    r = r + 5 + len(names)
+    ws.cell(r, 1, "Scaling factor by scenario and year").font = B.f_sub
+    cols = ["Scenario", "Year"]
+    for m in mev:
+        cols += [f"{m['name']}: stressed", f"{m['name']}: PD", f"{m['name']}: SF"]
+    cols += ["Scaling factor"]
+    B.header(ws, r + 1, 1, cols)
+    SF = {}
+    rr = r + 2
+    for k, nm in enumerate(names):
+        for y in range(1, pdm["n_fc"] + 1):
+            B.put(ws, rr, 1, nm)
+            B.put(ws, rr, 2, y, "int")
+            parts = []
+            for j, m in enumerate(M):
+                cs, cp, cf = 3 + 3 * j, 4 + 3 * j, 5 + 3 * j
+                B.put(ws, rr, cs, f"={F[(y, j)]}+{Z[k]}*{m['sd']}*{m['unit']}", "num")
+                x = f"({m['intercept']}+{m['coefficient']}*{_a(rr, cs, fixed=False)}/{m['unit']})"
+                B.put(ws, rr, cp, f"=EXP({x})/(EXP({x})+1)", "pd")
+                B.put(ws, rr, cf, f"=NORMSINV({_a(rr, cp, fixed=False)})-NORMSINV({anchor})",
+                      "num")
+                parts.append(f"{m['weight']}*{_a(rr, cf, fixed=False)}")
+            B.put(ws, rr, 3 + 3 * len(M), "=" + "+".join(parts), "num", key=True)
+            SF[(k, y)] = _a(rr, 3 + 3 * len(M))
+            rr += 1
+    out, _ = _write_scale_blocks(
+        B, ws, rr + 1, pdm, 1, lambda k, y: SF[(k, y)], lambda k, y: W[k],
+        lambda T, R, sf: f"=IF({T}=0,0,NORMSDIST(NORMSINV({T})+{sf}))",
+        "PiT PD in a forecast year = NORMSDIST(NORMSINV(TTC PD) + scaling factor); "
+        "after the last forecast year it reverts to the TTC PD in log space: "
+        "LN(f x (EXP(TTC PD) - EXP(PiT PD of the last forecast year)) + EXP(that PiT "
+        "PD)), f rising from 0 to 1 by the last year. Cumulative PD = 1 - product of "
+        "(1 - PiT PD); the scenarios are weighted on the marginal.")
+    B.widths(ws, {"A": 30, **{_col_letter(c): 16 for c in range(2, 20)}})
+    return out
+
+
+def _write_pd_external(B, ws, pdm) -> dict:
+    """The external scale: GDP-weighted GCC growth and the Basel formula."""
+    B.title(ws, "PD external: the external rating model (GCC growth)",
+            "Externally rated positions follow regional growth: GCC real growth, "
+            "weighted by each country's GDP. Each scenario moves the regional "
+            "forecast by its severity x the history's standard deviation; the "
+            "scaling factor is NORMSINV of where that lands in the history "
+            "(PERCENTRANK.EXC, truncated to 3 significant digits; 1/(n+1) below the "
+            "lowest year and n/(n+1) above the highest). Blue cells are the run's "
+            "inputs.")
+    names = [n for n, _ in pdm["scenarios"]]
+    h, fc = pdm["gcc_hist"], pdm["ext_fc"]
+    r = 4
+    ws.cell(r, 1, "Regional growth history (%)").font = B.f_sub
+    B.header(ws, r + 1, 1, ["Year", "Growth"])
+    for k, (y, v) in enumerate(zip(pdm["gcc_years"], h)):
+        B.put(ws, r + 2 + k, 1, y, "int", inp=True)
+        B.put(ws, r + 2 + k, 2, v, "num", inp=True)
+    H = _rng(r + 2, 2, r + 1 + len(h), 2)
+    c = 4
+    stats = [("Years", f"=COUNT({H})", "int"), ("Standard deviation", f"=STDEV({H})", "num"),
+             ("Lowest", f"=MIN({H})", "num"), ("Highest", f"=MAX({H})", "num")]
+    St = {}
+    for k, (lab, f, kd) in enumerate(stats):
+        B.put(ws, r + 1 + k, c, lab, bold=True)
+        B.put(ws, r + 1 + k, c + 1, f, kd)
+        St[lab] = _a(r + 1 + k, c + 1)
+    N, SD = St["Years"], St["Standard deviation"]
+    r2 = r + 7
+    ws.cell(r2, 4, "Regional growth forecast (%)").font = B.f_sub
+    B.header(ws, r2 + 1, 4, ["Year", "Growth"])
+    Fc = []
+    for k, v in enumerate(fc):
+        B.put(ws, r2 + 2 + k, 4, k + 1, "int")
+        B.put(ws, r2 + 2 + k, 5, v, "num", inp=True)
+        Fc.append(_a(r2 + 2 + k, 5))
+    r3 = r2 + 3 + len(fc)
+    ws.cell(r3, 4, "Scenario weights by forecast year").font = B.f_sub
+    B.header(ws, r3 + 1, 4, ["Year"] + names + ["Total"])
+    WR = []
+    for i, row in enumerate(pdm["w_ext"]):
+        rr = r3 + 2 + i
+        B.put(ws, rr, 4, i + 1, "int")
+        for k, w in enumerate(row):
+            B.put(ws, rr, 5 + k, w, "num", inp=True)
+        B.put(ws, rr, 5 + len(names), f"=SUM({_rng(rr, 5, rr, 4 + len(names))})", "num")
+        WR.append(rr)
+    ra = r3 + 2 + len(WR)
+    B.put(ws, ra, 4, "Later years (average)")
+    for k in range(len(names)):
+        B.put(ws, ra, 5 + k, f"=AVERAGE({_rng(WR[0], 5 + k, WR[-1], 5 + k)})", "num")
+    B.put(ws, ra, 5 + len(names), f"=SUM({_rng(ra, 5, ra, 4 + len(names))})", "num")
+    B.note(ws, ra + 1, 4,
+           "The weights the run used" + (": worked out by the run for each year from "
+           "where that year's forecast sits on the history (mode auto)."
+           if pdm["ext_mode"] != "explicit" else ", as written in model_inputs.yml.")
+           + " Years after the last forecast year take the average.")
+
+    def weight_of(k, y):
+        row = WR[y - 1] if y <= len(WR) else ra
+        return _a(row, 5 + k)
+
+    r = max(r + 2 + len(h), ra + 2) + 1
+    ws.cell(r, 1, "Scaling factor by scenario and year").font = B.f_sub
+    B.header(ws, r + 1, 1, ["Scenario", "Severity z", "Year", "Stressed growth",
+                            "History at or below it", "Percentile rank",
+                            "Scaling factor"])
+    SF = {}
+    rr = r + 2
+    for k, (nm, z) in enumerate(pdm["scenarios"]):
+        for y in range(1, len(fc) + 1):
+            B.put(ws, rr, 1, nm)
+            B.put(ws, rr, 2, z, "num", inp=True)
+            B.put(ws, rr, 3, y, "int")
+            x = _a(rr, 4, fixed=False)
+            j = _a(rr, 5, fixed=False)
+            B.put(ws, rr, 4, f"={Fc[y - 1]}+{_a(rr, 2, fixed=False)}*{SD}", "num")
+            B.put(ws, rr, 5, f"=SUMPRODUCT(--({H}<={x}))", "int")
+            inner = (f"({j}+({x}-SMALL({H},{j}))/(SMALL({H},{j}+1)-SMALL({H},{j})))"
+                     f"/({N}+1)")
+            lo, hi = f"(1/({N}+1))", f"({N}/({N}+1))"
+            B.put(ws, rr, 6, f"=IF({x}<{St['Lowest']},{_trunc3(lo)},IF({j}>={N},"
+                             f"{_trunc3(hi)},{_trunc3(inner)}))", "num")
+            B.put(ws, rr, 7, f"=NORMSINV({_a(rr, 6, fixed=False)})", "num", key=True)
+            SF[(k, y)] = _a(rr, 7)
+            rr += 1
+    out, _ = _write_scale_blocks(
+        B, ws, rr + 1, pdm, 2, lambda k, y: SF[(k, y)], weight_of,
+        lambda T, R, sf: (f"=IF({T}<=0,0,IF({T}>=1,1,NORMSDIST((NORMSINV({T})"
+                          f"-SQRT({R})*{sf})/SQRT(1-{R}))))"),
+        "PiT PD in a forecast year: the Basel formula NORMSDIST((NORMSINV(TTC PD) - "
+        "SQRT(R) x scaling factor) / SQRT(1 - R)), so higher growth gives a lower PD; "
+        "R = 0.24 - 0.12 x (1 - EXP(-50 x TTC PD)) / (1 - EXP(-50)). After the last "
+        "forecast year the PD reverts to the TTC PD in log space. The weights change "
+        "by year (above).")
+    B.widths(ws, {"A": 22, **{_col_letter(c): 16 for c in range(2, 20)}})
+    return out
+
+
+def _write_pd(B, ws, facts, wm: dict) -> dict:
+    """The monthly cumulative PD curves: the calculated ones (from the PD
+    internal and PD external tabs), one per rating scale and bucket the
+    customer uses, beside the run's own (StPD.csv) for each portfolio and
+    bucket, with the largest difference; and the switch between the two."""
+    pdm = facts.get("pd_model") or {}
+    calc_ok = bool(pdm.get("ok"))
+    B.title(ws, "PD curves: cumulative PD by month",
+            "A year's weighted marginal PD (PD internal / PD external tabs) is spread "
+            "evenly over its twelve months and summed, capped at 1. A position reads "
+            "the curve of its rating scale and bucket (the PD curve column on Lines). "
+            "The run's own curves (StPD.csv) are shown beside them for the check; the "
+            "switch below chooses which ones the ECL prices on.")
+    B.put(ws, 4, 1, "PD curves used in the ECL", bold=True)
+    sw = B.put(ws, 4, 2, pdm.get("source") or RUN, inp=True, key=True)
+    from openpyxl.worksheet.datavalidation import DataValidation
+    dv = DataValidation(type="list", formula1=f'"{CALC},{RUN}"', allow_blank=False)
+    ws.add_data_validation(dv)
+    dv.add(sw)
+    B.note(ws, 4, 3, pdm.get("reason") or (
+        "The calculated curves equal the run's StPD: the ECL prices on the calculation."))
+    out = {"source": _a(4, 2, "PD curves")}
+    r = 6
     ws.cell(r, 1, "Rating buckets (Ratings.csv)").font = B.f_sub
     B.header(ws, r + 1, 1, ["Rating scale", "Rating", "Bucket"])
     rm = facts["ratings_map"]
@@ -820,26 +1260,61 @@ def _write_pd(B, ws, facts) -> dict:
         B.put(ws, rr, 2, m["rating"], inp=True)
         B.put(ws, rr, 3, m["bucket"], "int", inp=True)
     last = r + 1 + max(len(rm), 1)
-    out = {"rm_scale": _rng(r + 2, 1, last, 1, "PD"),
-           "rm_rating": _rng(r + 2, 2, last, 2, "PD"),
-           "rm_bucket": _rng(r + 2, 3, last, 3, "PD")}
-    curves = facts["curves"]
-    nC = len(curves)
+    out.update({"rm_scale": _rng(r + 2, 1, last, 1, "PD curves"),
+                "rm_rating": _rng(r + 2, 2, last, 2, "PD curves"),
+                "rm_bucket": _rng(r + 2, 3, last, 3, "PD curves")})
+
+    calc = []                                   # (label, rt, bucket key)
+    if calc_ok:
+        for rt, scale in ((1, "Internal"), (2, "External")):
+            if rt == 2 and not pdm["ext_ok"]:
+                continue
+            for bk in pdm["buckets"][rt]:
+                calc.append((f"{scale} | bucket {bk['key']}", rt, bk["key"]))
+    runs = facts["curves"]
+    nC = len(calc) + len(runs)
     r = last + 2
-    ws.cell(r, 1, "Cumulative PD by month (StPD.csv), one column per portfolio and bucket").font = B.f_sub
-    hr = r + 1
-    B.header(ws, hr, 1, ["Month"] + [c["label"] for c in curves])
+    hr = r + 3                                  # the curve labels (the keys)
     first = hr + 1
+    ws.cell(r, 1, "Cumulative PD by month").font = B.f_sub
+    if calc:
+        B.put(ws, hr - 1, 2, "Calculated", bold=True)
+    if runs:
+        B.put(ws, hr - 1, 2 + len(calc), "As the run has it (StPD.csv)", bold=True)
+        B.put(ws, hr - 2, 1, "Largest difference", bold=True)
+    B.header(ws, hr, 1, ["Month"] + [c[0] for c in calc] + [c["label"] for c in runs])
     for m in range(0, MAX_MONTH + 1):
         rr = first + m
         B.put(ws, rr, 1, m, "int")
-        for k, c in enumerate(curves):
+        for k, (lab, rt, bkey) in enumerate(calc):
+            col = 2 + k
+            if bkey not in wm.get(rt, {}):
+                continue                        # a bucket with no TTC PD
+            if m == 0:
+                B.put(ws, rr, col, 0, "pd")
+                continue
+            B.put(ws, rr, col,
+                  f"=MIN({_a(rr - 1, col, fixed=False)}+INDEX({wm[rt][bkey]},"
+                  f"MIN(ROUNDUP({_a(rr, 1, fixed=False)}/12,0),{pdm['max_mat']}))/12,1)",
+                  "pd")
+        for k, c in enumerate(runs):
             sp = c["stpd"]
             v = float(sp[m]) if sp is not None and m < len(sp) else None
-            B.put(ws, rr, 2 + k, v, "pd", inp=True)
-    out["keys"] = _rng(hr, 2, hr, 1 + max(nC, 1), "PD")
-    out["used"] = _rng(first, 2, first + MAX_MONTH, 1 + max(nC, 1), "PD")
-    B.widths(ws, {"A": 14, "B": 18, "C": 18, "D": 18, "E": 18, "F": 18})
+            B.put(ws, rr, 2 + len(calc) + k, v, "pd", inp=True)
+    # the run's curve against the calculated one of its scale and bucket
+    where = {(rt, bkey): 2 + k for k, (_, rt, bkey) in enumerate(calc)}
+    for k, c in enumerate(runs):
+        bkey = str(int(c["bucket"])) if float(c["bucket"]).is_integer() else str(c["bucket"])
+        cc, col = where.get((c["rt"], bkey)), 2 + len(calc) + k
+        if cc is None or c["stpd"] is None:
+            B.put(ws, hr - 2, col, "no calculated curve")
+            continue
+        B.put(ws, hr - 2, col,
+              f"=SUMPRODUCT(MAX(ABS({_rng(first, col, first + MAX_MONTH, col)}-"
+              f"{_rng(first, cc, first + MAX_MONTH, cc)})))", "pd")
+    out["keys"] = _rng(hr, 2, hr, 1 + max(nC, 1), "PD curves")
+    out["used"] = _rng(first, 2, first + MAX_MONTH, 1 + max(nC, 1), "PD curves")
+    B.widths(ws, {"A": 26, **{_col_letter(c): 22 for c in range(2, 2 + max(nC, 3))}})
     return out
 
 
@@ -983,7 +1458,7 @@ def _write_ecl(B, ws, facts, L, ln, lg, ead, pm, S) -> dict:
     B.title(ws, "ECL month by month",
             "ECL in a month = EAD x LGD x PD in the month / discount factor, "
             "where the PD in the month is the cumulative PD at its end less at "
-            "its start (the position's PD curve, PD tab) and the discount "
+            "its start (the position's PD curve, PD curves tab) and the discount "
             "factor is (1 + EIR)^(month / 12). A position's ECL is the sum over "
             "the months counted (Summary tab), capped at the exposure; Stage 3 "
             "follows the Settings.")
@@ -1060,17 +1535,18 @@ def _write_summary(B, ws, facts, L, ln, stage, lg, ead, ecl, pm, S, GR, G):
         ("Engine", facts["engine"]),
         ("Report compared", facts["report_file"] or "none in the run"),
         ("Overlay report", facts["overlay_file"] or "none"),
-        ("PD curves", "the run's StPD.csv (PD tab)"),
+        ("PD curves", f"={pm['source']}&\" (PD curves tab)\""),
         ("Generated", facts["generated_at"]),
     ]
     for k, (lab, v) in enumerate(info):        # label overflows into B:C
         B.put(ws, 3 + k, 1, lab, bold=True)
         c = B.put(ws, 3 + k, 4, v, "date" if lab == "Extract date" else None)
         c.alignment = B.Align(horizontal="left")
-    B.note(ws, 12, 1, "How to read it: Lines (inputs) -> Overrides -> Staging -> "
-           "LGD -> PD -> EAD -> ECL. Blue "
-           "cells are the run's inputs; black cells are formulas. Change an "
-           "input and the provision follows; the report column stays as booked.")
+    B.note(ws, 12, 1, "How to read it: Lines (inputs) -> Staging -> LGD -> PD "
+           "internal / PD external -> PD curves -> EAD -> ECL. Blue cells are the "
+           "run's inputs; black cells are formulas. Change an input and the "
+           "provision follows; the report column stays as booked. The settings (and "
+           "the overrides, when there are none) are on hidden tabs.")
     ws.cell(21, 1, "Per position").font = B.f_sub
     hr = 22
     cols = ["Line", "Book", "Contract", "Portfolio", "Rating", "Stage", "Why",

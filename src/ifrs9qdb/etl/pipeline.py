@@ -1300,10 +1300,12 @@ def _write_manifest(run_dir: Path, run_id: str, input_dir: Path,
     # actually ran. Either alone is insufficient: the version can claim what
     # the code is not, and a bare hash names nothing.
     try:
-        from ..calculator_versions import calculator_version_for_run
-        calculator = calculator_version_for_run(
-            id=(state.calculator_version if state is not None else None) or None,
-            root=root)
+        from ..calculator_versions import (calculator_version_for_run,
+                                           ensure_current_registered)
+        picked = (state.calculator_version if state is not None else None) or None
+        if not picked or picked == __version__:
+            ensure_current_registered(root)       # the calculator is this engine
+        calculator = calculator_version_for_run(id=picked, root=root)
     except Exception:
         calculator = None
     try:
