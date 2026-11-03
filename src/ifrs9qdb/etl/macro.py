@@ -298,6 +298,7 @@ __all__ += ["build_term_structure", "build_stpd_from_static", "stress_mevs", "co
             "compute_external_scenario_weights",
             "compute_external_scenario_weights_per_year",
             "resolve_internal_scenario_weights", "main_variable", "INTERNAL_AUTO",
+            "internal_weight_inputs",
             "EXTERNAL_AUTO",
             "resolve_external_scenario_weights", "resolve_scenario_weights"]
 
@@ -910,6 +911,32 @@ def _history_values(static, history_file) -> np.ndarray:
                      "is not in the static reference.")
 
 
+def internal_weight_inputs(model_inputs, static, model_cfg=None) -> dict:
+    """What the automatic internal weights are worked out from: the main
+    variable's history and its forecast for the first ``n_forecast_years``
+    years, and the variable's name (None without ``model_cfg``)."""
+    block = (model_inputs.get("internal_scenario_weights") or {})
+    n = int(block.get("n_forecast_years", 2))
+    path, col, hist, var = "mev_forecasts.forecasts", 1, None, None
+    if model_cfg:
+        mv = main_variable(model_cfg, "internal") or {}
+        var = block.get("variable") or mv.get("variable")
+        vc = ((model_cfg.get("variables") or {}).get(var) or {})
+        fs = vc.get("forecast_source") or {}
+        path = fs.get("path") or path
+        col = int(fs.get("column_index") or col)
+        if vc.get("history_file"):
+            hist = _history_values(static, vc["history_file"])
+    fcb = model_inputs
+    for k in path.split("."):
+        fcb = fcb[k]
+    gdp = [float(fcb[y][col - 1]) for y in sorted(fcb, key=lambda k: int(k))][:n]
+    if hist is None:
+        hist = np.asarray(static["non_oil_gdp_history"]["value"], dtype=float)
+    return {"history": np.asarray(hist, dtype=float), "forecasts": gdp, "n": n,
+            "column": col, "path": path, "variable": var}
+
+
 def resolve_internal_scenario_weights(model_inputs, static, model_cfg=None) -> dict:
     """The internal weights a run should use, honouring the configured mode.
 
@@ -933,24 +960,8 @@ def resolve_internal_scenario_weights(model_inputs, static, model_cfg=None) -> d
         return dict(explicit)
 
     if mode in INTERNAL_AUTO:
-        n = int(block.get("n_forecast_years", 2))
-        path, col, hist = "mev_forecasts.forecasts", 1, None
-        if model_cfg:
-            mv = main_variable(model_cfg, "internal") or {}
-            var = block.get("variable") or mv.get("variable")
-            vc = ((model_cfg.get("variables") or {}).get(var) or {})
-            fs = vc.get("forecast_source") or {}
-            path = fs.get("path") or path
-            col = int(fs.get("column_index") or col)
-            if vc.get("history_file"):
-                hist = _history_values(static, vc["history_file"])
-        fcb = model_inputs
-        for k in path.split("."):
-            fcb = fcb[k]
-        gdp = [float(fcb[y][col - 1]) for y in sorted(fcb, key=lambda k: int(k))][:n]
-        if hist is None:
-            hist = np.asarray(static["non_oil_gdp_history"]["value"], dtype=float)
-        return compute_internal_scenario_weights(hist, gdp,
+        w = internal_weight_inputs(model_inputs, static, model_cfg)
+        return compute_internal_scenario_weights(w["history"], w["forecasts"],
                                                  static["scenario_severity"])
 
     raise ValueError(f"unknown internal_scenario_weights.mode: {mode!r} "

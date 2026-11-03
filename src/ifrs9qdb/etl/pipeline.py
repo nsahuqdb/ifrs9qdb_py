@@ -423,7 +423,7 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
         st.inv = inv
         tables["AccountMaster_2.csv"] = build_account_master(inv, extract_date,
                                                              investments=True)
-        _write_contract_reference(run_dir, view, inv, src)
+        _write_contract_reference(run_dir, view, inv, src, static)
         result.steps.append({"step": "Investment accounts", "ok": True,
                              "detail": f"{len(inv):,} accounts"})
 
@@ -936,17 +936,21 @@ def _write_customer_sectors(run_dir: Path, view, industry, static) -> None:
 CONTRACT_REFERENCE = Path("reference") / "contracts.csv"
 
 
-def _write_contract_reference(run_dir: Path, view, inv, src) -> None:
+def _write_contract_reference(run_dir: Path, view, inv, src, static=None) -> None:
     """Each AccountMaster row's source contract id and customer name, for the
-    report.
+    report, and what its rating was built from, for the customer calculator.
 
     The LIC files carry the transformed contract id (off-balance product codes
-    substituted, leading zeros dropped) and a blank customer name, so both are
-    kept here, beside the run (``reference/contracts.csv``), not in
-    ``Output/``: the LIC file set is unchanged, and a failure here can never
-    fail a run. Rows follow AccountMaster_1 then AccountMaster_2."""
+    substituted, leading zeros dropped), a blank customer name and only the
+    final rating, so the rest is kept here, beside the run
+    (``reference/contracts.csv``), not in ``Output/``: the LIC file set is
+    unchanged, and a failure here can never fail a run. Rows follow
+    AccountMaster_1 then AccountMaster_2. Per row: the facility's own days
+    past due, the rating in the customer master (the investment extract for
+    the investment book) and the customer's sector -- the inputs of the rating
+    chain (lending._derive_rating_lending)."""
     try:
-        from .lending import drop_repeated_headers
+        from .lending import _customer_sector, drop_repeated_headers
 
         def names(raw) -> dict:
             if raw is None or not len(raw):
@@ -957,28 +961,49 @@ def _write_contract_reference(run_dir: Path, view, inv, src) -> None:
             nm = nm.astype(str).str.strip().replace({"nan": "", "None": ""})
             return {i: n for i, n in zip(ids, nm) if i and n}
 
+        def text(v) -> str:
+            v = "" if v is None or (isinstance(v, float) and np.isnan(v)) else str(v)
+            return "" if v.strip().lower() in ("nan", "none") else v.strip()
+
         rows = []
         if view is not None and len(view):
             lend = names(src["CustomerMaster"])
-            for cid, raw, cust in zip(view["contract_id"].astype(str),
-                                      view["contract_id_raw"].astype(str),
-                                      as_id(view["customer_id"])):
-                rows.append(("AccountMaster_1", cid, raw, cust, lend.get(cust, "")))
+            cm = src["CustomerMaster"]
+            rating_of = {}
+            if cm is not None and len(cm):
+                c = drop_repeated_headers(cm)
+                rid, rat = pick(c, "CUSTOMERID", "CustomerId"), pick(c, "RATING", "Rating")
+                if rid is not None and rat is not None:
+                    rating_of = dict(zip(as_id(rid), rat.astype(str).str.strip()))
+            sector = (_customer_sector(view["customer_id"], src["IndustryCode"],
+                                       (static or {}).get("industry_sector_mapping"))
+                      if static is not None else pd.Series([None] * len(view)))
+            dpd = view["past_dues_days"] if "past_dues_days" in view.columns \
+                else pd.Series([None] * len(view))
+            for cid, raw, cust, d, sec in zip(view["contract_id"].astype(str),
+                                              view["contract_id_raw"].astype(str),
+                                              as_id(view["customer_id"]),
+                                              dpd.to_numpy(), sector.to_numpy()):
+                rows.append(("AccountMaster_1", cid, raw, cust, lend.get(cust, ""),
+                             d, text(rating_of.get(cust)), text(sec)))
         if inv is not None and len(inv):
             book = names(src["CustomerMasterInvestments"])
             am2 = drop_repeated_headers(src["AccountMasterInvestments"])
             raw2 = as_id(pick(am2, "CONTRACTID", "ContractId", "ACCOUNTID",
                               default=""))
+            rat2 = pick(am2, "RATING", "RatingCurrent", default="")
             if len(raw2) != len(inv):
-                raw2 = inv["contract_id"].astype(str)
+                raw2, rat2 = inv["contract_id"].astype(str), pd.Series([""] * len(inv))
             # the investment customer id is the counterparty's name
-            for cid, raw, cust in zip(inv["contract_id"].astype(str), raw2,
-                                      inv["customer_id"].astype(str)):
-                rows.append(("AccountMaster_2", cid, raw, cust, book.get(cust) or cust))
+            for cid, raw, cust, r in zip(inv["contract_id"].astype(str), raw2,
+                                         inv["customer_id"].astype(str), rat2):
+                rows.append(("AccountMaster_2", cid, raw, cust, book.get(cust) or cust,
+                             0, text(r), ""))
         p = Path(run_dir) / CONTRACT_REFERENCE
         p.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(rows, columns=["File", "ContractId", "ContractIdOriginal",
-                                    "CustomerId", "CustomerName"]).to_csv(p, index=False)
+                                    "CustomerId", "CustomerName", "PastDueDays",
+                                    "RatingInput", "Sector"]).to_csv(p, index=False)
     except Exception:
         pass
 

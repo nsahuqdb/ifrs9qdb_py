@@ -84,7 +84,10 @@ SHOWN = {
     "Path length": "Months of exposure",
     "Horizon (months)": "Months counted in ECL",
     "Horizon": "Months counted",
-    "IsLocal1": "IsLocal1 (restructured)",
+    "Line": "No.",
+    "Original contract": "Contract (source id)",
+    "Rating set by": "How the rating was set",
+    "Stage": "Stage",
 }
 
 
@@ -316,7 +319,7 @@ def customer_ecl_facts(run_dir, customer_id) -> dict:
     from . import __version__
     from .etl.report import (build_ecl_context, compute_ecl, ecl_frame,
                              read_output_csv, run_pricing_config, _chr, _col,
-                             _portfolio_map, _KEYSEP)
+                             _contract_reference, _portfolio_map, _KEYSEP)
     from .stress import staging_threshold
     from .engine import ead_fallback_rules
 
@@ -349,6 +352,11 @@ def customer_ecl_facts(run_dir, customer_id) -> dict:
     am = {s: read_output_csv(out_dir, f"AccountMaster{s}.csv") for s in ("_1", "_2")}
     cm = {s: read_output_csv(out_dir, f"CustomerMaster{s}.csv") for s in ("_1", "_2")}
     n1 = 0 if am["_1"] is None else len(am["_1"])
+    # what the ETL kept beside the run: the source contract id, the facility's
+    # own days past due and the inputs of its rating (reference/contracts.csv)
+    ref = {s: _contract_reference(out_dir, s, _chr(_col(a, "ContractId")))
+           for s, a in am.items() if a is not None}
+    recorded = any(r.attrs.get("recorded") for r in ref.values())
 
     lines = []
     for k, (i, r) in enumerate(sel.iterrows(), start=1):
@@ -378,6 +386,10 @@ def customer_ecl_facts(run_dir, customer_id) -> dict:
             "pay_freq": _num(r["pay_freq"]), "deferral": _num(r["deferral"]),
             "nir": _num(r["nir"]), "stage_raw": stage_raw,
             "stage_manual": _manual_stage(stage_raw),
+            "contract_original": _str(ref[s]["ContractIdOriginal"].iloc[j]),
+            "dpd_own": _num(ref[s]["PastDueDays"].iloc[j]),
+            "rating_input": _str(ref[s]["RatingInput"].iloc[j]),
+            "sector": _str(ref[s]["Sector"].iloc[j]),
             **{f: _num(r[f]) for f in ("IsWatchlist", "IsDefault", "IsDefaultInGCC",
                                        "IsInsolvency", "IsLocal1", "IsLocal2",
                                        "IsLocal3", "IsLocal4", "IsLocal5",
@@ -417,20 +429,18 @@ def customer_ecl_facts(run_dir, customer_id) -> dict:
             break
     name = name or _reference_names(out_dir).get(cust, "")
 
-    # ratings -> buckets, as the curve lookup reads Ratings.csv
+    # ratings -> buckets, as the curve lookup reads Ratings.csv: every grade,
+    # so a rating changed in the workbook still finds its bucket
     rat = read_output_csv(out_dir, "Ratings.csv")
     rmap = []
     if rat is not None:
         rd = pd.DataFrame({"rt": _chr(_col(rat, "RatingType")).astype(str),
                            "rating": _chr(_col(rat, "Rating")).astype(str),
                            "bucket": _chr(_col(rat, "Hierarchy"))})
-        want = {("2" if (l["rating_type"].startswith("External")
-                         or l["rating_type"] == "2") else "1", l["rating"])
-                for l in lines}
         seen = set()
         for row in rd.itertuples():
             key = (row.rt, row.rating)
-            if key in want and key not in seen:
+            if key not in seen and _num(row.bucket) is not None:
                 seen.add(key)
                 rmap.append({"rt": row.rt, "rating": row.rating,
                              "bucket": _num(row.bucket)})
@@ -473,7 +483,39 @@ def customer_ecl_facts(run_dir, customer_id) -> dict:
         "lines": lines, "overrides": _overrides(root, cust),
         "collateral": _collateral(out_dir, [l["cid"] for l in lines]),
         "ratings_map": rmap, "curves": curves, "pd_model": pdm,
+        "rating": _rating_tables(static, recorded),
     }
+
+
+def _rating_tables(static, recorded: bool) -> dict:
+    """The run's rating assumptions: the program lending ratings by days past
+    due, the fallback rating of each segment, and the master rating scale
+    (internal grades first, by hierarchy)."""
+    from .etl.lending import _master_scale
+    from .etl.transform import pick
+    out = {"recorded": bool(recorded), "rules": [], "fallback": [], "scale": []}
+    if static is None:
+        return out
+    rules = static.get("collective_assessment_rules")
+    if rules is not None and len(rules):
+        r = pd.DataFrame({"sector": pick(rules, "sector", "Sector").astype(str),
+                          "dpd": pd.to_numeric(pick(rules, "dpd_threshold"),
+                                               errors="coerce"),
+                          "rating": pick(rules, "rating", "Rating").astype(str)})
+        r = r.sort_values(["sector", "dpd"], kind="stable")
+        out["rules"] = [tuple(x) for x in r.itertuples(index=False)]
+    fb = static.get("segment_fallback_ratings")
+    if fb is not None and len(fb):
+        out["fallback"] = list(zip(pick(fb, "segment", "Segment").astype(str),
+                                   pick(fb, "fallback_rating",
+                                        "FallbackRating").astype(str)))
+    sc = _master_scale(static).dropna(subset=["hierarchy"])
+    sc = pd.concat([sc[sc["rating_type"] == "Internal"].sort_values("hierarchy",
+                                                                    kind="stable"),
+                    sc[sc["rating_type"] != "Internal"]])
+    out["scale"] = [(a, b, int(c)) for a, b, c in
+                    sc[["rating", "rating_type", "hierarchy"]].itertuples(index=False)]
+    return out
 
 
 CALC, RUN = "Calculated", "Run's StPD"      # the two sources of the PD curves
@@ -591,6 +633,20 @@ def _pd_model(root: Path, static, lines: list, curves: list) -> dict | None:
               f"The run's StPD differs from the calculated curves (by up to {worst:.3g}): "
               "the ECL uses the run's StPD; switch to Calculated to price on the model.")
     pe = w_ext["per_year"]
+    from .etl.macro import EXTERNAL_AUTO, INTERNAL_AUTO, internal_weight_inputs
+    int_mode = (inputs.get("internal_scenario_weights") or {}).get("mode", "explicit")
+    ext_mode = (inputs.get("external_scenario_weights") or {}).get("mode", "explicit")
+    iw = None
+    if int_mode in INTERNAL_AUTO:
+        w = internal_weight_inputs(inputs, static, model_cfg)
+        h = np.asarray(w["history"], dtype=float)
+        var = w["variable"]
+        nm = next((m.get("name") or m.get("variable_id") for m in resolved["model"]["mevs"]
+                   if m.get("variable_id") == var), var or "the main variable")
+        iw = {"history": [float(v) for v in h[np.isfinite(h)]],
+              "forecasts": [float(v) for v in w["forecasts"]], "n": int(w["n"]),
+              "column": int(w["column"]),
+              "in_table": w["path"] == "mev_forecasts.forecasts", "name": nm}
     return {
         "ok": True, "source": CALC if ok else RUN, "reason": reason,
         "largest_difference": worst,
@@ -605,13 +661,15 @@ def _pd_model(root: Path, static, lines: list, curves: list) -> dict | None:
         "forecasts": [[float(v) for v in fc[y]] for y in years[:n_fc]],
         "scenarios": list(zip(names, pd.to_numeric(scen["severity_z"]).astype(float))),
         "w_int": [float(w_int[n]) for n in names],
-        "int_mode": (inputs.get("internal_scenario_weights") or {}).get("mode", "explicit"),
+        "int_mode": int_mode, "int_weights": iw,
+        "ext_auto": ext_mode in EXTERNAL_AUTO and not (
+            (inputs.get("external_scenario_weights") or {}).get("explicit_weights_per_year")),
         "ext_ok": ext_ok,
         "gcc_hist": [float(v) for v in np.asarray(gcc_hist, dtype=float)],
         "gcc_years": _gcc_years(static, int(np.asarray(gcc_hist).size)),
         "ext_fc": [] if ext_fc is None else [float(v) for v in np.asarray(ext_fc, float)],
         "w_ext": [[float(pe.iloc[i][n]) for n in names] for i in range(len(pe))],
-        "ext_mode": (inputs.get("external_scenario_weights") or {}).get("mode", "explicit"),
+        "ext_mode": ext_mode,
         "buckets": buckets, "calc_curves": calc_curves,
     }
 
@@ -663,7 +721,8 @@ class _Book:
     def sheet(self, name):
         return self.wb.create_sheet(name)
 
-    def put(self, ws, r, c, v, kind=None, inp=False, bold=False, key=False):
+    def put(self, ws, r, c, v, kind=None, inp=False, bold=False, key=False,
+            align=None):
         cell = ws.cell(r, c)
         if isinstance(v, float) and not math.isfinite(v):
             v = None
@@ -677,6 +736,8 @@ class _Book:
         if key:
             cell.fill = self.fill_key
             cell.font = self.Font(bold=True)
+        if align or kind == "int":
+            cell.alignment = self.Align(horizontal=align or "center")
         return cell
 
     def header(self, ws, r, c, labels):
@@ -701,30 +762,32 @@ class _Book:
 def write_customer_workbook(facts: dict, dest=None):
     """Write the calculator for ``facts`` (:func:`customer_ecl_facts`) to
     ``dest`` (a path or a binary buffer); returns the bytes when ``dest`` is
-    None."""
+    None.
+
+    The tabs follow the provision from start to end: Facilities (the inputs),
+    Rating (how each rating was set), Staging (the customer's stage, then each
+    facility's), the PD (model, scenario weights, curves), LGD, EAD and the ECL
+    month by month; the Summary on top, the settings on a hidden tab."""
     B = _Book()
     L = facts["lines"]
     st = facts["settings"]
+    R: dict = {}                     # (line, column) -> its cell, sheet-qualified
 
     pdm = facts.get("pd_model") or {}
     scales = {l.get("rt") for l in L}
     ws_sum = B.sheet("Summary")
-    ws_ln = B.sheet("Lines")
-    ws_ov = B.sheet("Overrides")
+    ws_fac = B.sheet("Facilities")
+    ws_rat = B.sheet("Rating")
     ws_stg = B.sheet("Staging")
-    ws_lgd = B.sheet("LGD")
     ws_pi = B.sheet("PD internal") if pdm.get("ok") and "1" in scales else None
     ws_pe = (B.sheet("PD external") if pdm.get("ok") and pdm.get("ext_ok")
              and "2" in scales else None)
     ws_pd = B.sheet("PD curves")
+    ws_lgd = B.sheet("LGD")
     ws_ead = B.sheet("EAD")
     ws_ecl = B.sheet("ECL")
     ws_set = B.sheet("Settings")
-    # what a reviewer does not need to open: the settings, and the overrides
-    # tab when the customer has none (Excel: right-click a tab, Unhide)
-    ws_set.sheet_state = "hidden"
-    if len(facts["overrides"]) == 0:
-        ws_ov.sheet_state = "hidden"
+    ws_set.sheet_state = "hidden"      # Excel: right-click a tab, Unhide
 
     # ---------------------------------------------------------- Settings
     B.title(ws_set, "Settings the run priced with",
@@ -781,176 +844,25 @@ def write_customer_workbook(facts: dict, dest=None):
     S["default_shape"] = _a(r1 + 2, 2, "Settings")
     B.widths(ws_set, {"A": 48, "B": 18, "C": 90, "D": 22})
 
-    # ---------------------------------------------------------- Lines
-    B.title(ws_ln, "The customer's positions, as the run read them",
-            "AccountMaster_1/_2 and CustomerStagingFlag_1/_2 from the run's "
-            "Output folder; a flag is the customer's, repeated on each of its "
-            "positions in that book. Every value here is an input.")
-    ln_cols = ["Line", "Book", "Contract", "Customer", "Account type",
-               "Portfolio", "Rating type", "Rating", "Extract date",
-               "Maturity date", "On balance", "Off balance", "EIR",
-               "Past due days", "Payment type", "Payment frequency (months)",
-               "Deferral (months)", "Nominal interest rate",
-               "AccountMaster.Stage", "Manual stage (its digits)",
-               "IsWatchlist", "IsDefault", "IsDefaultInGCC", "IsInsolvency",
-               "IsLocal1", "IsLocal2", "IsLocal3", "IsLocal4", "IsLocal5",
-               "IsLocal6", "Repayment schedule", "Rating bucket", "PD curve"]
-    C = {n: i + 1 for i, n in enumerate(ln_cols)}
-    HR = 4
-    B.header(ws_ln, HR, 1, _shown(ln_cols))
-    LR = {}                                        # line -> row on Lines
-    for k, l in enumerate(L):
-        rr = HR + 1 + k
-        LR[l["line"]] = rr
-        vals = [l["line"], l["book"], l["cid"], l["customer"], l["account_type"],
-                l["portfolio"], l["rating_type"], l["rating"], l["d_extract"],
-                l["d_maturity"], l["on_balance"], l["off_balance"], l["eir"],
-                l["dpd"], l["payment_type"], l["pay_freq"], l["deferral"],
-                l["nir"], l["stage_raw"], l["stage_manual"],
-                l["IsWatchlist"], l["IsDefault"], l["IsDefaultInGCC"],
-                l["IsInsolvency"], l["IsLocal1"], l["IsLocal2"], l["IsLocal3"],
-                l["IsLocal4"], l["IsLocal5"], l["IsLocal6"],
-                "Yes" if l["schedule"] is not None else "No"]
-        kinds = [None, None, None, None, None, None, None, None, "date", "date",
-                 "amt", "amt", "rate", "int", None, "int", "int", "rate", None,
-                 "int"] + ["int"] * 10 + [None]
-        for c, (v, kd) in enumerate(zip(vals, kinds), start=1):
-            B.put(ws_ln, rr, c, v, kd, inp=c > 1)
-    S["ln_first"], S["ln_last"] = HR + 1, HR + len(L)
+    # ---------------------------------------------------------- Facilities
+    _write_facilities(B, ws_fac, L, R)
+
+    def ln(line, name, fixed=True):
+        return R[(line, name)]
 
     # ---------------------------------------------------------- PD
     wm = {1: _write_pd_internal(B, ws_pi, pdm) if ws_pi is not None else {},
           2: _write_pd_external(B, ws_pe, pdm) if ws_pe is not None else {}}
     pm = _write_pd(B, ws_pd, facts, wm)
-    # the rating's bucket and the PD curve it reads, on Lines, by formula: the
-    # calculated curve of its scale and bucket, or the run's of its portfolio
-    for l in L:
-        rr = LR[l["line"]]
-        rt = (f"IF(OR(LEFT({_a(rr, C['Rating type'], fixed=False)},8)=\"External\","
-              f"{_a(rr, C['Rating type'], fixed=False)}=\"2\"),\"External\",\"Internal\")")
-        rg = _a(rr, C["Rating"], fixed=False)
-        B.put(ws_ln, rr, C["Rating bucket"],
-              f"=IF(COUNTIFS({pm['rm_scale']},{rt},{pm['rm_rating']},{rg})=0,\"\","
-              f"SUMIFS({pm['rm_bucket']},{pm['rm_scale']},{rt},{pm['rm_rating']},{rg}))",
-              "int")
-        bk = _a(rr, C["Rating bucket"], fixed=False)
-        B.put(ws_ln, rr, C["PD curve"],
-              f"=IF({bk}=\"\",\"\",IF({pm['source']}=\"{CALC}\",{rt},"
-              f"{_a(rr, C['Portfolio'], fixed=False)})&\" | bucket \"&{bk})")
-    B.widths(ws_ln, {"A": 6, "B": 11, "C": 14, "D": 12, "E": 12, "F": 16,
-                     "G": 11, "H": 10, "I": 12, "J": 12, "K": 16, "L": 14,
-                     "M": 11, "N": 9})
 
-    def ln(line, name, fixed=True):
-        return _a(LR[line], C[name], "Lines", fixed)
-
-    # ---------------------------------------------------------- Overrides
-    B.title(ws_ov, "Overrides applied to this customer in the run",
-            "From the run's overrides folder (reviewed at the pause step). They "
-            "are already in the Lines tab's rating and flags: this is the record "
-            "of what changed and why.")
-    B.header(ws_ov, 4, 1, ["Kind", "New value", "Model value (before)",
-                           "Reason", "By", "When", "Where it shows"])
-    ov = facts["overrides"]
-    if len(ov) == 0:
-        B.note(ws_ov, 5, 1, "No rating, stage or restructuring override for this "
-                            "customer in this run.")
-    for k, row in enumerate(ov.itertuples(index=False)):
-        for c, v in enumerate([row.kind, row.value, row.prior_value, row.reason,
-                               row.created_by, row.created_at, row.effect], 1):
-            B.put(ws_ov, 5 + k, c, v, inp=True)
-    rr = 7 + max(len(ov), 1)
-    ws_ov.cell(rr, 1, "Manual stage in AccountMaster.Stage").font = B.f_sub
-    B.note(ws_ov, rr + 1, 1, "A stage written into the account master by the "
-           "extract. It replaces the rule stage unless the rules say Stage 3; "
-           "see the Staging tab.")
-    man = [l for l in L if l["stage_manual"] is not None]
-    B.header(ws_ov, rr + 2, 1, ["Line", "Contract", "AccountMaster.Stage"])
-    if not man:
-        B.note(ws_ov, rr + 3, 1, "None on this customer's positions.")
-    for k, l in enumerate(man):
-        B.put(ws_ov, rr + 3 + k, 1, f"={ln(l['line'], 'Line')}")
-        B.put(ws_ov, rr + 3 + k, 2, f"={ln(l['line'], 'Contract')}")
-        B.put(ws_ov, rr + 3 + k, 3, f"={ln(l['line'], 'AccountMaster.Stage')}")
-    B.widths(ws_ov, {"A": 15, "B": 14, "C": 20, "D": 60, "E": 12, "F": 26,
-                     "G": 60})
+    # ---------------------------------------------------------- Rating
+    _write_rating(B, ws_rat, facts, L, R, pm)
 
     # ---------------------------------------------------------- Staging
-    B.title(ws_stg, "Stage, rule by rule",
-            "classify_stage_report(): DPD over the threshold (and not over 90), "
-            "the watchlist or any local flag -> 2; Tasdeer -> 2; DPD over 90 or "
-            "the default flag -> 3; a manual stage replaces the rule stage "
-            "unless that is 3; then a customer with any Stage 2 or 3 position "
-            "in the book lifts its Stage 1 positions to 2 (Tasdeer excepted).")
-    sg_cols = ["Line", "Contract", "Book", "Portfolio", "DPD", "DPD rule",
-               "Watchlist", "Any local flag (or watchlist)", "Tasdeer",
-               "Stage 3 rule", "Rule stage", "Manual stage", "After manual",
-               "Customer's worst in book", "Final stage", "Why",
-               "Report stage", "Check"]
-    G = {n: i + 1 for i, n in enumerate(sg_cols)}
-    B.header(ws_stg, 4, 1, _shown(sg_cols))
-    GR = {}
-    for k, l in enumerate(L):
-        GR[l["line"]] = 5 + k
-    books = {}
-    for l in L:
-        books.setdefault(l["suffix"], []).append(GR[l["line"]])
-    for l in L:
-        rr, x = GR[l["line"]], l["line"]
-        g = lambda name: _a(rr, G[name], fixed=False)
-        dpd = ln(x, "Past due days")
-        B.put(ws_stg, rr, G["Line"], f"={ln(x, 'Line')}")
-        B.put(ws_stg, rr, G["Contract"], f"={ln(x, 'Contract')}")
-        B.put(ws_stg, rr, G["Book"], f"={ln(x, 'Book')}")
-        B.put(ws_stg, rr, G["Portfolio"], f"={ln(x, 'Portfolio')}")
-        B.put(ws_stg, rr, G["DPD"], f"=IF(ISNUMBER({dpd}),{dpd},\"\")", "int")
-        B.put(ws_stg, rr, G["DPD rule"],
-              f"=AND(ISNUMBER({dpd}),N({dpd})>{S['thr']},N({dpd})<={S['s3dpd']})")
-        B.put(ws_stg, rr, G["Watchlist"], f"={ln(x, 'IsWatchlist')}=1")
-        flags = ",".join(f"{ln(x, f)}=1" for f in
-                         ("IsWatchlist", "IsLocal1", "IsLocal2", "IsLocal3",
-                          "IsLocal4", "IsLocal5", "IsLocal6"))
-        B.put(ws_stg, rr, G["Any local flag (or watchlist)"], f"=OR({flags})")
-        B.put(ws_stg, rr, G["Tasdeer"], f"={ln(x, 'Portfolio')}=\"Tasdeer\"")
-        B.put(ws_stg, rr, G["Stage 3 rule"],
-              f"=OR(AND(ISNUMBER({dpd}),N({dpd})>{S['s3dpd']}),{ln(x, 'IsDefault')}=1)")
-        B.put(ws_stg, rr, G["Rule stage"],
-              f"=IF({g('Stage 3 rule')},3,IF(OR({g('DPD rule')},{g('Watchlist')},"
-              f"{g('Any local flag (or watchlist)')},{g('Tasdeer')}),2,1))", "int")
-        man = ln(x, "Manual stage (its digits)")
-        B.put(ws_stg, rr, G["Manual stage"],
-              f"=IF(ISNUMBER({man}),{man},\"\")", "int")
-        B.put(ws_stg, rr, G["After manual"],
-              f"=IF({g('Stage 3 rule')},3,IF(ISNUMBER({g('Manual stage')}),"
-              f"{g('Manual stage')},{g('Rule stage')}))", "int")
-        rows_b = books[l["suffix"]]
-        B.put(ws_stg, rr, G["Customer's worst in book"],
-              f"=MAX({_rng(min(rows_b), G['After manual'], max(rows_b), G['After manual'])})",
-              "int")
-        worst = _a(rr, G["Customer's worst in book"], fixed=False)
-        B.put(ws_stg, rr, G["Final stage"],
-              f"=IF(AND({g('After manual')}=1,{worst}>=2,"
-              f"NOT({g('Tasdeer')})),2,{g('After manual')})", "int", key=True)
-        why = (f"=IF({g('Stage 3 rule')},IF({ln(x, 'IsDefault')}=1,\"Default flag\","
-               f"\"DPD over \"&{S['s3dpd']}),IF(ISNUMBER({g('Manual stage')}),"
-               f"\"Manual stage \"&{g('Manual stage')},IF({g('DPD rule')},"
-               f"\"DPD over \"&{S['thr']},IF({g('Watchlist')},\"Watchlist\","
-               f"IF({g('Any local flag (or watchlist)')},\"Local flag\","
-               f"IF({g('Tasdeer')},\"Tasdeer (collective)\","
-               f"IF({g('Final stage')}=2,\"Contagion: the customer has a Stage \"&"
-               f"{worst}&\" position\","
-               f"\"Performing\")))))))")
-        B.put(ws_stg, rr, G["Why"], why)
-        B.put(ws_stg, rr, G["Report stage"], l["rep_stage"], "int", inp=True)
-        B.put(ws_stg, rr, G["Check"],
-              f"=IF({g('Report stage')}=\"\",\"\",IF({g('Final stage')}="
-              f"{g('Report stage')},\"OK\",\"DIFFERS\"))")
-    B.widths(ws_stg, {"A": 6, "B": 14, "C": 11, "D": 16, "E": 7, "F": 9,
-                      "G": 10, "H": 12, "I": 9, "J": 10, "K": 9, "L": 9,
-                      "M": 9, "N": 11, "O": 9, "P": 42, "Q": 9, "R": 9})
+    _write_staging(B, ws_stg, facts, L, R, S)
 
     def stage(line):
-        return _a(GR[line], G["Final stage"], "Staging")
+        return R[(line, "Stage")]
 
     # ---------------------------------------------------------- LGD
     lg = _write_lgd(B, ws_lgd, facts, L, ln, S)
@@ -962,7 +874,7 @@ def write_customer_workbook(facts: dict, dest=None):
     ecl = _write_ecl(B, ws_ecl, facts, L, ln, lg, ead, pm, S)
 
     # ---------------------------------------------------------- Summary
-    _write_summary(B, ws_sum, facts, L, ln, stage, lg, ead, ecl, pm, S, GR, G)
+    _write_summary(B, ws_sum, facts, L, ln, stage, lg, ead, ecl, pm, S)
 
     buf = io.BytesIO()
     B.wb.calculation.fullCalcOnLoad = True
@@ -975,6 +887,457 @@ def write_customer_workbook(facts: dict, dest=None):
         return None
     Path(dest).write_bytes(data)
     return None
+
+
+# ======================================================================
+# Facilities, Rating, Staging: the customer's inputs, how each rating was
+# set, and the stage -- the customer's, then each facility's.
+# ======================================================================
+FAC_COLS = ["Line", "Book", "Contract", "Original contract", "Customer",
+            "Account type", "Portfolio", "Rating type", "Rating", "Extract date",
+            "Maturity date", "On balance", "Off balance", "EIR", "Facility DPD",
+            "Past due days", "Payment type", "Payment frequency (months)",
+            "Deferral (months)", "Nominal interest rate", "AccountMaster.Stage",
+            "Repayment schedule"]
+FAC_SHOWN = {
+    "Line": "No.", "Contract": "Contract (LIC id)",
+    "Original contract": "Contract (source id)", "Customer": "Customer id",
+    "Account type": "Product", "Rating type": "Rating scale",
+    "Rating": "Rating in the run", "Extract date": "Reporting date",
+    "On balance": "On balance (QAR)", "Off balance": "Off balance (QAR)",
+    "EIR": "Effective interest rate", "Facility DPD": "Days past due",
+    "Past due days": "Customer's worst days past due",
+    "Payment frequency (months)": "Months between payments",
+    "Deferral (months)": "Grace months",
+    "AccountMaster.Stage": "Stage in the account master",
+}
+
+
+def _write_facilities(B, ws, L, R) -> None:
+    B.title(ws, "Facilities: the customer's positions as the run read them",
+            "The run's account master (the LIC file), with the source contract id "
+            "and each facility's own days past due kept by the ETL. Every value "
+            "here is an input.")
+    C = {n: i + 1 for i, n in enumerate(FAC_COLS)}
+    B.header(ws, 4, 1, [FAC_SHOWN.get(c, c) for c in FAC_COLS])
+    kinds = {"Extract date": "date", "Maturity date": "date", "On balance": "amt",
+             "Off balance": "amt", "EIR": "rate", "Facility DPD": "int",
+             "Past due days": "int", "Payment frequency (months)": "int",
+             "Deferral (months)": "int", "Nominal interest rate": "rate"}
+    for k, l in enumerate(L):
+        rr = 5 + k
+        vals = {"Line": l["line"], "Book": l["book"], "Contract": l["cid"],
+                "Original contract": l.get("contract_original") or "",
+                "Customer": l["customer"], "Account type": l["account_type"],
+                "Portfolio": l["portfolio"], "Rating type": l["rating_type"],
+                "Rating": l["rating"], "Extract date": l["d_extract"],
+                "Maturity date": l["d_maturity"], "On balance": l["on_balance"],
+                "Off balance": l["off_balance"], "EIR": l["eir"],
+                "Facility DPD": l.get("dpd_own"), "Past due days": l["dpd"],
+                "Payment type": l["payment_type"],
+                "Payment frequency (months)": l["pay_freq"],
+                "Deferral (months)": l["deferral"], "Nominal interest rate": l["nir"],
+                "AccountMaster.Stage": l["stage_raw"],
+                "Repayment schedule": "Yes" if l["schedule"] is not None else "No"}
+        for name in FAC_COLS:
+            B.put(ws, rr, C[name], vals[name], kinds.get(name), inp=name != "Line")
+            R[(l["line"], name)] = _a(rr, C[name], "Facilities")
+    B.widths(ws, {"A": 6, "B": 11, "C": 16, "D": 20, "E": 13, "F": 14, "G": 16,
+                  "H": 10, "I": 11, "J": 12, "K": 12, "L": 16, "M": 15, "N": 11,
+                  "O": 9, "P": 13, "Q": 10, "R": 12, "S": 9, "T": 11, "U": 13,
+                  "V": 11})
+
+
+def _name(B, name: str, ref: str) -> str:
+    """A workbook-level name for a range, so a formula reads
+    VLOOKUP(x, FallbackRatings, 2, FALSE) rather than a cell address."""
+    from openpyxl.workbook.defined_name import DefinedName
+    B.wb.defined_names[name] = DefinedName(name, attr_text=ref)
+    return name
+
+
+def _ov_text(o) -> str:
+    """An override as one line: was, reason, who, when."""
+    bits = [f"was {o.prior_value}" if _str(o.prior_value) else "",
+            _str(o.reason), _str(o.created_by), _str(o.created_at)[:16]]
+    return "; ".join(b for b in bits if b)
+
+
+def _write_rating(B, ws, facts, L, R, pm) -> None:
+    """How each facility's rating was set, the customer's rating, the
+    override, and the rating's PD bucket and curve."""
+    rt = facts.get("rating") or {}
+    recorded = bool(rt.get("recorded"))
+    B.title(ws, "Rating: how each facility's rating was set",
+            "Lending: the rating in the customer master when it is a grade on the "
+            "rating scale; otherwise a program lending customer takes the program "
+            "rating for its worst days past due; otherwise the fallback rating of "
+            "its segment. The customer's rating is its worst facility's, unless the "
+            "run overrode it. Investments: the extract's rating when it is on the "
+            "external scale, otherwise the fallback.")
+    # ---- the assumptions, at the bottom, named
+    rules, fb, scale = rt.get("rules") or [], rt.get("fallback") or [], rt.get("scale") or []
+    lend = [l for l in L if l["suffix"] == "_1"]
+    inv = [l for l in L if l["suffix"] == "_2"]
+    n_lend = (len(lend) + 11) if (lend and recorded) else (9 if lend else 0)
+    top = 4 + n_lend + ((len(inv) + 3) if inv else 0) + len(L) + 4
+    r = top
+    ws.cell(r, 1, "Assumptions").font = B.f_title
+    r += 2
+    ws.cell(r, 1, "Program lending ratings").font = B.f_sub
+    B.header(ws, r + 1, 1, ["Sector", "Days past due from", "Rating"])
+    ladders = {}                                   # sector -> named range
+    rr = r + 2
+    for sector in dict.fromkeys(x[0] for x in rules):
+        first = rr
+        for sec, d, g in [x for x in rules if x[0] == sector]:
+            B.put(ws, rr, 1, sec, inp=True)
+            B.put(ws, rr, 2, d, "int", inp=True)
+            B.put(ws, rr, 3, g, inp=True)
+            rr += 1
+        nm = "Program_" + re.sub(r"[^A-Za-z0-9]", "", sector.replace("Sector", ""))
+        ladders[sector] = _name(B, nm, _rng(first, 2, rr - 1, 3, "Rating"))
+    ws.cell(r, 5, "Fallback ratings").font = B.f_sub
+    B.header(ws, r + 1, 5, ["Segment", "Rating"])
+    for k, (seg, g) in enumerate(fb):
+        B.put(ws, r + 2 + k, 5, seg, inp=True)
+        B.put(ws, r + 2 + k, 6, g, inp=True)
+    fbr = _name(B, "FallbackRatings",
+                _rng(r + 2, 5, r + 1 + max(len(fb), 1), 6, "Rating"))
+    ws.cell(r, 8, "Rating scale").font = B.f_sub
+    B.header(ws, r + 1, 8, ["Rating", "Scale", "Hierarchy"])
+    for k, (g, t, h) in enumerate(scale):
+        B.put(ws, r + 2 + k, 8, g, inp=True)
+        B.put(ws, r + 2 + k, 9, t, inp=True)
+        B.put(ws, r + 2 + k, 10, h, "int", inp=True)
+    last = r + 1 + max(len(scale), 1)
+    sr = _name(B, "ScaleRating", _rng(r + 2, 8, last, 8, "Rating"))
+    stp = _name(B, "ScaleType", _rng(r + 2, 9, last, 9, "Rating"))
+    sh = _name(B, "ScaleHierarchy", _rng(r + 2, 10, last, 10, "Rating"))
+    n_int = sum(1 for x in scale if x[1] == "Internal")
+    ig = _name(B, "InternalGrades", _rng(r + 2, 8, r + 1 + max(n_int, 1), 8, "Rating"))
+    rm = facts["ratings_map"]
+    ws.cell(r, 12, "Rating buckets (Ratings.csv)").font = B.f_sub
+    B.header(ws, r + 1, 12, ["Rating scale", "Rating", "Bucket"])
+    for k, m in enumerate(rm):
+        B.put(ws, r + 2 + k, 12, "External" if str(m["rt"]) == "2" else "Internal",
+              inp=True)
+        B.put(ws, r + 2 + k, 13, m["rating"], inp=True)
+        B.put(ws, r + 2 + k, 14, m["bucket"], "int", inp=True)
+    lb = r + 1 + max(len(rm), 1)
+    bs = _name(B, "BucketScale", _rng(r + 2, 12, lb, 12, "Rating"))
+    br = _name(B, "BucketRating", _rng(r + 2, 13, lb, 13, "Rating"))
+    bb = _name(B, "BucketNumber", _rng(r + 2, 14, lb, 14, "Rating"))
+
+    ov = facts["overrides"]
+    rov = ov[ov["kind"] == "rating"] if len(ov) else ov
+    final = {}                                     # line -> final rating cell
+    setby = {}
+    r = 4
+    # ---- lending: rating per facility, then the customer's
+    if lend and not recorded:
+        ws.cell(r, 1, "Lending").font = B.f_sub
+        o = rov.iloc[-1] if len(rov) else None
+        B.header(ws, r + 1, 1, ["Customer rating", "Value", "Detail"])
+        B.put(ws, r + 2, 1, "Rating override in the run")
+        B.put(ws, r + 2, 2, "" if o is None else _str(o.value), inp=True)
+        B.put(ws, r + 2, 3, "" if o is None else _ov_text(o))
+        B.put(ws, r + 3, 1, "Customer rating", bold=True)
+        B.put(ws, r + 3, 2, f"={R[(lend[0]['line'], 'Rating')]}", key=True)
+        B.put(ws, r + 3, 3, "The run's rating: the run did not record how it was set "
+                            "(made before engine 0.46).")
+        for l in lend:
+            final[l["line"]] = _a(r + 3, 2, "Rating")
+            setby[l["line"]] = _a(r + 3, 3, "Rating")
+        r = r + 9
+    elif lend:
+        ws.cell(r, 1, "Lending").font = B.f_sub
+        cols = ["No.", "Contract", "Product", "Rating in the customer master",
+                "A grade on the rating scale", "Sector", "Program lending",
+                "Customer's worst days past due", "Program rating",
+                "Fallback segment", "Fallback rating", "Facility rating", "Set by",
+                "Hierarchy"]
+        K = {n: i + 1 for i, n in enumerate(cols)}
+        B.header(ws, r + 1, 1, cols)
+        r0 = r + 2
+        r1 = r0 + len(lend) - 1
+        dpd_rng = _rng(r0, 8, r1, 8)
+        own = ",".join(R[(l["line"], "Facility DPD")] for l in lend)
+        sector_names = {}
+        for sec in ladders:
+            short = re.sub(r"\s*Sector\s*$", "", sec, flags=re.I)
+            sector_names[sec] = sorted({short.lower(),
+                                        re.sub("Lifestock", "Livestock", short,
+                                               flags=re.I).lower()})
+        for k, l in enumerate(lend):
+            rr = r0 + k
+            x = l["line"]
+            g = lambda n: _a(rr, K[n], fixed=False)
+            B.put(ws, rr, 1, f"={R[(x, 'Line')]}", align="left")
+            B.put(ws, rr, 2, f"={R[(x, 'Contract')]}")
+            B.put(ws, rr, 3, f"={R[(x, 'Account type')]}")
+            B.put(ws, rr, K["Rating in the customer master"], l.get("rating_input") or "",
+                  inp=True)
+            cmr = g("Rating in the customer master")
+            B.put(ws, rr, K["A grade on the rating scale"],
+                  f"=IF(AND({cmr}<>\"\",SUMPRODUCT(--({sr}={cmr}))>0),\"Yes\",\"No\")")
+            B.put(ws, rr, K["Sector"], l.get("sector") or "", inp=True)
+            sec = f"LOWER(TRIM({g('Sector')}))"
+            alln = [n for v in sector_names.values() for n in v]
+            B.put(ws, rr, K["Program lending"],
+                  "=IF(OR(" + ",".join(f"{sec}=\"{n}\"" for n in alln) + "),\"Yes\",\"No\")"
+                  if alln else "No")
+            B.put(ws, rr, K["Customer's worst days past due"],
+                  f"=MAX(0,{own})" if recorded else f"={R[(x, 'Past due days')]}", "int")
+            d = g("Customer's worst days past due")
+            prog = "\"\""
+            for sec_name, rng in reversed(list(ladders.items())):
+                cond = "OR(" + ",".join(f"{sec}=\"{n}\"" for n in sector_names[sec_name]) + ")"
+                prog = (f"IF({cond},IFERROR(VLOOKUP({d},{rng},2,TRUE),"
+                        f"INDEX({rng},1,2)),{prog})")
+            B.put(ws, rr, K["Program rating"],
+                  f"=IF({g('Program lending')}=\"Yes\",{prog},\"\")")
+            B.put(ws, rr, K["Fallback segment"],
+                  f"=IF(AND({g('A grade on the rating scale')}=\"No\","
+                  f"{g('Program lending')}=\"No\"),IF(LOWER(TRIM({g('Product')}))="
+                  f"\"al dhameen\",\"Al Dhameen Customers\","
+                  f"\"Unrated Customer (Internal Rating)\"),\"\")")
+            B.put(ws, rr, K["Fallback rating"],
+                  f"=IF({g('Fallback segment')}=\"\",\"\",IFERROR(VLOOKUP("
+                  f"{g('Fallback segment')},{fbr},2,FALSE),\"\"))")
+            B.put(ws, rr, K["Facility rating"],
+                  f"=IF({g('A grade on the rating scale')}=\"Yes\",{cmr},"
+                  f"IF({g('Program lending')}=\"Yes\",{g('Program rating')},"
+                  f"{g('Fallback rating')}))", key=True)
+            B.put(ws, rr, K["Set by"],
+                  f"=IF({g('A grade on the rating scale')}=\"Yes\",\"Customer master\","
+                  f"IF({g('Program lending')}=\"Yes\",\"Program lending: \"&"
+                  f"{g('Sector')}&\", \"&{d}&\" days past due\","
+                  f"\"Fallback: \"&{g('Fallback segment')}))")
+            B.put(ws, rr, K["Hierarchy"],
+                  f"=IFERROR(INDEX({sh},MATCH({g('Facility rating')},{sr},0)),\"\")", "int")
+        hier = _rng(r0, K["Hierarchy"], r1, K["Hierarchy"])
+        sb = _rng(r0, K["Set by"], r1, K["Set by"])
+        r = r1 + 2
+        B.header(ws, r, 1, ["Customer rating", "Value", "Detail"])
+        o = rov.iloc[-1] if len(rov) else None
+        rows = [
+            ("Worst facility hierarchy", f"=MAX({hier})", "int", ""),
+            ("Worst facility rating", f"=IFERROR(INDEX({ig},{_a(r + 1, 2)}),\"\")",
+             None, f"=IFERROR(INDEX({sb},MATCH({_a(r + 1, 2)},{hier},0)),\"\")"),
+            ("Rating override in the run", "" if o is None else _str(o.value), None,
+             "" if o is None else _ov_text(o)),
+            ("Customer rating",
+             f"=IF({_a(r + 3, 2)}<>\"\",{_a(r + 3, 2)},{_a(r + 2, 2)})", None,
+             f"=IF({_a(r + 3, 2)}<>\"\",\"Override in the run\",{_a(r + 2, 3)})"),
+            ("Rating in the run (account master)", f"={R[(lend[0]['line'], 'Rating')]}",
+             None, ""),
+            ("Check", f"=IF({_a(r + 4, 2)}={_a(r + 5, 2)},\"OK\",\"DIFFERS\")", None, ""),
+        ]
+        for k, (lab, v, kd, det) in enumerate(rows):
+            B.put(ws, r + 1 + k, 1, lab, bold=lab == "Customer rating")
+            B.put(ws, r + 1 + k, 2, v, kd, inp=lab == "Rating override in the run",
+                  key=lab == "Customer rating")
+            B.put(ws, r + 1 + k, 3, det)
+        cust_rating = _a(r + 4, 2, "Rating")
+        for l in lend:
+            final[l["line"]] = cust_rating
+            setby[l["line"]] = _a(r + 4, 3, "Rating")
+        r = r + 8
+    # ---- investments: per account
+    if inv:
+        ws.cell(r, 1, "Investments").font = B.f_sub
+        cols = ["No.", "Contract", "Rating in the extract",
+                "A grade on the external scale", "Fallback rating", "Rating",
+                "Set by", "Rating in the run", "Check"]
+        B.header(ws, r + 1, 1, cols)
+        for k, l in enumerate(inv):
+            rr = r + 2 + k
+            x = l["line"]
+            g = lambda c: _a(rr, c, fixed=False)
+            B.put(ws, rr, 1, f"={R[(x, 'Line')]}", align="left")
+            B.put(ws, rr, 2, f"={R[(x, 'Contract')]}")
+            B.put(ws, rr, 3, l.get("rating_input") or "", inp=True)
+            B.put(ws, rr, 4, f"=IF(SUMPRODUCT(({sr}={g(3)})*({stp}=\"External\"))>0,"
+                             f"\"Yes\",\"No\")")
+            B.put(ws, rr, 5, f"=IFERROR(VLOOKUP(\"Investment Portfolio\",{fbr},2,FALSE),\"\")")
+            if recorded:
+                B.put(ws, rr, 6, f"=IF({g(4)}=\"Yes\",{g(3)},{g(5)})", key=True)
+                B.put(ws, rr, 7, f"=IF({g(4)}=\"Yes\",\"Investment extract\","
+                                 f"\"Fallback: Investment Portfolio\")")
+            else:
+                B.put(ws, rr, 6, f"={R[(x, 'Rating')]}", key=True)
+                B.put(ws, rr, 7, "Not recorded by the run")
+            B.put(ws, rr, 8, f"={R[(x, 'Rating')]}")
+            B.put(ws, rr, 9, f"=IF({g(6)}={g(8)},\"OK\",\"DIFFERS\")")
+            final[x] = _a(rr, 6, "Rating")
+            setby[x] = _a(rr, 7, "Rating")
+        r = r + 3 + len(inv)
+    # ---- rating -> bucket -> PD curve
+    ws.cell(r, 1, "PD bucket and curve").font = B.f_sub
+    B.header(ws, r + 1, 1, ["No.", "Contract", "Rating", "Rating scale", "Bucket",
+                            "PD curve"])
+    for k, l in enumerate(L):
+        rr = r + 2 + k
+        x = l["line"]
+        g = lambda c: _a(rr, c, fixed=False)
+        B.put(ws, rr, 1, f"={R[(x, 'Line')]}", align="left")
+        B.put(ws, rr, 2, f"={R[(x, 'Contract')]}")
+        B.put(ws, rr, 3, f"={final[x]}")
+        typ = R[(x, "Rating type")]
+        B.put(ws, rr, 4, f"=IF(OR(LEFT({typ},8)=\"External\",{typ}=\"2\"),"
+                         f"\"External\",\"Internal\")")
+        hit = f"({bs}={g(4)})*({br}={g(3)})"
+        B.put(ws, rr, 5, f"=IF(SUMPRODUCT({hit})=0,\"\",SUMPRODUCT({hit}*{bb}))", "int")
+        B.put(ws, rr, 6, f"=IF({g(5)}=\"\",\"\",IF({pm['source']}=\"{CALC}\",{g(4)},"
+                         f"{R[(x, 'Portfolio')]})&\" | bucket \"&{g(5)})")
+        R[(x, "Final rating")] = _a(rr, 3, "Rating")
+        R[(x, "Rating bucket")] = _a(rr, 5, "Rating")
+        R[(x, "PD curve")] = _a(rr, 6, "Rating")
+        R[(x, "Rating set by")] = setby[x]
+    B.widths(ws, {"A": 34, "B": 16, "C": 22, "D": 16, "E": 36, "F": 14, "G": 12,
+                  "H": 14, "I": 12, "J": 30, "K": 12, "L": 16, "M": 42, "N": 10})
+
+
+def _write_staging(B, ws, facts, L, R, S) -> None:
+    """The customer's stage from its criteria, then each facility's."""
+    thr = facts["settings"]["threshold"]
+    B.title(ws, "Stage: the customer's stage, then each facility's",
+            f"A customer is staged on its worst facility: more than 90 days past due "
+            f"or the default flag gives Stage 3; more than {thr:g} days past due, the "
+            f"watchlist or a restructuring gives Stage 2; otherwise Stage 1. A stage "
+            f"override in the run can only worsen it. Each facility takes the "
+            f"customer's stage, and a Tasdeer facility is at least Stage 2.")
+    ov = facts["overrides"]
+
+    def last(kind):
+        o = ov[ov["kind"] == kind] if len(ov) else ov
+        return o.iloc[-1] if len(o) else None
+
+    yes = lambda v: "Yes" if _num(v) == 1 else "No"
+    r = 4
+    for suffix, book in (("_1", "Lending"), ("_2", "Investments")):
+        bl = [l for l in L if l["suffix"] == suffix]
+        if not bl:
+            continue
+        f0 = bl[0]
+        ws.cell(r, 1, f"{book}: the customer").font = B.f_sub
+        B.header(ws, r + 1, 1, ["Criterion", "Value", "Stage it gives", "Detail"])
+        so, ro = (last("stage"), last("restructuring")) if suffix == "_1" else (None, None)
+        other = any(_num(f0.get(f"IsLocal{i}")) == 1 for i in (2, 4, 5, 6))
+        crit = [
+            ("dpd", "Days past due (worst facility)",
+             "=MAX(0," + ",".join(R[(l['line'], 'Past due days')] for l in bl) + ")",
+             "int",
+             lambda v: f"=IF(N({v})>{S['s3dpd']},3,IF(N({v})>{S['thr']},2,1))", ""),
+            ("watch", "Watchlist", yes(f0.get("IsWatchlist")), None,
+             lambda v: f"=IF({v}=\"Yes\",2,1)", ""),
+            ("restr", "Restructured", yes(f0.get("IsLocal1")), None,
+             lambda v: f"=IF({v}=\"Yes\",2,1)",
+             "" if ro is None else f"Override in the run: {_str(ro.value) or 'none'}; "
+                                   + _ov_text(ro)),
+            ("default", "Default", yes(f0.get("IsDefault")), None,
+             lambda v: f"=IF({v}=\"Yes\",3,1)", ""),
+            ("lic2", "Stage 2 in the LIC staging file", yes(f0.get("IsLocal3")), None,
+             lambda v: f"=IF({v}=\"Yes\",2,1)",
+             "Set by the ETL from the criteria above, or a stage override"),
+        ]
+        if other:
+            crit.append(("other", "Other Stage 2 flag in the LIC staging file", "Yes",
+                         None, lambda v: f"=IF({v}=\"Yes\",2,1)", ""))
+        crit.append(("override", "Stage override in the run",
+                     "" if so is None else _str(so.value), None,
+                     lambda v: (f"=IF({v}=\"\",1,IFERROR(VALUE(SUBSTITUTE(LOWER({v}),"
+                                f"\"stage \",\"\")),1))"),
+                     "" if so is None else _ov_text(so)))
+        C = {}
+        for k, (key, lab, val, kd, rule, det) in enumerate(crit):
+            rr = r + 2 + k
+            B.put(ws, rr, 1, lab)
+            B.put(ws, rr, 2, val, kd, inp=key != "dpd")
+            B.put(ws, rr, 3, rule(_a(rr, 2, fixed=False)), "int")
+            B.put(ws, rr, 4, det)
+            C[key] = (_a(rr, 2), _a(rr, 3))
+        rs = r + 2 + len(crit)
+        cust = _a(rs, 2)
+        B.put(ws, rs, 1, "Customer stage", bold=True)
+        B.put(ws, rs, 2, f"=MAX({_rng(r + 2, 3, rs - 1, 3)})", "int", key=True)
+        why2 = []
+        for key, text in (("override", "Stage override in the run"),
+                          ("dpd", f"More than \"&{S['thr']}&\" days past due"),
+                          ("watch", "Watchlist"), ("restr", "Restructured"),
+                          ("lic2", "Stage 2 in the LIC staging file"),
+                          ("other", "Other Stage 2 flag in the LIC staging file")):
+            if key in C:
+                why2.append((C[key][1], text))
+        w2 = "\"Performing\""
+        for cell, text in reversed(why2):
+            w2 = f"IF({cell}=2,\"{text}\",{w2})"
+        w3 = (f"IF({C['dpd'][1]}=3,\"More than \"&{S['s3dpd']}&\" days past due\","
+              f"IF({C['override'][1]}=3,\"Stage override in the run\",\"Default\"))")
+        B.put(ws, rs + 1, 1, "Why", bold=True)
+        B.put(ws, rs + 1, 2, f"=IF({cust}=3,{w3},IF({cust}=2,{w2},\"Performing\"))")
+        why = _a(rs + 1, 2)
+        # ---- each facility: the customer's criteria on the facility's own
+        # days past due (the same for every facility of a customer in an ETL
+        # run), the Tasdeer floor, a stage written in the account master, and
+        # the customer's worst facility lifting a Stage 1 one
+        r = rs + 3
+        ws.cell(r, 1, f"{book}: each facility").font = B.f_sub
+        cols = ["No.", "Contract", "Portfolio", "Customer's worst days past due",
+                "Tasdeer",
+                "Stage in the account master", "Customer stage", "Facility stage",
+                "Stage", "Reason", "Stage in the report", "Check"]
+        K = {n: i + 1 for i, n in enumerate(cols)}
+        B.header(ws, r + 1, 1, cols)
+        r0, r1 = r + 2, r + 1 + len(bl)
+        flag2 = [C[k][0] for k in ("watch", "restr", "lic2", "other") if k in C]
+        for k, l in enumerate(bl):
+            rr = r0 + k
+            x = l["line"]
+            g = lambda n: _a(rr, K[n], fixed=False)
+            B.put(ws, rr, 1, f"={R[(x, 'Line')]}", align="left")
+            B.put(ws, rr, 2, f"={R[(x, 'Contract')]}")
+            B.put(ws, rr, 3, f"={R[(x, 'Portfolio')]}")
+            B.put(ws, rr, 4, f"={R[(x, 'Past due days')]}", "int")
+            B.put(ws, rr, 5, f"=IF({g('Portfolio')}=\"Tasdeer\",\"Yes\",\"No\")")
+            man = R[(x, "AccountMaster.Stage")]
+            B.put(ws, rr, 6, f"=IFERROR(VALUE(SUBSTITUTE(LOWER({man}),\"stage \",\"\")),\"\")",
+                  "int")
+            B.put(ws, rr, 7, f"={cust}", "int")
+            d = g("Customer's worst days past due")
+            t, m = g("Tasdeer"), g("Stage in the account master")
+            s3 = f"OR(N({d})>{S['s3dpd']},{C['default'][0]}=\"Yes\")"
+            s2 = ("OR(AND(N({d})>{thr},N({d})<={s3d}),".format(d=d, thr=S["thr"], s3d=S["s3dpd"])
+                  + ",".join(f"{c}=\"Yes\"" for c in flag2) + ")")
+            okm = f"AND(ISNUMBER({m}),{m}>=1,{m}<=3)"
+            B.put(ws, rr, 8, f"=IF({s3},3,IF({okm},{m},IF(OR({s2},{t}=\"Yes\"),2,1)))", "int")
+            f8 = g("Facility stage")
+            B.put(ws, rr, 9, f"=IF(AND({f8}=1,MAX({_rng(r0, 8, r1, 8)})>=2,"
+                             f"{t}<>\"Yes\"),2,{f8})", "int", key=True)
+            s9 = g("Stage")
+            own2 = (f"IF(AND(N({d})>{S['thr']},N({d})<={S['s3dpd']}),\"More than \"&"
+                    f"{S['thr']}&\" days past due\","
+                    + "".join(f"IF({c}=\"Yes\",\"{lab}\"," for c, lab in zip(
+                        flag2, [{"watch": "Watchlist", "restr": "Restructured",
+                                 "lic2": "Stage 2 in the LIC staging file",
+                                 "other": "Other Stage 2 flag in the LIC staging file"}[kk]
+                                for kk in ("watch", "restr", "lic2", "other") if kk in C]))
+                    + "\"\"" + ")" * len(flag2) + ")")
+            B.put(ws, rr, 10,
+                  f"=IF({s9}=3,IF(N({d})>{S['s3dpd']},\"More than \"&{S['s3dpd']}&"
+                  f"\" days past due\",\"Default\"),IF({s9}=2,IF({okm},\"Stage \"&{m}&"
+                  f"\" in the account master\",IF({s2},{own2},IF({t}=\"Yes\","
+                  f"\"Tasdeer (assessed collectively)\",\"Another facility of the "
+                  f"customer is Stage 2 or 3\"))),\"Performing\"))")
+            B.put(ws, rr, 11, l["rep_stage"], "int", inp=True)
+            B.put(ws, rr, 12, f"=IF({g('Stage in the report')}=\"\",\"\",IF({s9}="
+                              f"{g('Stage in the report')},\"OK\",\"DIFFERS\"))")
+            R[(x, "Stage")] = _a(rr, 9, "Staging")
+            R[(x, "Stage reason")] = _a(rr, 10, "Staging")
+        r = r1 + 3
+    B.widths(ws, {"A": 40, "B": 16, "C": 16, "D": 14, "E": 9, "F": 13, "G": 10,
+                  "H": 10, "I": 8, "J": 44, "K": 10, "L": 9})
 
 
 def _trunc3(x: str) -> str:
@@ -1050,6 +1413,47 @@ def _write_scale_blocks(B, ws, r, pdm, rt, sf_cell, weight_of, pit_formula, note
     return out, r
 
 
+def _weight_bands(B, ws, r, c0, names, zs, Zc, cdf, years) -> dict:
+    """The scenario weights, as the scenario probability workbook works them
+    out: the scenarios in order of severity, each owning a band; per year the
+    normal CDF at each band edge (``cdf(i, y)``, a formula without '='), a
+    scenario's weight the CDF between its edges -- below the central scenario
+    up to its edge, above it from its edge -- and the central scenario the
+    rest. Returns {(scenario, year): weight cell} and {scenario: average}."""
+    order = sorted(range(len(names)), key=lambda i: zs[i])
+    central = min(range(len(order)), key=lambda p: abs(zs[order[p]]))
+    n = len(order)
+    hdr = ["Scenario", "Severity z"]
+    for y in years:
+        hdr += [f"Year {y}: CDF at the edge", f"Year {y}: weight"]
+    hdr += ["Weight (average)"]
+    B.header(ws, r, c0, hdr)
+    W, A = {}, {}
+    for p_, i in enumerate(order):
+        rr = r + 1 + p_
+        B.put(ws, rr, c0, names[i])
+        B.put(ws, rr, c0 + 1, f"={Zc[i]}", "num")
+        for yi, y in enumerate(years):
+            cc, wc = c0 + 2 + 2 * yi, c0 + 3 + 2 * yi
+            B.put(ws, rr, cc, "=" + cdf(i, y), "num")
+            me = _a(rr, cc, fixed=False)
+            if p_ == central:
+                above = f"SUM({_rng(r + 1, wc, rr - 1, wc)})" if p_ > 0 else "0"
+                below = (f"SUM({_rng(rr + 1, wc, r + n, wc)})" if p_ < n - 1 else "0")
+                f = f"=1-{above}-{below}"
+            elif p_ < central:
+                f = f"={me}" if p_ == 0 else f"={me}-{_a(rr - 1, cc, fixed=False)}"
+            else:
+                f = f"=1-{me}" if p_ == n - 1 else f"={_a(rr + 1, cc, fixed=False)}-{me}"
+            B.put(ws, rr, wc, f, "num")
+            W[(i, y)] = _a(rr, wc)
+        ac = c0 + 2 + 2 * len(years)
+        B.put(ws, rr, ac, f"=AVERAGE({','.join(W[(i, y)] for y in years)})", "num",
+              key=True)
+        A[i] = _a(rr, ac)
+    return {"w": W, "avg": A, "rows": n}
+
+
 def _write_pd_internal(B, ws, pdm) -> dict:
     """The internal scale: the run's PiT PD model on its forecasts."""
     B.title(ws, f"PD internal: the internal rating model ({pdm['model_id']})",
@@ -1094,20 +1498,58 @@ def _write_pd_internal(B, ws, pdm) -> dict:
     ws.cell(r, 1, "Scenarios").font = B.f_sub
     B.header(ws, r + 1, 1, ["Scenario", "Severity z", "Weight"])
     Z, W = [], []
+    iw = pdm.get("int_weights")
     for k, ((nm, z), w) in enumerate(zip(pdm["scenarios"], pdm["w_int"])):
         rr = r + 2 + k
         B.put(ws, rr, 1, nm, inp=True)
         B.put(ws, rr, 2, z, "num", inp=True)
-        B.put(ws, rr, 3, w, "num", inp=True)
+        B.put(ws, rr, 3, w, "num", inp=iw is None)
         Z.append(_a(rr, 2))
         W.append(_a(rr, 3))
     B.put(ws, r + 2 + len(names), 1, "Total")
     B.put(ws, r + 2 + len(names), 3, f"=SUM({W[0]}:{W[-1]})", "num")
-    B.note(ws, r + 3 + len(names), 1,
-           "The weights the run used" + (": worked out by the run from where the "
-           "forecast sits on the history (mode auto)." if pdm["int_mode"] != "explicit"
-           else ", as written in model_inputs.yml (mode explicit)."))
-    r = r + 5 + len(names)
+    wrows = [r + 2 + k for k in range(len(names))]
+    if iw is None:
+        B.note(ws, r + 3 + len(names), 1,
+               "The weights as written in model_inputs.yml (mode explicit).")
+        r = r + 5 + len(names)
+    else:
+        # ---- the weights, worked out (mode auto)
+        r = r + 4 + len(names)
+        ws.cell(r, 1, "Scenario weights").font = B.f_sub
+        B.note(ws, r + 1, 1,
+               f"Each scenario owns a band of the history of {iw['name']}, cut at mean "
+               f"+ standard deviation x severity. Its weight is the chance growth falls "
+               f"in its band, centred on the forecast with the history's standard "
+               f"deviation, averaged over the first {iw['n']} forecast years; the "
+               f"central scenario takes the rest.")
+        r += 3
+        B.header(ws, r, 1, ["History"])
+        hv = iw["history"]
+        for k, v in enumerate(hv):
+            B.put(ws, r + 1 + k, 1, v, "num", inp=True)
+        Hi = _rng(r + 1, 1, r + len(hv), 1)
+        B.put(ws, r, 3, "Mean", bold=True)
+        B.put(ws, r, 4, f"=AVERAGE({Hi})", "num")
+        B.put(ws, r + 1, 3, "Standard deviation", bold=True)
+        B.put(ws, r + 1, 4, f"=STDEV({Hi})", "num")
+        mu, sd = _a(r, 4), _a(r + 1, 4)
+        fcell = {}
+        for y in range(1, iw["n"] + 1):
+            B.put(ws, r + 1 + y, 3, f"Forecast, year {y}", bold=True)
+            if iw["in_table"] and (y, iw["column"] - 1) in F:
+                B.put(ws, r + 1 + y, 4, f"={F[(y, iw['column'] - 1)]}", "num")
+            else:
+                B.put(ws, r + 1 + y, 4, iw["forecasts"][y - 1], "num", inp=True)
+            fcell[y] = _a(r + 1 + y, 4)
+        zs = [z for _, z in pdm["scenarios"]]
+        bands = _weight_bands(
+            B, ws, r + 3 + iw["n"], 3, names, zs, Z,
+            lambda i, y: f"NORMDIST({mu}+{sd}*{Z[i]},{fcell[y]},{sd},TRUE)",
+            list(range(1, iw["n"] + 1)))
+        for k in range(len(names)):
+            B.put(ws, wrows[k], 3, f"={bands['avg'][k]}", "num")
+        r = max(r + 1 + len(hv), r + 4 + iw["n"] + bands["rows"]) + 2
     ws.cell(r, 1, "Scaling factor by scenario and year").font = B.f_sub
     cols = ["Scenario", "Year"]
     for m in mev:
@@ -1184,29 +1626,52 @@ def _write_pd_external(B, ws, pdm) -> dict:
     ws.cell(r3, 4, "Scenario weights by forecast year").font = B.f_sub
     B.header(ws, r3 + 1, 4, ["Year"] + names + ["Total"])
     WR = []
+    auto = bool(pdm.get("ext_auto"))
     for i, row in enumerate(pdm["w_ext"]):
         rr = r3 + 2 + i
         B.put(ws, rr, 4, i + 1, "int")
         for k, w in enumerate(row):
-            B.put(ws, rr, 5 + k, w, "num", inp=True)
+            B.put(ws, rr, 5 + k, w, "num", inp=not auto)
         B.put(ws, rr, 5 + len(names), f"=SUM({_rng(rr, 5, rr, 4 + len(names))})", "num")
         WR.append(rr)
     ra = r3 + 2 + len(WR)
+    rb = ra + 3
+    if auto:
+        # each year's weights, worked out: where that year's forecast sits
+        B.put(ws, r + 5, 4, "Mean", bold=True)
+        B.put(ws, r + 5, 5, f"=AVERAGE({H})", "num")
+        MU = _a(r + 5, 5)
+        ws.cell(rb, 4, "Scenario weights, worked out").font = B.f_sub
+        zs = [z for _, z in pdm["scenarios"]]
+        zc = []
+        B.put(ws, rb + 1, 4, "Scenario", bold=True)
+        B.put(ws, rb + 2, 4, "Severity z", bold=True)
+        for k, (nm, z) in enumerate(zip(names, zs)):    # the severities, as inputs
+            B.put(ws, rb + 1, 5 + k, nm)
+            B.put(ws, rb + 2, 5 + k, z, "num", inp=True)
+            zc.append(_a(rb + 2, 5 + k))
+        yrs = list(range(1, len(WR) + 1))
+        bands = _weight_bands(
+            B, ws, rb + 4, 4, names, zs, zc,
+            lambda i, y: f"NORMDIST({Fc[y - 1]}+{zc[i]}*{SD},{MU},{SD},TRUE)", yrs)
+        for i in range(len(WR)):
+            for k in range(len(names)):
+                B.put(ws, WR[i], 5 + k, f"={bands['w'][(k, i + 1)]}", "num")
+        rb = rb + 5 + bands["rows"]
     B.put(ws, ra, 4, "Later years (average)")
     for k in range(len(names)):
         B.put(ws, ra, 5 + k, f"=AVERAGE({_rng(WR[0], 5 + k, WR[-1], 5 + k)})", "num")
     B.put(ws, ra, 5 + len(names), f"=SUM({_rng(ra, 5, ra, 4 + len(names))})", "num")
     B.note(ws, ra + 1, 4,
-           "The weights the run used" + (": worked out by the run for each year from "
-           "where that year's forecast sits on the history (mode auto)."
-           if pdm["ext_mode"] != "explicit" else ", as written in model_inputs.yml.")
+           ("Worked out below for each year from where that year's forecast sits on "
+            "the history." if auto else "As written in model_inputs.yml.")
            + " Years after the last forecast year take the average.")
 
     def weight_of(k, y):
         row = WR[y - 1] if y <= len(WR) else ra
         return _a(row, 5 + k)
 
-    r = max(r + 2 + len(h), ra + 2) + 1
+    r = max(r + 2 + len(h), rb) + 1
     ws.cell(r, 1, "Scaling factor by scenario and year").font = B.f_sub
     B.header(ws, r + 1, 1, ["Scenario", "Severity z", "Year", "Stressed growth",
                             "History at or below it", "Percentile rank",
@@ -1252,10 +1717,10 @@ def _write_pd(B, ws, facts, wm: dict) -> dict:
     calc_ok = bool(pdm.get("ok"))
     B.title(ws, "PD curves: cumulative PD by month",
             "A year's weighted marginal PD (PD internal / PD external tabs) is spread "
-            "evenly over its twelve months and summed, capped at 1. A position reads "
-            "the curve of its rating scale and bucket (the PD curve column on Lines). "
-            "The run's own curves (StPD.csv) are shown beside them for the check; the "
-            "switch below chooses which ones the ECL prices on.")
+            "evenly over its twelve months and summed, capped at 1. A facility reads "
+            "the curve of its rating scale and bucket (Rating tab). The run's own "
+            "curves (StPD.csv) are beside them for the check; the switch chooses "
+            "which ones the ECL prices on.")
     B.put(ws, 4, 1, "PD curves used in the ECL", bold=True)
     sw = B.put(ws, 4, 2, pdm.get("source") or RUN, inp=True, key=True)
     from openpyxl.worksheet.datavalidation import DataValidation
@@ -1265,19 +1730,7 @@ def _write_pd(B, ws, facts, wm: dict) -> dict:
     B.note(ws, 4, 3, pdm.get("reason") or (
         "The calculated curves equal the run's StPD: the ECL prices on the calculation."))
     out = {"source": _a(4, 2, "PD curves")}
-    r = 6
-    ws.cell(r, 1, "Rating buckets (Ratings.csv)").font = B.f_sub
-    B.header(ws, r + 1, 1, ["Rating scale", "Rating", "Bucket"])
-    rm = facts["ratings_map"]
-    for k, m in enumerate(rm):
-        rr = r + 2 + k
-        B.put(ws, rr, 1, "External" if str(m["rt"]) == "2" else "Internal", inp=True)
-        B.put(ws, rr, 2, m["rating"], inp=True)
-        B.put(ws, rr, 3, m["bucket"], "int", inp=True)
-    last = r + 1 + max(len(rm), 1)
-    out.update({"rm_scale": _rng(r + 2, 1, last, 1, "PD curves"),
-                "rm_rating": _rng(r + 2, 2, last, 2, "PD curves"),
-                "rm_bucket": _rng(r + 2, 3, last, 3, "PD curves")})
+    last = 4
 
     calc = []                                   # (label, rt, bucket key)
     if calc_ok:
@@ -1539,7 +1992,7 @@ def _fallback_n(l) -> int:
     return months_to_maturity(l["d_maturity"], l["d_extract"])
 
 
-def _write_summary(B, ws, facts, L, ln, stage, lg, ead, ecl, pm, S, GR, G):
+def _write_summary(B, ws, facts, L, ln, stage, lg, ead, ecl, pm, S):
     B.title(ws, f"ECL calculator: customer {facts['customer_id']}"
                 + (f" ({facts['customer_name']})" if facts["customer_name"] else ""))
     info = [
@@ -1557,14 +2010,16 @@ def _write_summary(B, ws, facts, L, ln, stage, lg, ead, ecl, pm, S, GR, G):
         B.put(ws, 3 + k, 1, lab, bold=True)
         c = B.put(ws, 3 + k, 4, v, "date" if lab == "Extract date" else None)
         c.alignment = B.Align(horizontal="left")
-    B.note(ws, 12, 1, "How to read it: Lines (inputs) -> Staging -> LGD -> PD "
-           "internal / PD external -> PD curves -> EAD -> ECL. Blue cells are the "
-           "run's inputs; black cells are formulas. Change an input and the "
-           "provision follows; the report column stays as booked. The settings (and "
-           "the overrides, when there are none) are on hidden tabs.")
+    B.note(ws, 12, 1, "How to read it, tab by tab: Facilities (the inputs) -> Rating "
+           "(how each rating was set) -> Staging (the customer's stage, then each "
+           "facility's) -> PD internal / PD external (the PD model and scenario "
+           "weights) -> PD curves -> LGD -> EAD -> ECL. Blue cells are the run's "
+           "inputs, black cells formulas: change an input and the provision follows. "
+           "The settings are on a hidden tab.")
     ws.cell(21, 1, "Per position").font = B.f_sub
     hr = 22
-    cols = ["Line", "Book", "Contract", "Portfolio", "Rating", "Stage", "Why",
+    cols = ["Line", "Book", "Contract", "Original contract", "Product", "Portfolio",
+            "Rating", "Rating set by", "Stage", "Why",
             "On balance", "Net collateral", "LGD", "PD lifetime", "Horizon",
             "ECL (this workbook)", "ECL (report)", "Difference", "Overlay",
             "ECL final", "Report final", "Check"]
@@ -1578,10 +2033,13 @@ def _write_summary(B, ws, facts, L, ln, stage, lg, ead, ecl, pm, S, GR, G):
         B.put(ws, rr, U["Line"], f"={ln(x, 'Line')}")
         B.put(ws, rr, U["Book"], f"={ln(x, 'Book')}")
         B.put(ws, rr, U["Contract"], f"={ln(x, 'Contract')}")
+        B.put(ws, rr, U["Original contract"], f"={ln(x, 'Original contract')}")
+        B.put(ws, rr, U["Product"], f"={ln(x, 'Account type')}")
         B.put(ws, rr, U["Portfolio"], f"={ln(x, 'Portfolio')}")
-        B.put(ws, rr, U["Rating"], f"={ln(x, 'Rating')}")
+        B.put(ws, rr, U["Rating"], f"={ln(x, 'Final rating')}")
+        B.put(ws, rr, U["Rating set by"], f"={ln(x, 'Rating set by')}")
         B.put(ws, rr, U["Stage"], f"={stage(x)}", "int")
-        B.put(ws, rr, U["Why"], f"={_a(GR[x], G['Why'], 'Staging')}")
+        B.put(ws, rr, U["Why"], f"={ln(x, 'Stage reason')}")
         B.put(ws, rr, U["On balance"], f"={lg[x]['onb']}", "amt")
         B.put(ws, rr, U["Net collateral"], f"={lg[x]['net']}", "amt")
         B.put(ws, rr, U["LGD"], f"={lg[x]['lgd']}", "pct")
@@ -1595,24 +2053,29 @@ def _write_summary(B, ws, facts, L, ln, stage, lg, ead, ecl, pm, S, GR, G):
         a, b = ecl[x]
         tot = f"SUM({_rng(a, 12, b, 12, 'ECL')})"
         onb = g("On balance")
+        # a position the model cannot price (no interest rate, say) reads
+        # "no ECL" rather than an error, so the totals still add up
         B.put(ws, rr, U["ECL (this workbook)"],
-              f"=IF({g('Stage')}=3,IF({S['stage3']}=\"zero\",0,MAX(0,{onb})),"
-              f"IF(AND({S['cap']},{onb}>0),MIN({tot},{onb}),{tot}))", "amt", key=True)
+              f"=IFERROR(IF({g('Stage')}=3,IF({S['stage3']}=\"zero\",0,MAX(0,{onb})),"
+              f"IF(AND({S['cap']},{onb}>0),MIN({tot},{onb}),{tot})),\"no ECL\")",
+              "amt", key=True)
         B.put(ws, rr, U["ECL (report)"], l["rep_ecl"], "amt", inp=True)
         B.put(ws, rr, U["Difference"],
-              f"=IF({g('ECL (report)')}=\"\",\"\",{g('ECL (this workbook)')}-"
-              f"{g('ECL (report)')})", "amt")
+              f"=IF(OR({g('ECL (report)')}=\"\",NOT(ISNUMBER({g('ECL (this workbook)')}))),"
+              f"\"\",{g('ECL (this workbook)')}-{g('ECL (report)')})", "amt")
         B.put(ws, rr, U["Overlay"], l["overlay"] if l["overlay"] is not None else 0,
               "amt", inp=True)
-        B.put(ws, rr, U["ECL final"], f"={g('ECL (this workbook)')}+{g('Overlay')}",
-              "amt")
+        B.put(ws, rr, U["ECL final"],
+              f"=IF(ISNUMBER({g('ECL (this workbook)')}),{g('ECL (this workbook)')}"
+              f"+{g('Overlay')},\"\")", "amt")
         B.put(ws, rr, U["Report final"], l["rep_final"], "amt", inp=True)
         tol = lambda a, b: f"ABS({a}-{b})<=MAX(0.01,1E-9*ABS({b}))"
         B.put(ws, rr, U["Check"],
-              f"=IF({g('ECL (report)')}=\"\",\"not in report\",IF(AND("
+              f"=IF({g('ECL (report)')}=\"\",\"not in report\","
+              f"IF(NOT(ISNUMBER({g('ECL (this workbook)')})),\"DIFFERS\",IF(AND("
               f"{tol(g('ECL (this workbook)'), g('ECL (report)'))},OR("
               f"{g('Report final')}=\"\",{tol(g('ECL final'), g('Report final'))})),"
-              f"\"OK\",\"DIFFERS\"))")
+              f"\"OK\",\"DIFFERS\")))")
     last = first + max(len(L), 1) - 1
     # totals by stage
     ws.cell(14, 1, "Totals").font = B.f_sub
@@ -1641,9 +2104,13 @@ def _write_summary(B, ws, facts, L, ln, stage, lg, ead, ecl, pm, S, GR, G):
     ws.conditional_formatting.add(rng, CellIsRule(
         operator="equal", formula=['"DIFFERS"'],
         fill=B.Fill("solid", fgColor="FFC7CE")))
-    B.widths(ws, {"A": 8, "B": 12, "C": 16, "D": 18, "E": 10, "F": 7, "G": 34,
-                  "H": 16, "I": 16, "J": 9, "K": 12, "L": 9, "M": 18, "N": 18,
-                  "O": 12, "P": 12, "Q": 16, "R": 16, "S": 10})
+    B.widths(ws, {_col_letter(U[n]): w for n, w in (
+        ("Line", 7), ("Book", 11), ("Contract", 15), ("Original contract", 20),
+        ("Product", 14), ("Portfolio", 15), ("Rating", 9), ("Rating set by", 34),
+        ("Stage", 7), ("Why", 34), ("On balance", 15), ("Net collateral", 15),
+        ("LGD", 9), ("PD lifetime", 12), ("Horizon", 9), ("ECL (this workbook)", 17),
+        ("ECL (report)", 17), ("Difference", 11), ("Overlay", 11), ("ECL final", 15),
+        ("Report final", 15), ("Check", 9))})
 
 
 def customer_ecl_workbook(run_dir, customer_id, dest=None):

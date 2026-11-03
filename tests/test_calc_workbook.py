@@ -63,7 +63,8 @@ def _am(rows):
 
 
 def make_run(tmp: Path, *, annuity: bool = True, stage3: str = "full_outstanding",
-             tamper_stpd: bool = False, overlay: bool = False) -> Path:
+             tamper_stpd: bool = False, overlay: bool = False,
+             reference: bool = True) -> Path:
     """A run folder: config_used from the package, Output with a handful of
     positions, and the report priced on them."""
     root = tmp / "run_00001"
@@ -113,14 +114,14 @@ def make_run(tmp: Path, *, annuity: bool = True, stage3: str = "full_outstanding
         [EXT, "3002", "C3", "Long Term", "Stage 2", "1/1/2019", "QDB 7", 0, 0, 90_000,
          "6/30/2027", 0.08, 1, "QAR", 0, 0.08, 4],
         # customer C4: Tasdeer, missing EIR on a second line, past maturity
-        [EXT, "4001", "C4", "Tasdeer", "", "1/1/2025", "QDB 3", 0, 0, 80_000,
+        [EXT, "4001", "C4", "Tasdeer", "", "1/1/2025", "QDB 4", 0, 0, 80_000,
          "12/31/2026", 0.05, 1, "QAR", 0, 0.05, 3],
-        [EXT, "4002", "C4", "Long Term", "", "1/1/2018", "QDB 3", 0, 0, 60_000,
+        [EXT, "4002", "C4", "Long Term", "", "1/1/2018", "QDB 4", 0, 0, 60_000,
          "3/31/2026", "", 1, "QAR", 0, 0.05, 4],
         # customer C5: watchlist and default flags from the staging file
         [EXT, "5001", "C5", "Long Term", "", "1/1/2020", "QDB 6+", 0, 0, 120_000,
          "6/30/2030", 0.06, 1, "QAR", 0, 0.06, 4],
-        [EXT, "6001", "C6", "Al Dhameen", "", "1/1/2020", "QDB 5", 0, 0, 700_000,
+        [EXT, "6001", "C6", "Al Dhameen", "", "1/1/2020", "QDB 6", 0, 0, 700_000,
          "6/30/2031", 0.04, 12, "QAR", 0, 0.04, 4],
     ])
     lend.to_csv(out / "AccountMaster_1.csv", index=False)
@@ -139,7 +140,7 @@ def make_run(tmp: Path, *, annuity: bool = True, stage3: str = "full_outstanding
     inv = _am([
         [EXT, "9001", "ISSUER", "Bond", "", "1/1/2024", "A2", 0, 0, 5_000_000,
          "6/30/2029", 0.04, "", "QAR", 0, 0.04, 3],
-        [EXT, "9002", "ISSUER", "Bond", "", "1/1/2024", "Baa1", 0, 0, 2_000_000,
+        [EXT, "9002", "ISSUER", "Bond", "", "1/1/2024", "Baa3", 0, 0, 2_000_000,
          "6/30/2032", 0.05, "", "QAR", 0, 0.05, 3],
     ])
     inv.to_csv(out / "AccountMaster_2.csv", index=False)
@@ -175,6 +176,25 @@ def make_run(tmp: Path, *, annuity: bool = True, stage3: str = "full_outstanding
         o.loc[hit, "Ecl Final Onbal"] = o.loc[hit, "Ecl Model Onbal"] + 1234.5
         o.loc[hit, "Cla Amount Onbal"] = o.loc[hit, "Ecl Final Onbal"]
         o.to_csv(out / "FinalEclReport_overlay_OV1.csv", index=False)
+    if reference:            # what the ETL keeps beside the run for the rating
+        # C1 rated in the customer master; C2 too, overridden in the run; C3, C5
+        # rated; C4 unrated, Agriculture: the program rating at 0 days past
+        # due; C6 unrated, Al Dhameen: the fallback; ISSUER: one grade on the
+        # external scale, one not (the investment fallback)
+        given = {"C1": ("QDB 4", ""), "C2": ("QDB 4", ""), "C3": ("QDB 7", ""),
+                 "C4": ("Unrated", "Agriculture"), "C5": ("QDB 6+", ""),
+                 "C6": ("", "Others")}
+        am1 = lend.reset_index(drop=True)
+        rows = [("AccountMaster_1", c, f"00{c}", k, "", d, *given[k])
+                for c, k, d in zip(am1["ContractId"], am1["CustomerId"],
+                                   am1["PastDueDays"])]
+        rows += [("AccountMaster_2", "9001", "9001", "ISSUER", "Issuer plc", 0, "A2", ""),
+                 ("AccountMaster_2", "9002", "9002", "ISSUER", "Issuer plc", 0, "NR", "")]
+        (root / "reference").mkdir()
+        pd.DataFrame(rows, columns=["File", "ContractId", "ContractIdOriginal",
+                                    "CustomerId", "CustomerName", "PastDueDays",
+                                    "RatingInput", "Sector"]).to_csv(
+            root / "reference" / "contracts.csv", index=False)
     ov = root / "overrides"
     ov.mkdir()
     pd.DataFrame([{"customer_id": "C2", "value": "QDB 5-",
@@ -250,11 +270,16 @@ class TestWorkbook:
         p = tmp_path / "c1.xlsx"
         customer_ecl_workbook(run, "C1", p)
         wb = openpyxl.load_workbook(p)
-        assert wb.sheetnames == ["Summary", "Lines", "Overrides", "Staging", "LGD",
-                                 "PD internal", "PD curves", "EAD", "ECL", "Settings"]
-        # the settings, and the overrides when the customer has none, are hidden
-        assert [ws.title for ws in wb if ws.sheet_state == "hidden"] == [
-            "Overrides", "Settings"]
+        assert wb.sheetnames == ["Summary", "Facilities", "Rating", "Staging",
+                                 "PD internal", "PD curves", "LGD", "EAD", "ECL",
+                                 "Settings"]
+        assert [ws.title for ws in wb if ws.sheet_state == "hidden"] == ["Settings"]
+        # plain column names: no LIC flag names anywhere a reader looks
+        for ws in wb:
+            if ws.sheet_state == "visible":
+                text = " ".join(str(c.value) for row in ws.iter_rows() for c in row
+                                if isinstance(c.value, str) and not c.value.startswith("="))
+                assert "IsLocal" not in text and "IsWatchlist" not in text, ws.title
         rows = summary_rows(wb)
         assert len(rows) == 5
         assert all(str(r["ECL (this workbook)"]).startswith("=") for r in rows)
@@ -315,6 +340,64 @@ class TestThePdCalculation:
         assert n == len(f["pd_model"]["calc_curves"]) > 0
 
 
+@pytest.mark.skipif(SOFFICE is None, reason="LibreOffice is needed to recalculate")
+class TestFromStartToEnd:
+    """How each rating was set, why each stage, and the scenario weights,
+    rebuilt by formula and equal to the run."""
+
+    SET_BY = {"C1": "Customer master", "C2": "Override in the run",
+              "C4": "Program lending: Agriculture, 0 days past due",
+              "C6": "Fallback: Al Dhameen Customers"}
+
+    @pytest.mark.parametrize("cust", ["C1", "C2", "C4", "C6", "ISSUER"])
+    def test_the_rating_is_rebuilt(self, run, tmp_path, cust):
+        f = customer_ecl_facts(run, cust)
+        p = tmp_path / f"{cust}.xlsx"
+        write_customer_workbook(f, p)
+        wb = recalc(p, tmp_path)
+        rows = summary_rows(wb)
+        for row, l in zip(rows, f["lines"]):
+            assert row["Rating"] == l["rating"], l["cid"]
+        if cust in self.SET_BY:
+            assert {r["How the rating was set"] for r in rows} == {self.SET_BY[cust]}
+        else:
+            assert [r["How the rating was set"] for r in rows] == [
+                "Investment extract", "Fallback: Investment Portfolio"]
+        checks = [c.value for row in wb["Rating"].iter_rows() for c in row
+                  if c.value in ("OK", "DIFFERS")]
+        assert checks and set(checks) == {"OK"}
+
+    def test_the_stage_says_why(self, run, tmp_path):
+        f = customer_ecl_facts(run, "C2")
+        p = tmp_path / "c2.xlsx"
+        write_customer_workbook(f, p)
+        rows = summary_rows(recalc(p, tmp_path))
+        assert [r["Reason"] for r in rows] == [
+            "More than 60 days past due", "Another facility of the customer is Stage 2 or 3"]
+
+    def test_the_weights_are_the_runs(self, run, tmp_path):
+        f = customer_ecl_facts(run, "C1")
+        pdm = f["pd_model"]
+        assert pdm["int_weights"] is not None           # the package config: auto
+        p = tmp_path / "c1.xlsx"
+        write_customer_workbook(f, p)
+        ws = recalc(p, tmp_path)["PD internal"]
+        names = [n for n, _ in pdm["scenarios"]]
+        hr = next(r for r in range(1, 80) if ws.cell(r, 1).value == "Scenario")
+        got = [ws.cell(hr + 1 + k, 3).value for k in range(len(names))]
+        assert [ws.cell(hr + 1 + k, 1).value for k in range(len(names))] == names
+        np.testing.assert_allclose(got, pdm["w_int"], rtol=0, atol=1e-12)
+
+    def test_a_run_that_kept_no_rating_inputs_shows_its_rating(self, tmp_path):
+        r = make_run(tmp_path, reference=False)
+        f = customer_ecl_facts(r, "C1")
+        assert f["rating"]["recorded"] is False
+        p = tmp_path / "c1.xlsx"
+        write_customer_workbook(f, p)
+        rows = summary_rows(recalc(p, tmp_path))
+        assert all(x["Rating"] == "QDB 4" and x["Check"] == "OK" for x in rows)
+
+
 def _keys_row(ws) -> int:
     """The row of the PD curves tab holding the curve labels."""
     for r in range(1, 80):
@@ -352,7 +435,7 @@ class TestRecalculated:
                                                                rel=1e-9, abs=1e-6)
         assert rows[0]["Stage"] == 3 and rows[0]["ECL (this workbook)"] == 0
         assert rows[1]["Stage"] == 2             # the manual stage; contagion
-        assert rows[1]["Reason"] == "Manual stage 2"  # lifts Stage 1 only
+        assert rows[1]["Reason"] == "Stage 2 in the account master"
 
     def test_an_overlay_is_added_to_the_model_figure(self, tmp_path):
         r = make_run(tmp_path, overlay=True)

@@ -40,7 +40,7 @@ def test_the_etl_keeps_the_source_id_and_the_name(tmp_path):
 
 
 def test_the_report_reads_them(tmp_path):
-    run = make_run(tmp_path)
+    run = make_run(tmp_path, reference=False)
     cm = pd.read_csv(run / "Output" / "CustomerMaster_1.csv", dtype=str)
     cm["CustomerName"] = ""          # as the LIC file carries it
     cm.to_csv(run / "Output" / "CustomerMaster_1.csv", index=False)
@@ -63,6 +63,34 @@ def test_the_report_reads_them(tmp_path):
 
 
 def test_a_run_without_the_reference_leaves_the_column_blank(tmp_path):
-    rep = build_final_ecl_report(make_run(tmp_path), write=False)
+    rep = build_final_ecl_report(make_run(tmp_path, reference=False), write=False)
     assert "Contract Id Original" in rep.columns
     assert (rep["Contract Id Original"].fillna("") == "").all()
+
+
+def test_the_etl_keeps_what_the_rating_is_built_from(tmp_path):
+    """The customer calculator rebuilds each rating from these: the rating in
+    the customer master, the sector (for program lending) and the facility's
+    own days past due; for investments, the extract's rating."""
+    view = pd.DataFrame({"contract_id_raw": ["001", "002", "003"],
+                         "contract_id": ["1", "2", "3"],
+                         "customer_id": ["C1", "C1", "C2"],
+                         "past_dues_days": [0.0, 45.0, 120.0]})
+    inv = pd.DataFrame({"contract_id": ["9"], "customer_id": ["BANK"]})
+    src = {"CustomerMaster": pd.DataFrame({"CUSTOMERID": ["C1", "C2"],
+                                           "CUSTOMERNAME": ["Alpha", "Beta"],
+                                           "RATING": ["QDB 4", "Unrated"]}),
+           "IndustryCode": pd.DataFrame({"CUSTOMERID": ["C1", "C2"],
+                                         "DESCRIPTION": ["4100 Construction",
+                                                         "0113 Growing of vegetables"]}),
+           "CustomerMasterInvestments": pd.DataFrame(),
+           "AccountMasterInvestments": pd.DataFrame({"CONTRACTID": ["9"],
+                                                     "RATING": ["A2"]})}
+    static = {"industry_sector_mapping": pd.DataFrame(
+        {"industry_code": ["113", "4100"], "sector": ["Agriculture", "Construction"]})}
+    _write_contract_reference(tmp_path, view, inv, src, static)
+    r = pd.read_csv(tmp_path / "reference" / "contracts.csv", dtype=str,
+                    keep_default_na=False)
+    assert list(r["RatingInput"]) == ["QDB 4", "QDB 4", "Unrated", "A2"]
+    assert list(r["Sector"]) == ["Construction", "Construction", "Agriculture", ""]
+    assert [float(x) for x in r["PastDueDays"]] == [0, 45, 120, 0]

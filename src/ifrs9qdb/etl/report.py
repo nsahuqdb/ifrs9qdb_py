@@ -671,8 +671,8 @@ def _contract_reference(out_dir, suffix: str, contract) -> pd.DataFrame:
     run), matched on the contract id and its occurrence. Blank for a run
     made before the file existed."""
     contract = as_id(pd.Series(contract)).reset_index(drop=True)
-    out = pd.DataFrame({"ContractIdOriginal": [""] * len(contract),
-                        "CustomerName": [""] * len(contract)})
+    cols = ["ContractIdOriginal", "CustomerName", "PastDueDays", "RatingInput", "Sector"]
+    out = pd.DataFrame({c: [""] * len(contract) for c in cols})
     p = Path(out_dir).parent / "reference" / "contracts.csv"
     if not p.is_file():
         return out
@@ -688,8 +688,10 @@ def _contract_reference(out_dir, suffix: str, contract) -> pd.DataFrame:
     r["key"] = rk + "#" + rk.groupby(rk).cumcount().astype(str)
     key = contract + "#" + contract.groupby(contract).cumcount().astype(str)
     m = r.drop_duplicates("key").set_index("key")
-    for c in ("ContractIdOriginal", "CustomerName"):
-        out[c] = key.map(m[c]).fillna("").to_numpy()
+    for c in cols:
+        if c in m.columns:
+            out[c] = key.map(m[c]).fillna("").to_numpy()
+    out.attrs["recorded"] = "RatingInput" in r.columns
     return out
 
 
