@@ -491,7 +491,7 @@ def compute_ecl(ctx: EclContext, frame: pd.DataFrame, lgd=None,
     """
     n = len(frame)
     out = {k: np.full(n, np.nan) for k in ("ecl", "lgd", "collcov", "impcov",
-                                           "pdlife")}
+                                           "pdlife", "pd12")}
     out["collval"] = np.zeros(n)
     shape = np.empty(n, dtype=object)
     horizon = np.zeros(n, dtype=int)
@@ -543,6 +543,8 @@ def compute_ecl(ctx: EclContext, frame: pd.DataFrame, lgd=None,
             if np.isfinite(tot):
                 out["impcov"][i] = tot / onb if onb > 0 else np.nan
         out["pdlife"][i] = _pd_lifetime_at(cm, st, matm)
+        # the twelve-month PD of the contract's curve, whatever its stage
+        out["pd12"][i] = _pd_lifetime_at(cm, 1, 12)
     res = pd.DataFrame(out, index=frame.index)
     res["shape"] = shape
     res["horizon"] = horizon
@@ -748,10 +750,15 @@ def _segment(out_dir, suffix, ctx: _Ctx, portfolio_map, entity_id,
     lgd, collcov = priced["lgd"].to_numpy(), priced["collcov"].to_numpy()
     ecl, impcov = priced["ecl"].to_numpy(), priced["impcov"].to_numpy()
     pdlife, collval = priced["pdlife"].to_numpy(), priced["collval"].to_numpy()
+    pd12 = priced["pd12"].to_numpy()
 
-    lgd_rate = np.where(np.isin(stage, [1, 2]), lgd, np.nan)
+    # Every stage carries its LGD: Stage 1 and 2 the model's, Stage 3 the
+    # residual one its ECL is priced at (LIC leaves LGD Rate blank there and
+    # fills Resid Lgd Rate only; both are filled here). The collateral value
+    # is shown for every stage, as the coverage already is.
     resid_lgd = np.where(stage == 3, 1.0, np.nan)
-    coll_value = np.where(stage == 3, collval, np.nan)
+    lgd_rate = np.where(np.isin(stage, [1, 2]), lgd, resid_lgd)
+    coll_value = collval
 
     def chr_col(name):
         c = _col(am, name)
@@ -792,7 +799,10 @@ def _segment(out_dir, suffix, ctx: _Ctx, portfolio_map, entity_id,
     rep["EAD"] = on_bal
     rep["EIR"] = e["eir"]
     rep["Is Initial Recognition"] = is_init
-    rep["PD 12M"] = am_num("PD12M")
+    # the extract's PD 12M where it has one (LIC leaves it blank), else the
+    # twelve-month PD of the curve the contract is priced on
+    pd12_in = am_num("PD12M")
+    rep["PD 12M"] = pd12_in.where(pd12_in.notna(), pd.Series(pd12))
     rep["Origination PD 12M"] = _num(org_get("OriginationPD12M"))
     rep["PD Lifetime Value"] = pdlife
     rep["LGD Rate"] = lgd_rate

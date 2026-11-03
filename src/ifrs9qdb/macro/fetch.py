@@ -174,19 +174,40 @@ def refresh(store: MacroStore, project_root=None, groups=None, datasets=None,
             cat = read_table("fred.csv", project_root)
             entry = {"dataset": "FRED", "label": "FRED series", "group": "FRED",
                      "source": "FRED"}
+            parts, notes, missing = [], [], []
             try:
                 if key:
                     s, o, info = Fred(key, transport=transport).fetch(
                         list(fred_ids or cat["series"]) or FRED_DEFAULT)
+                    parts.append((s, o))
+                    missing = list(info.get("missing", []))
+                    if info.get("error"):
+                        notes.append(f"FRED API: {info['error']}")
+                    # what the API did not give, the CSV download may (a bank
+                    # network often lets one through and not the other)
+                    rest = cat[cat["series"].astype(str).isin(missing)]
+                    if len(rest):
+                        s2, o2, info2 = Fred(transport=transport).fetch_csv(rest)
+                        if len(s2):
+                            parts.append((s2, o2))
+                            notes.append(f"{len(s2)} series from the CSV download")
+                        missing = list(info2.get("missing", []))
                 else:
                     s, o, info = Fred(transport=transport).fetch_csv(cat)
+                    parts.append((s, o))
+                    missing = list(info.get("missing", []))
+                    notes.append("no API key: the CSV download")
             except Exception as e:
-                failed(entry, str(e))
+                failed(entry, str(e).replace(key, "<key>") if key else str(e))
                 return "failed: " + str(e)[:160]
-            if not len(s):
-                failed(entry, "nothing returned: " + ", ".join(info.get("missing", [])))
+            parts = [(s, o) for s, o in parts if len(s)]
+            if not parts:
+                failed(entry, "; ".join(notes + ["nothing returned: " + ", ".join(missing)]))
                 return "failed"
-            keep(s, o, {**entry, "status": "ok", "missing": ", ".join(info.get("missing", []))})
+            s = pd.concat([p[0] for p in parts], ignore_index=True)
+            o = pd.concat([p[1] for p in parts], ignore_index=True)
+            keep(s, o, {**entry, "status": "ok", "missing": ", ".join(missing),
+                        "note": "; ".join(notes)})
             return f"{len(s):,} series"
         timed("FRED", one)
 

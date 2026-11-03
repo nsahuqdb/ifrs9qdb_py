@@ -559,3 +559,55 @@ class TestFredUnreachable:
         cat = pd.DataFrame({"series": ["A", "B", "C", "D"], "label": "x", "unit": "", "freq": "M"})
         s, o, info = Fred(transport=fake).fetch_csv(cat)
         assert len(calls) == 2 and info["missing"] == ["A", "B", "C", "D"] and s.empty
+
+
+class TestFredWithAKey:
+    """A key must not make FRED worse: the API blocked, the CSV download
+    still brings the series, and the reason is written down, key masked."""
+
+    KEY = "abc123secret"
+
+    def _fake(self, api_ok: bool, csv_ok: bool, calls: list):
+        def fake(url, headers):
+            calls.append(url)
+            if "api.stlouisfed.org" in url:
+                if not api_ok:
+                    return 0, b"timed out"
+                if "/observations" in url:
+                    return 200, (b'{"observations": [{"date": "2026-01-01", '
+                                 b'"value": "4.3"}]}')
+                return 200, (b'{"seriess": [{"frequency_short": "M", '
+                             b'"title": "Fed funds", "units": "percent"}]}')
+            if csv_ok:
+                return 200, b"observation_date,X\n2026-01-01,4.3\n2026-02-01,4.2\n"
+            return 0, b"timed out"
+        return fake
+
+    def _refresh(self, tmp_path, fake):
+        from ifrs9qdb.macro import MacroStore, refresh
+        return refresh(MacroStore(tmp_path / "store"), sources=("FRED",),
+                       fred_key=self.KEY, transport=fake)
+
+    def test_the_api_answers(self, tmp_path):
+        calls = []
+        r = self._refresh(tmp_path, self._fake(True, False, calls))
+        row = r["log"].iloc[0]
+        assert row["status"] == "ok" and r["series"] > 0
+        assert all("fredgraph" not in u for u in calls)
+
+    def test_a_blocked_api_falls_back_to_the_csv_download(self, tmp_path):
+        calls = []
+        r = self._refresh(tmp_path, self._fake(False, True, calls))
+        row = r["log"].iloc[0]
+        assert row["status"] == "ok" and r["series"] > 0
+        assert "CSV download" in row["note"] and "FRED API" in row["note"]
+        # two silent API calls, then no more waiting on the API
+        assert sum("api.stlouisfed.org" in u for u in calls) == 2
+        assert self.KEY not in str(r["log"].to_dict())
+
+    def test_both_blocked_says_why(self, tmp_path):
+        calls = []
+        r = self._refresh(tmp_path, self._fake(False, False, calls))
+        row = r["log"].iloc[0]
+        assert row["status"] == "failed"
+        assert "FRED API" in row["error"] and self.KEY not in row["error"]

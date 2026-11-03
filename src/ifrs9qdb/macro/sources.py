@@ -754,18 +754,32 @@ class Fred:
         return s, o, {"missing": missing}
 
     def fetch(self, ids: list[str]) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+        """With a key: the FRED API, series by series. A request that fails is
+        recorded (``info['error']``, the key never in it) rather than
+        swallowed; two in a row without an answer mean the API is not
+        reachable from here, so the rest are not waited on."""
         if not self.key:
             raise IOError("FRED needs an API key (FRED_API_KEY).")
         srows, orows, missing = [], [], []
+        first_error, dead = "", 0
         for sid0 in ids:
+            if dead >= 2:
+                missing.append(sid0)
+                continue
             q = urllib.parse.urlencode({"series_id": sid0, "api_key": self.key,
                                         "file_type": "json"})
             try:
-                info = json.loads(_get(self.transport, f"{self.BASE}/series?{q}"))
+                info = json.loads(_get(self.transport, f"{self.BASE}/series?{q}",
+                                       timeout=FRED_TIMEOUT))
                 s = (info.get("seriess") or [{}])[0]
                 obs = json.loads(_get(self.transport,
-                                      f"{self.BASE}/series/observations?{q}"))
-            except Exception:
+                                      f"{self.BASE}/series/observations?{q}",
+                                      timeout=FRED_TIMEOUT))
+                dead = 0
+            except Exception as e:
+                msg = str(e).replace(self.key, "<key>")
+                first_error = first_error or msg[:300]
+                dead += 1 if ("HTTP 0" in msg or "timed out" in msg.lower()) else 0
                 missing.append(sid0)
                 continue
             freq = str(s.get("frequency_short", "A"))[:1].upper()
@@ -785,11 +799,12 @@ class Fred:
             df = df.groupby("period", as_index=False)["value"].mean()
             for p, v in zip(df["period"], df["value"]):
                 orows.append({"series_id": sid, "period": p, "value": v})
+            _sleep(PAUSE / 4)
         if not srows:
             s, o = empty_frames()
-            return s, o, {"missing": missing}
+            return s, o, {"missing": missing, "error": first_error}
         return (pd.DataFrame(srows)[SERIES_COLS], pd.DataFrame(orows),
-                {"missing": missing})
+                {"missing": missing, "error": first_error})
 
 
 # ------------------------------------------------------------------- files ---

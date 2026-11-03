@@ -116,6 +116,10 @@ def normalise(df: pd.DataFrame) -> pd.DataFrame:
               "default_flag", "watchlist", "insolvency", "restructured",
               "default_gcc", "local2", "local3", "local4", "local5", "local6"):
         out[c] = pd.to_numeric(out[c], errors="coerce")
+    # Stage 3 is priced at its residual LGD (resid_lgd); the report now
+    # repeats it in LGD Rate, where LIC leaves a blank. The LGD analyses are
+    # of the model LGD, Stage 1 and 2, as before.
+    out.loc[out["stage"] == 3, "lgd"] = np.nan
     for c in ("portfolio", "account_type", "rating", "rating_type"):
         out[c] = out[c].astype("string")
     # Ids are join keys, so they go through the same normalisation the engine
