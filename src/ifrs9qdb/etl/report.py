@@ -52,7 +52,7 @@ __all__ = ["REPORT_COLUMNS", "OVERLAY_COLUMNS", "build_final_ecl_report",
 
 REPORT_COLUMNS = [
     "Run Id", "Enterprise Entity Id", "Extract Date", "Contract Id",
-    "Account Code", "Portfolio Code", "Customer Id", "Customer Code",
+    "Contract Id Original", "Account Code", "Portfolio Code", "Customer Id", "Customer Code",
     "Customer Name", "Account Type", "Past Due Days", "Lim Id", "Open Date",
     "Time From Open Date", "Maturity Date", "Expected Maturity Date",
     "Time To Expected Maturity", "Rating", "Origination Rating", "Rating Type",
@@ -665,6 +665,34 @@ def ecl_frame(out_dir, portfolio_map: dict | None = None,
     return f
 
 
+def _contract_reference(out_dir, suffix: str, contract) -> pd.DataFrame:
+    """The source contract id and customer name of each row of one book, from
+    the run's ``reference/contracts.csv`` (written by the ETL beside the
+    run), matched on the contract id and its occurrence. Blank for a run
+    made before the file existed."""
+    contract = as_id(pd.Series(contract)).reset_index(drop=True)
+    out = pd.DataFrame({"ContractIdOriginal": [""] * len(contract),
+                        "CustomerName": [""] * len(contract)})
+    p = Path(out_dir).parent / "reference" / "contracts.csv"
+    if not p.is_file():
+        return out
+    try:
+        r = pd.read_csv(p, dtype=str, keep_default_na=False)
+    except Exception:
+        return out
+    r = r[r["File"] == f"AccountMaster{suffix}"].copy()
+    if not len(r):
+        return out
+    rk = as_id(r["ContractId"]).reset_index(drop=True)
+    r = r.reset_index(drop=True)
+    r["key"] = rk + "#" + rk.groupby(rk).cumcount().astype(str)
+    key = contract + "#" + contract.groupby(contract).cumcount().astype(str)
+    m = r.drop_duplicates("key").set_index("key")
+    for c in ("ContractIdOriginal", "CustomerName"):
+        out[c] = key.map(m[c]).fillna("").to_numpy()
+    return out
+
+
 def _segment(out_dir, suffix, ctx: _Ctx, portfolio_map, entity_id,
              run_id_label, dpd_stage2_threshold) -> pd.DataFrame | None:
     """R's .fer_build_segment(): one book's rows of the report."""
@@ -733,11 +761,17 @@ def _segment(out_dir, suffix, ctx: _Ctx, portfolio_map, entity_id,
     rep["Enterprise Entity Id"] = entity_id
     rep["Extract Date"] = chr_col("ExtractDate")
     rep["Contract Id"] = contract
+    ref = _contract_reference(out_dir, suffix, contract)
+    rep["Contract Id Original"] = ref["ContractIdOriginal"]
     rep["Account Code"] = chr_col("AccountCode")
     rep["Portfolio Code"] = e["portfolio"]
     rep["Customer Id"] = cust
     rep["Customer Code"] = cm_get("CustomerCode")
-    rep["Customer Name"] = cm_get("CustomerName")
+    # the LIC customer master leaves the name blank: the source extract's
+    # name, from the run's contract reference, fills it
+    name = cm_get("CustomerName").reset_index(drop=True)
+    blank = name.isna() | (name.astype(str).str.strip() == "")
+    rep["Customer Name"] = name.where(~blank, ref["CustomerName"])
     rep["Account Type"] = e["account_type"]
     rep["Past Due Days"] = e["dpd"]
     rep["Lim Id"] = chr_col("LimId")

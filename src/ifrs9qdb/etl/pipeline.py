@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from ..audit_log import audit_event
+from ..ids import as_id
 from .customer import derive_customer_flags, investment_customer_ids
 from .lending import (build_account_master, transform_investments,
                       transform_lending)
@@ -422,6 +423,7 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
         st.inv = inv
         tables["AccountMaster_2.csv"] = build_account_master(inv, extract_date,
                                                              investments=True)
+        _write_contract_reference(run_dir, view, inv, src)
         result.steps.append({"step": "Investment accounts", "ok": True,
                              "detail": f"{len(inv):,} accounts"})
 
@@ -927,6 +929,56 @@ def _write_customer_sectors(run_dir: Path, view, industry, static) -> None:
         pd.DataFrame({"CustomerId": ids.to_numpy(),
                       "Sector": sec.fillna("").to_numpy()}).to_csv(
             d / "customer_sectors.csv", index=False)
+    except Exception:
+        pass
+
+
+CONTRACT_REFERENCE = Path("reference") / "contracts.csv"
+
+
+def _write_contract_reference(run_dir: Path, view, inv, src) -> None:
+    """Each AccountMaster row's source contract id and customer name, for the
+    report.
+
+    The LIC files carry the transformed contract id (off-balance product codes
+    substituted, leading zeros dropped) and a blank customer name, so both are
+    kept here, beside the run (``reference/contracts.csv``), not in
+    ``Output/``: the LIC file set is unchanged, and a failure here can never
+    fail a run. Rows follow AccountMaster_1 then AccountMaster_2."""
+    try:
+        from .lending import drop_repeated_headers
+
+        def names(raw) -> dict:
+            if raw is None or not len(raw):
+                return {}
+            r = drop_repeated_headers(raw)
+            ids = as_id(pick(r, "CUSTOMERID", "CustomerId", default=""))
+            nm = pick(r, "CUSTOMERNAME", "CustomerName", default="")
+            nm = nm.astype(str).str.strip().replace({"nan": "", "None": ""})
+            return {i: n for i, n in zip(ids, nm) if i and n}
+
+        rows = []
+        if view is not None and len(view):
+            lend = names(src["CustomerMaster"])
+            for cid, raw, cust in zip(view["contract_id"].astype(str),
+                                      view["contract_id_raw"].astype(str),
+                                      as_id(view["customer_id"])):
+                rows.append(("AccountMaster_1", cid, raw, cust, lend.get(cust, "")))
+        if inv is not None and len(inv):
+            book = names(src["CustomerMasterInvestments"])
+            am2 = drop_repeated_headers(src["AccountMasterInvestments"])
+            raw2 = as_id(pick(am2, "CONTRACTID", "ContractId", "ACCOUNTID",
+                              default=""))
+            if len(raw2) != len(inv):
+                raw2 = inv["contract_id"].astype(str)
+            # the investment customer id is the counterparty's name
+            for cid, raw, cust in zip(inv["contract_id"].astype(str), raw2,
+                                      inv["customer_id"].astype(str)):
+                rows.append(("AccountMaster_2", cid, raw, cust, book.get(cust) or cust))
+        p = Path(run_dir) / CONTRACT_REFERENCE
+        p.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(rows, columns=["File", "ContractId", "ContractIdOriginal",
+                                    "CustomerId", "CustomerName"]).to_csv(p, index=False)
     except Exception:
         pass
 

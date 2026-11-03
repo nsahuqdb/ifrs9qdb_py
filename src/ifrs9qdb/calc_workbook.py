@@ -153,11 +153,25 @@ def _date(v):
     return t.to_pydatetime().replace(tzinfo=None)
 
 
+def _reference_names(out_dir: Path) -> dict:
+    """Customer id -> name from the run's contract reference (the LIC customer
+    master leaves the name blank)."""
+    p = Path(out_dir).parent / "reference" / "contracts.csv"
+    if not p.is_file():
+        return {}
+    try:
+        r = pd.read_csv(p, dtype=str, keep_default_na=False)
+    except Exception:
+        return {}
+    return {a: b for a, b in zip(as_id(r["CustomerId"]), r["CustomerName"]) if b}
+
+
 def run_customers(run_dir) -> pd.DataFrame:
     """Every customer in a run's books: id, name, positions, book(s) -- what
     the app's customer picker offers."""
     from .etl.report import read_output_csv, _chr, _col
     out_dir = _out_dir(_run_root(run_dir))
+    ref = _reference_names(out_dir)
     rows = []
     for suffix, book in (("_1", "Lending"), ("_2", "Investments")):
         am = read_output_csv(out_dir, f"AccountMaster{suffix}.csv")
@@ -176,7 +190,7 @@ def run_customers(run_dir) -> pd.DataFrame:
         g = d.groupby("customer_id").agg(positions=("on_balance", "size"),
                                          on_balance=("on_balance", "sum"))
         g["book"] = book
-        g["customer_name"] = [names.get(c, "") for c in g.index]
+        g["customer_name"] = [names.get(c) or ref.get(c, "") for c in g.index]
         rows.append(g.reset_index())
     if not rows:
         return pd.DataFrame(columns=["customer_id", "customer_name", "book",
@@ -401,6 +415,7 @@ def customer_ecl_facts(run_dir, customer_id) -> dict:
         if len(hit):
             name = _str(_chr(_col(hit, "CustomerName")).iloc[0])
             break
+    name = name or _reference_names(out_dir).get(cust, "")
 
     # ratings -> buckets, as the curve lookup reads Ratings.csv
     rat = read_output_csv(out_dir, "Ratings.csv")

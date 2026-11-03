@@ -112,12 +112,12 @@ class TestTheLifecycle:
     def test_the_happy_path(self, project):
         _make(project)
         root = project / "config_snapshots"
-        for status, who in (("tested", "nsahu"), ("pending_final", "nsahu"),
-                            ("approved", "priya"), ("archived", "priya")):
+        for status, who in (("tested", "nsahu"), ("approved", "priya"),
+                            ("archived", "priya")):
             m = S.promote_snapshot("v1", status, who, "moving on",
                                    snapshots_root=root)
             assert m["status"] == status
-        assert len(m["transitions"]) == 4
+        assert len(m["transitions"]) == 3
 
     def test_an_illegal_transition_is_refused(self, project):
         _make(project)
@@ -149,29 +149,36 @@ class TestTheLifecycle:
         _make(project)
         root = project / "config_snapshots"
         S.promote_snapshot("v1", "tested", "nsahu", "tested", snapshots_root=root)
-        S.promote_snapshot("v1", "pending_final", "nsahu", "submitting",
-                           snapshots_root=root)
         m = S.promote_snapshot("v1", "approved", "priya", "reviewed the diff",
                                snapshots_root=root)
         assert m["approved_by"] == "priya"
         assert m["approval_reason"] == "reviewed the diff"
 
-    def test_a_rejected_snapshot_goes_back_to_draft(self, project):
+    def test_tested_and_rejected_never_go_back_to_draft(self, project):
+        """Runs may have used it once tested: a fix is a new draft."""
         _make(project)
         root = project / "config_snapshots"
         S.promote_snapshot("v1", "tested", "nsahu", "t", snapshots_root=root)
-        S.promote_snapshot("v1", "pending_final", "nsahu", "s", snapshots_root=root)
+        with pytest.raises(ValueError, match="illegal transition"):
+            S.promote_snapshot("v1", "draft", "nsahu", "reopen", snapshots_root=root)
         S.promote_snapshot("v1", "rejected", "priya", "weights look wrong",
                            snapshots_root=root)
-        m = S.promote_snapshot("v1", "draft", "nsahu", "fixing",
-                               snapshots_root=root)
-        assert m["status"] == "draft"
+        with pytest.raises(ValueError, match="illegal transition"):
+            S.promote_snapshot("v1", "draft", "nsahu", "fixing", snapshots_root=root)
+
+    def test_which_runs_may_use_a_version(self):
+        assert S.snapshot_usable("draft", "unofficial")[0] is False
+        assert S.snapshot_usable("tested", "unofficial") == (True, "")
+        assert S.snapshot_usable("tested", "official")[0] is False
+        assert S.snapshot_usable("approved", "official") == (True, "")
+        assert S.snapshot_usable("pending_final", "unofficial") == (True, "")
+        assert S.snapshot_usable("rejected", "unofficial")[0] is False
 
     def test_an_archived_snapshot_is_terminal(self, project):
         _make(project)
         root = project / "config_snapshots"
-        for s, w in (("tested", "nsahu"), ("pending_final", "nsahu"),
-                     ("approved", "priya"), ("archived", "priya")):
+        for s, w in (("tested", "nsahu"), ("approved", "priya"),
+                     ("archived", "priya")):
             S.promote_snapshot("v1", s, w, "x", snapshots_root=root)
         with pytest.raises(ValueError, match="illegal transition"):
             S.promote_snapshot("v1", "draft", "nsahu", "reopen",
@@ -182,8 +189,9 @@ class TestTheLifecycle:
         root = project / "config_snapshots"
         p = root / "v1" / "snapshot.yml"
         meta = yaml.safe_load(p.read_text())
-        meta["status"] = "pending"          # as an older snapshot has it
+        meta["status"] = "pending_final"    # submitted, in the earlier lifecycle
         p.write_text(yaml.safe_dump(meta))
+        assert S.list_snapshots(root)["status"].iloc[0] == "tested"
         m = S.promote_snapshot("v1", "approved", "priya", "fine",
                                snapshots_root=root)
         assert m["status"] == "approved"
@@ -200,8 +208,6 @@ class TestSeparationOfDuties:
         root = project / "config_snapshots"
         _make(project)
         S.promote_snapshot("v1", "tested", "nsahu", "t", snapshots_root=root)
-        S.promote_snapshot("v1", "pending_final", "nsahu", "s",
-                           snapshots_root=root)
         return root
 
     def test_the_creator_cannot_give_the_final_approval(self, project):
@@ -211,16 +217,21 @@ class TestSeparationOfDuties:
                                snapshots_root=root,
                                config_path=self._cfg(project))
 
-    def test_the_creator_may_test_and_submit_their_own(self, project):
-        """Those are their own work; only the final step is gated."""
+    def test_the_creator_may_mark_their_own_tested(self, project):
+        """That is their own work; only the approval is gated."""
         root = project / "config_snapshots"
         _make(project)
-        cfg = self._cfg(project)
-        S.promote_snapshot("v1", "tested", "nsahu", "t", snapshots_root=root,
-                           config_path=cfg)
-        m = S.promote_snapshot("v1", "pending_final", "nsahu", "s",
-                               snapshots_root=root, config_path=cfg)
-        assert m["status"] == "pending_final"
+        m = S.promote_snapshot("v1", "tested", "nsahu", "t", snapshots_root=root,
+                               config_path=self._cfg(project))
+        assert m["status"] == "tested"
+
+    def test_the_tester_cannot_approve_either(self, project):
+        root = project / "config_snapshots"
+        _make(project)                                   # created by nsahu
+        S.promote_snapshot("v1", "tested", "omar", "t", snapshots_root=root)
+        with pytest.raises(PermissionError, match="separation of duties"):
+            S.promote_snapshot("v1", "approved", "omar", "fine", snapshots_root=root,
+                               config_path=self._cfg(project))
 
     def test_somebody_else_may_approve(self, project):
         root = self._to_pending(project)

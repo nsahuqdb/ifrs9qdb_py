@@ -286,9 +286,19 @@ def read_overlays(path) -> list[Overlay]:
 # The separation matters because the two have different lifetimes: a bundle is
 # reviewed and approved by people and lives in config, while the flattened
 # overlays exist only for the length of one calculation.
+#
+# The lifecycle is a config version's: draft -> tested -> approved, or
+# rejected. Only a draft may be edited or removed, and a draft is applied to
+# no run. The maker marks it TESTED, which locks it and lets unofficial runs
+# use it; somebody else approves it, and only an approved overlay may be
+# applied to an official run. A change after that is a new draft, copied from
+# it. ``pending`` (submitted, in the earlier lifecycle) is read as tested.
 # ===========================================================================
 
-OVERLAY_STATUSES = ("draft", "pending", "approved", "rejected")
+OVERLAY_STATUSES = ("draft", "tested", "approved", "rejected")
+OVERLAY_TRANSITIONS = {"draft": ("tested",), "tested": ("approved", "rejected"),
+                       "approved": (), "rejected": ()}
+_LEGACY_OVERLAY_STATUS = {"pending": "tested"}
 OVERLAY_LEVELS = ("stage", "portfolio", "rating", "flag", "sector",
                   "customer", "contract", "whole_book")
 
@@ -312,6 +322,8 @@ __all__ += ["OVERLAY_STATUSES", "OVERLAY_LEVELS", "LIC_COLUMNS", "FLAG_COLUMNS",
             "rule_selector", "bundle_to_overlays", "validate_overlay_bundle",
             "read_overlay_bundles", "write_overlay_bundles", "get_overlay",
             "upsert_overlay", "remove_overlay", "set_overlay_status",
+            "OVERLAY_TRANSITIONS", "overlay_status", "overlay_makers",
+            "overlay_usable",
             "apply_overlay_bundle", "apply_overlay_to_run",
             "list_applied_overlays", "remove_applied_overlay",
             "preview_overlays"]
@@ -433,7 +445,42 @@ def read_overlay_bundles(path) -> list[dict]:
     except Exception:
         return []
     items = data.get("overlays") if isinstance(data, dict) else data
-    return [b for b in (items or []) if isinstance(b, dict)]
+    out = [b for b in (items or []) if isinstance(b, dict)]
+    for b in out:                      # the earlier lifecycle's names
+        b["status"] = overlay_status(b)
+    return out
+
+
+def overlay_status(bundle: dict) -> str:
+    """A bundle's status as today's lifecycle reads it."""
+    s = str((bundle or {}).get("status") or "draft")
+    return _LEGACY_OVERLAY_STATUS.get(s, s)
+
+
+def overlay_makers(bundle: dict) -> set[str]:
+    """Who made the overlay, lower case: whoever created, edited or marked it
+    tested. None of them may approve it where separation is enforced."""
+    out = {str(bundle.get(k) or "").strip().lower() for k in ("created_by", "tested_by")}
+    out |= {str(t.get("by") or "").strip().lower()
+            for t in bundle.get("transitions") or []
+            if t.get("to") in ("draft", "tested", "pending")}
+    return out - {""}
+
+
+def overlay_usable(bundle: dict, run_type: str = "unofficial") -> tuple[bool, str]:
+    """Whether the overlay may be applied to a run of ``run_type``, and why
+    not when it may not: tested or approved for an unofficial run, approved
+    for an official one."""
+    st = overlay_status(bundle)
+    if st == "approved" or (st == "tested" and run_type != "official"):
+        return True, ""
+    if st == "tested":
+        return False, ("An official run takes an approved overlay only; this one is "
+                       "tested and awaits approval.")
+    if st == "draft":
+        return False, ("A draft overlay is applied to no run. Mark it tested on the "
+                       "Management overlay page first (it is then locked).")
+    return False, f"An overlay that is {st} cannot be applied."
 
 
 def write_overlay_bundles(path, bundles: list[dict]) -> Path:
@@ -487,12 +534,16 @@ def remove_overlay(overlay_id: str, path) -> bool:
 
 
 def set_overlay_status(overlay_id: str, to: str, by: str, reason: str,
-                       path) -> dict:
-    """Move a bundle's approval status, recording who and why.
+                       path, enforce_separation: bool = False) -> dict:
+    """Move a bundle's approval status, recording who and why: draft to
+    tested, tested to approved or rejected (OVERLAY_TRANSITIONS). With
+    ``enforce_separation`` the approver may be neither the creator nor the
+    tester.
 
     The transition list is append-only: an overlay that was rejected and later
     approved should read as exactly that, not as one that was always approved.
     """
+    to = _LEGACY_OVERLAY_STATUS.get(to, to)
     if to not in OVERLAY_STATUSES:
         raise ValueError(f"invalid status {to!r}; allowed: "
                          f"{', '.join(OVERLAY_STATUSES)}")
@@ -503,12 +554,22 @@ def set_overlay_status(overlay_id: str, to: str, by: str, reason: str,
     bundle = get_overlay(overlay_id, path)
     if bundle is None:
         raise FileNotFoundError(f"overlay {overlay_id!r} not found")
+    cur = overlay_status(bundle)
+    if to not in OVERLAY_TRANSITIONS.get(cur, ()):
+        allowed = OVERLAY_TRANSITIONS.get(cur, ())
+        raise ValueError(f"An overlay that is {cur} cannot move to {to}. Allowed: "
+                         f"{', '.join(allowed) or 'none'}.")
+    if to == "approved" and enforce_separation and \
+            str(by).strip().lower() in overlay_makers(bundle):
+        raise PermissionError(f"separation of duties is enforced: {by!r} created or "
+                              "tested this overlay and cannot also approve it.")
     import datetime as _d
+    at = _d.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S")
     bundle.setdefault("transitions", []).append({
-        "to": to, "by": by,
-        "at": _d.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S"),
-        "reason": reason})
+        "to": to, "by": by, "at": at, "reason": reason})
     bundle["status"] = to
+    if to in ("tested", "approved"):
+        bundle[f"{to}_by"], bundle[f"{to}_at"] = by, at
     # Not validated: a bundle already on file can be rejected even if it would
     # no longer pass, and refusing to record that would be worse.
     upsert_overlay(bundle, path, validate=False)

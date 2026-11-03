@@ -5,20 +5,22 @@ with a lifecycle of its own. It exists because "what changed?" is the first
 question asked of a provision that moved, and the answer has to be a file
 rather than a memory.
 
-The lifecycle, and it is one-way except where marked:
+The lifecycle, one way:
 
-    draft ──► tested ──► pending_final ──► approved ──► archived
-      ▲         │            │   │
-      └─────────┘            │   └──► rejected ──► (clone to a new draft)
-                             └──────► tested
+    draft ──► tested ──► approved ──► archived
+                 │
+                 └──► rejected ──► (copy to a new draft)
 
-Only a DRAFT is editable. That is the point of `tested`: the creator locks
-their own snapshot before impact-testing it, so the numbers being tested
-cannot move underneath the test.
+Only a DRAFT is editable, and a draft cannot be used in a run. The maker marks
+it TESTED, which locks it: from then on unofficial runs may use it, so it can
+never change or go back to draft underneath the runs that used it. Somebody
+else APPROVES it (or rejects it) from the approval queue, and only an approved
+version may be used in an official run. A change after that is a new draft,
+copied from it. The statuses of the earlier lifecycle are read as today's:
+``pending`` and ``pending_final`` (submitted for approval) as tested.
 
-Separation of duties applies to the FINAL approval only. The creator may test
-and submit their own snapshot -- those are their own work -- but somebody else
-must approve it.
+Separation of duties applies to the approval: the approver may be neither the
+version's creator nor whoever marked it tested.
 
 A snapshot is layered: a new version can be CLONED from an existing one rather
 than from the live config, so "v3 based on v2" literally starts from v2's
@@ -40,24 +42,28 @@ import yaml
 from .audit_log import audit_event
 
 __all__ = ["SNAPSHOT_STATUSES", "ALLOWED_TRANSITIONS", "EDITABLE_FILES",
+           "normalise_snapshot_status", "snapshot_usable",
            "snapshot_dir", "snapshot_paths", "read_snapshot_metadata",
            "list_snapshots", "create_snapshot", "clone_snapshot",
            "promote_snapshot", "diff_snapshots", "editable_snapshot_files",
            "save_snapshot_yaml", "save_snapshot_csv",
            "read_static_csv_with_header", "write_static_csv_with_header"]
 
-SNAPSHOT_STATUSES = ("draft", "tested", "pending_final", "approved",
-                     "archived", "rejected", "pending")
+SNAPSHOT_STATUSES = ("draft", "tested", "approved", "archived", "rejected")
 
-# "pending" is the legacy name for pending_final and is read, never written.
+# the earlier lifecycle's statuses, read as today's and never written
+_LEGACY_STATUS = {"pending": "tested", "pending_final": "tested"}
+
 ALLOWED_TRANSITIONS = {
     "draft": ("tested",),
-    "tested": ("pending_final", "draft"),
-    "pending_final": ("approved", "rejected", "tested"),
+    "tested": ("approved", "rejected"),
     "approved": ("archived",),
-    "rejected": ("draft",),
+    "rejected": (),
     "archived": (),
 }
+
+# which statuses a run may use, by run type
+_USABLE = {"unofficial": ("tested", "approved"), "official": ("approved",)}
 
 _LABEL = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -178,9 +184,29 @@ def read_snapshot_metadata(label: str, snapshots_root=None) -> dict | None:
     return meta
 
 
-def _normalise_status(s) -> str:
+def normalise_snapshot_status(s) -> str:
+    """A version's status as today's lifecycle reads it."""
     s = str(s or "draft")
-    return "pending_final" if s == "pending" else s
+    return _LEGACY_STATUS.get(s, s)
+
+
+_normalise_status = normalise_snapshot_status
+
+
+def snapshot_usable(status, run_type: str = "unofficial") -> tuple[bool, str]:
+    """Whether a run of ``run_type`` may use a version in ``status``, and why
+    not when it may not."""
+    st = normalise_snapshot_status(status)
+    ok = st in _USABLE.get(run_type, _USABLE["unofficial"])
+    if ok:
+        return True, ""
+    if run_type == "official":
+        return False, (f"An official run needs an approved config version; this one "
+                       f"is {st}.")
+    if st == "draft":
+        return False, ("A draft config version cannot be used in a run. Mark it "
+                       "tested on Config versions first (it is then locked).")
+    return False, f"A config version that is {st} cannot be used in a run."
 
 
 def list_snapshots(snapshots_root=None) -> pd.DataFrame:
@@ -390,8 +416,7 @@ def promote_snapshot(label: str, status: str, approved_by=None, reason: str = ""
     who marked a snapshot tested, and why, is what makes the trail readable
     afterwards.
     """
-    if status == "pending":
-        status = "pending_final"
+    status = normalise_snapshot_status(status)
     if status not in SNAPSHOT_STATUSES:
         raise ValueError(f"unknown status {status!r}; allowed: "
                          f"{', '.join(SNAPSHOT_STATUSES)}")
@@ -415,13 +440,13 @@ def promote_snapshot(label: str, status: str, approved_by=None, reason: str = ""
 
     if status == "approved" and \
             _approval_config(config_path)["enforce_separation_of_duties"]:
-        creator = str(meta.get("created_by") or "").strip()
-        if creator and creator.lower() == by.lower():
+        makers = {str(meta.get(k) or "").strip().lower()
+                  for k in ("created_by", "tested_by")} - {""}
+        if by.lower() in makers:
             raise PermissionError(
-                f"separation of duties is enforced: {by!r} created this "
-                "snapshot and cannot also approve it. A different user must "
-                "approve. Marking it tested and submitting it are their own "
-                "work and remain allowed.")
+                f"separation of duties is enforced: {by!r} created or tested "
+                "this version and cannot also approve it. A different user must "
+                "approve it.")
 
     record = {"at": _now(), "by": by, "from": current, "to": status,
               "reason": str(reason).strip()}

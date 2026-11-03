@@ -290,21 +290,25 @@ A snapshot freezes the config and the static reference together under a label.
 It exists because "what changed?" is the first question asked of a provision
 that moved, and the answer has to be a file rather than a memory.
 
-The lifecycle is the R's, exactly:
+The lifecycle (simplified from the R's in 0.45; overlays follow the same one):
 
-    draft ──► tested ──► pending_final ──► approved ──► archived
-      ▲         │            │   │
-      └─────────┘            │   └──► rejected ──► (clone to a new draft)
-                             └──────► tested
+    draft ──► tested ──► approved ──► archived
+                 │
+                 └──► rejected ──► (copy to a new draft)
+
+A draft is used in no run; tested (marked by its maker, locked) may be used in
+unofficial runs; approved (by somebody else, in the Approval queue) in
+official runs. Nothing goes back to draft. The R's pending_final is read as
+tested.
 
 Three things in it are easy to get wrong and all three are pinned by tests:
 
 * **Only a DRAFT is editable.** That is what `tested` is for — the creator
   locks their own snapshot before impact-testing it, so the numbers being
   tested cannot move underneath the test.
-* **Separation of duties applies to the FINAL approval only.** The creator may
-  mark their own snapshot tested and submit it; those are their own work. Only
-  the approval is gated.
+* **Separation of duties applies to the approval only.** The creator marks
+  their own snapshot tested; the approver may be neither the creator nor the
+  tester.
 * **A child starts from its PARENT, not from live.** "v3 based on v2" begins
   as v2's frozen content at any depth of the chain. A test changes the live
   config after v1 is cut and asserts v2 still carries v1's value.

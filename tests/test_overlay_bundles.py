@@ -108,23 +108,57 @@ class TestTheRegistry:
 
 class TestApprovalTrail:
     def test_the_trail_is_append_only(self, tmp_path, bundle):
-        """An overlay rejected then approved should read as exactly that."""
         p = tmp_path / "overlays.yml"
         O.upsert_overlay(bundle, p)
-        O.set_overlay_status("ov1", "pending", "nsahu", "submitting", p)
-        O.set_overlay_status("ov1", "rejected", "priya", "needs a basis", p)
-        b = O.set_overlay_status("ov1", "pending", "nsahu", "basis attached", p)
-        assert b["status"] == "pending"
-        assert [t["to"] for t in b["transitions"]] == \
-            ["pending", "rejected", "pending"]
+        O.set_overlay_status("ov1", "tested", "nsahu", "impact checked", p)
+        b = O.set_overlay_status("ov1", "approved", "priya", "basis attached", p)
+        assert b["status"] == "approved"
+        assert b["tested_by"] == "nsahu" and b["approved_by"] == "priya"
+        assert [t["to"] for t in b["transitions"]] == ["tested", "approved"]
+
+    def test_draft_tested_approved_one_way(self, tmp_path, bundle):
+        p = tmp_path / "overlays.yml"
+        O.upsert_overlay(bundle, p)
+        with pytest.raises(ValueError, match="cannot move to approved"):
+            O.set_overlay_status("ov1", "approved", "priya", "skip", p)
+        O.set_overlay_status("ov1", "tested", "nsahu", "t", p)
+        with pytest.raises(ValueError, match="cannot move to draft"):
+            O.set_overlay_status("ov1", "draft", "nsahu", "reopen", p)
+        O.set_overlay_status("ov1", "rejected", "priya", "no basis", p)
+        with pytest.raises(ValueError, match="cannot move"):
+            O.set_overlay_status("ov1", "tested", "nsahu", "again", p)
+
+    def test_the_maker_cannot_approve_where_separation_is_enforced(self, tmp_path,
+                                                                     bundle):
+        p = tmp_path / "overlays.yml"
+        O.upsert_overlay({**bundle, "created_by": "nsahu"}, p)
+        O.set_overlay_status("ov1", "tested", "omar", "t", p)
+        for who in ("nsahu", "OMAR"):
+            with pytest.raises(PermissionError, match="separation of duties"):
+                O.set_overlay_status("ov1", "approved", who, "ok", p,
+                                     enforce_separation=True)
+        assert O.set_overlay_status("ov1", "approved", "priya", "ok", p,
+                                    enforce_separation=True)["status"] == "approved"
+
+    def test_which_runs_may_take_it(self, bundle):
+        assert O.overlay_usable({**bundle, "status": "draft"})[0] is False
+        assert O.overlay_usable({**bundle, "status": "tested"}) == (True, "")
+        assert O.overlay_usable({**bundle, "status": "tested"}, "official")[0] is False
+        assert O.overlay_usable({**bundle, "status": "approved"}, "official") == (True, "")
+        assert O.overlay_usable({**bundle, "status": "rejected"})[0] is False
+
+    def test_the_earlier_pending_reads_as_tested(self, tmp_path, bundle):
+        p = tmp_path / "overlays.yml"
+        O.write_overlay_bundles(p, [{**bundle, "status": "pending"}])
+        assert O.read_overlay_bundles(p)[0]["status"] == "tested"
 
     def test_a_reason_and_a_user_are_required(self, tmp_path, bundle):
         p = tmp_path / "overlays.yml"
         O.upsert_overlay(bundle, p)
         with pytest.raises(ValueError, match="reason"):
-            O.set_overlay_status("ov1", "approved", "priya", "", p)
+            O.set_overlay_status("ov1", "tested", "priya", "", p)
         with pytest.raises(ValueError, match="user"):
-            O.set_overlay_status("ov1", "approved", "", "fine", p)
+            O.set_overlay_status("ov1", "tested", "", "fine", p)
 
     def test_an_invalid_status_is_refused(self, tmp_path, bundle):
         p = tmp_path / "overlays.yml"
