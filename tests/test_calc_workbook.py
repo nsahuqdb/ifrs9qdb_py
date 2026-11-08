@@ -485,3 +485,59 @@ def test_the_summary_names_the_config_version(run, tmp_path):
     labels = {ws.cell(r, 1).value: ws.cell(r, 4).value for r in range(3, 12)}
     assert labels["Config version"] == f["config_version"]
     assert all(w.freeze_panes is None for w in openpyxl.load_workbook(p).worksheets)
+
+
+class TestContractWorkbook:
+    """A contract's calculator: the customer's facilities where they decide
+    the rating and stage, the contract alone from LGD to the Summary."""
+
+    def test_the_contract_alone_from_lgd_to_the_summary(self, tmp_path):
+        from ifrs9qdb.calc_workbook import (contract_ecl_workbook, run_contracts,
+                                            customer_ecl_facts)
+        run = make_run(tmp_path)
+        rc = run_contracts(run)
+        assert {"contract_id", "customer_id", "customer_name", "book"} <= set(rc.columns)
+        assert rc.loc[rc["contract_id"] == "2002", "customer_id"].iloc[0] == "C2"
+        p = tmp_path / "k.xlsx"
+        p.write_bytes(contract_ecl_workbook(run, "2002"))
+        wb = recalc(p, tmp_path)
+        s = wb["Summary"]
+        assert "contract 2002" in str(s["A1"].value)
+        rows = [r for r in s.iter_rows(min_row=23, values_only=True) if r[0]]
+        per = [r for r in rows if isinstance(r[0], (int, float))]
+        assert [str(r[2]) for r in per] == ["2002"]
+        assert per[0][-1] == "OK"
+        # the customer's other facility still decides the stage
+        n_cust = len(customer_ecl_facts(run, "C2")["lines"])
+        fac = [r for r in wb["Facilities"].iter_rows(min_row=5, values_only=True)
+               if r[0] is not None]
+        assert len(fac) == n_cust > 1
+
+    def test_an_unknown_contract(self, tmp_path):
+        import pytest
+        from ifrs9qdb.calc_workbook import contract_ecl_workbook
+        with pytest.raises(KeyError):
+            contract_ecl_workbook(make_run(tmp_path), "nope")
+
+
+def test_names_from_the_input_folder_for_an_older_run(tmp_path):
+    """A run without the contract reference (before engine 0.45) takes the
+    customer names from the input folder its manifest names."""
+    import json
+    import openpyxl
+    from ifrs9qdb.calc_workbook import _input_names, _reference_names
+    run = make_run(tmp_path / "r", reference=False)
+    inp = tmp_path / "input"
+    inp.mkdir()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["CUSTOMERID", "CUSTOMERNAME"])
+    ws.append(["C1", "Alpha Trading"])
+    ws.append(["0C2", "Beta Foods"])
+    wb.save(inp / "CustomerMaster.xlsx")
+    (run / "reports").mkdir(exist_ok=True)
+    (run / "reports" / "manifest.json").write_text(json.dumps({"input_dir": str(inp)}))
+    _input_names.cache_clear()
+    names = _reference_names(run / "Output")
+    assert names.get("C1") == "Alpha Trading"
+    assert len(names) == 2

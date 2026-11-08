@@ -44,6 +44,7 @@ ONE ANSWER
 """
 from __future__ import annotations
 
+import functools
 import io
 import math
 import re
@@ -56,7 +57,8 @@ import pandas as pd
 from .ids import as_id
 
 __all__ = ["customer_ecl_facts", "write_customer_workbook",
-           "customer_ecl_workbook", "run_customers"]
+           "customer_ecl_workbook", "run_customers", "run_contracts",
+           "contract_ecl_facts", "contract_ecl_workbook"]
 
 MAX_MONTH = 600
 # the repayment shapes, as a reader would name them
@@ -157,16 +159,59 @@ def _date(v):
 
 
 def _reference_names(out_dir: Path) -> dict:
-    """Customer id -> name from the run's contract reference (the LIC customer
-    master leaves the name blank)."""
+    """Customer id -> name: from the run's contract reference (engine 0.45
+    and later), else from the customer masters of the input folder the run
+    read (the LIC customer master leaves the name blank)."""
     p = Path(out_dir).parent / "reference" / "contracts.csv"
-    if not p.is_file():
+    if p.is_file():
+        try:
+            r = pd.read_csv(p, dtype=str, keep_default_na=False)
+            if "CustomerName" in r.columns and r["CustomerName"].str.strip().ne("").any():
+                return {a: b for a, b in zip(as_id(r["CustomerId"]), r["CustomerName"])
+                        if b}
+        except Exception:
+            pass
+    return _input_names(str(Path(out_dir).parent))
+
+
+@functools.lru_cache(maxsize=16)
+def _input_names(run_root: str) -> dict:
+    """Customer id -> name from the CustomerMaster extracts in the input
+    folder the run's manifest names; {} when that folder is gone."""
+    from .etl.read_inputs import INPUT_SPECS, read_input
+    root = Path(run_root)
+    d = None
+    for m in (root / "reports" / "manifest.json", root / "manifest.json"):
+        if m.is_file():
+            try:
+                import json
+                d = json.loads(m.read_text(encoding="utf-8")).get("input_dir")
+            except Exception:
+                d = None
+            break
+    if not d or not Path(d).is_dir():
         return {}
-    try:
-        r = pd.read_csv(p, dtype=str, keep_default_na=False)
-    except Exception:
-        return {}
-    return {a: b for a, b in zip(as_id(r["CustomerId"]), r["CustomerName"]) if b}
+    names = {}
+    for spec in INPUT_SPECS:
+        if spec.name not in ("CustomerMaster", "CustomerMasterInvestments"):
+            continue
+        for f in (spec.file, *spec.alternatives):
+            fp = Path(d) / f
+            if not fp.is_file():
+                continue
+            try:
+                df = read_input(fp)
+            except Exception:
+                break
+            cols = {str(c).strip().upper(): c for c in df.columns}
+            if "CUSTOMERID" in cols and "CUSTOMERNAME" in cols:
+                ids = as_id(df[cols["CUSTOMERID"]].astype(str))
+                for a, b in zip(ids, df[cols["CUSTOMERNAME"]]):
+                    b = _str(b)
+                    if a and b:
+                        names.setdefault(a, b)
+            break
+    return names
 
 
 def run_customers(run_dir) -> pd.DataFrame:
@@ -204,6 +249,46 @@ def run_customers(run_dir) -> pd.DataFrame:
         book=("book", lambda s: " + ".join(dict.fromkeys(s))),
         positions=("positions", "sum"), on_balance=("on_balance", "sum"))
     return out.sort_values("on_balance", ascending=False).reset_index(drop=True)
+
+
+def run_contracts(run_dir) -> pd.DataFrame:
+    """Every position in a run's books: contract (LIC id and source id),
+    customer id and name, product, book and on-balance exposure, largest
+    first -- what the app's contract picker offers."""
+    from .etl.report import read_output_csv, _chr, _col, _contract_reference
+    out_dir = _out_dir(_run_root(run_dir))
+    names = _reference_names(out_dir)
+    rows = []
+    for suffix, book in (("_1", "Lending"), ("_2", "Investments")):
+        am = read_output_csv(out_dir, f"AccountMaster{suffix}.csv")
+        if am is None or len(am) == 0:
+            continue
+        cm = read_output_csv(out_dir, f"CustomerMaster{suffix}.csv")
+        own = {}
+        if cm is not None and _col(cm, "CustomerName") is not None:
+            for a, b in zip(as_id(_chr(_col(cm, "CustomerId"))),
+                            _chr(_col(cm, "CustomerName"))):
+                if _str(b):
+                    own.setdefault(a, _str(b))
+        contract = _chr(_col(am, "ContractId"))
+        ref = _contract_reference(out_dir, suffix, contract)
+        cust = as_id(_chr(_col(am, "CustomerId")))
+        d = pd.DataFrame({
+            "book": book, "contract_id": contract.map(_str),
+            "contract_original": (ref["ContractIdOriginal"].map(_str)
+                                  if ref is not None else ""),
+            "customer_id": cust,
+            "customer_name": [own.get(c) or names.get(c, "") for c in cust],
+            "product": _chr(_col(am, "AccountType")).map(_str),
+            "on_balance": pd.to_numeric(_col(am, "OnBalance"), errors="coerce")})
+        rows.append(d[d["contract_id"] != ""])
+    if not rows:
+        return pd.DataFrame(columns=["book", "contract_id", "contract_original",
+                                     "customer_id", "customer_name", "product",
+                                     "on_balance"])
+    d = pd.concat(rows, ignore_index=True)
+    return d.sort_values("on_balance", ascending=False,
+                         na_position="last").reset_index(drop=True)
 
 
 def _versions(root: Path) -> dict:
@@ -770,6 +855,11 @@ def write_customer_workbook(facts: dict, dest=None):
     month by month; the Summary on top, the settings on a hidden tab."""
     B = _Book()
     L = facts["lines"]
+    # a contract workbook: Facilities, Rating and Staging keep every facility
+    # of the customer (the customer's worst facility sets its rating and any
+    # Stage 2 or 3 facility lifts the others); the rest show the contract
+    focus = set(facts.get("focus") or [])
+    LF = [l for l in L if l["line"] in focus] if focus else L
     st = facts["settings"]
     R: dict = {}                     # (line, column) -> its cell, sheet-qualified
 
@@ -845,7 +935,7 @@ def write_customer_workbook(facts: dict, dest=None):
     B.widths(ws_set, {"A": 48, "B": 18, "C": 90, "D": 22})
 
     # ---------------------------------------------------------- Facilities
-    _write_facilities(B, ws_fac, L, R)
+    _write_facilities(B, ws_fac, L, R, focus)
 
     def ln(line, name, fixed=True):
         return R[(line, name)]
@@ -865,16 +955,16 @@ def write_customer_workbook(facts: dict, dest=None):
         return R[(line, "Stage")]
 
     # ---------------------------------------------------------- LGD
-    lg = _write_lgd(B, ws_lgd, facts, L, ln, S)
+    lg = _write_lgd(B, ws_lgd, facts, LF, ln, S)
 
     # ---------------------------------------------------------- EAD
-    ead = _write_ead(B, ws_ead, facts, L, ln, stage, S)
+    ead = _write_ead(B, ws_ead, facts, LF, ln, stage, S)
 
     # ---------------------------------------------------------- ECL
-    ecl = _write_ecl(B, ws_ecl, facts, L, ln, lg, ead, pm, S)
+    ecl = _write_ecl(B, ws_ecl, facts, LF, ln, lg, ead, pm, S)
 
     # ---------------------------------------------------------- Summary
-    _write_summary(B, ws_sum, facts, L, ln, stage, lg, ead, ecl, pm, S)
+    _write_summary(B, ws_sum, facts, LF, ln, stage, lg, ead, ecl, pm, S)
 
     buf = io.BytesIO()
     B.wb.calculation.fullCalcOnLoad = True
@@ -913,11 +1003,14 @@ FAC_SHOWN = {
 }
 
 
-def _write_facilities(B, ws, L, R) -> None:
+def _write_facilities(B, ws, L, R, focus=frozenset()) -> None:
     B.title(ws, "Facilities: the customer's positions as the run read them",
             "The run's account master (the LIC file), with the source contract id "
             "and each facility's own days past due kept by the ETL. Every value "
-            "here is an input.")
+            "here is an input."
+            + (" The contract this workbook is for is marked in yellow; the "
+               "customer's other facilities are here because they set its "
+               "rating and can lift its stage." if focus else ""))
     C = {n: i + 1 for i, n in enumerate(FAC_COLS)}
     B.header(ws, 4, 1, [FAC_SHOWN.get(c, c) for c in FAC_COLS])
     kinds = {"Extract date": "date", "Maturity date": "date", "On balance": "amt",
@@ -940,7 +1033,8 @@ def _write_facilities(B, ws, L, R) -> None:
                 "AccountMaster.Stage": l["stage_raw"],
                 "Repayment schedule": "Yes" if l["schedule"] is not None else "No"}
         for name in FAC_COLS:
-            B.put(ws, rr, C[name], vals[name], kinds.get(name), inp=name != "Line")
+            B.put(ws, rr, C[name], vals[name], kinds.get(name), inp=name != "Line",
+                  key=l["line"] in focus and name in ("Line", "Contract"))
             R[(l["line"], name)] = _a(rr, C[name], "Facilities")
     B.widths(ws, {"A": 6, "B": 11, "C": 16, "D": 20, "E": 13, "F": 14, "G": 16,
                   "H": 10, "I": 11, "J": 12, "K": 12, "L": 16, "M": 15, "N": 11,
@@ -1993,8 +2087,13 @@ def _fallback_n(l) -> int:
 
 
 def _write_summary(B, ws, facts, L, ln, stage, lg, ead, ecl, pm, S):
-    B.title(ws, f"ECL calculator: customer {facts['customer_id']}"
-                + (f" ({facts['customer_name']})" if facts["customer_name"] else ""))
+    who = (f"customer {facts['customer_id']}"
+           + (f" ({facts['customer_name']})" if facts["customer_name"] else ""))
+    if facts.get("focus"):
+        cs = ", ".join(dict.fromkeys(l["cid"] for l in L))
+        B.title(ws, f"ECL calculator: contract {cs}, {who}")
+    else:
+        B.title(ws, f"ECL calculator: {who}")
     info = [
         ("Run", facts["run_id"]),
         ("Extract date", L[0]["d_extract"] if L else None),
@@ -2015,7 +2114,11 @@ def _write_summary(B, ws, facts, L, ln, stage, lg, ead, ecl, pm, S):
            "facility's) -> PD internal / PD external (the PD model and scenario "
            "weights) -> PD curves -> LGD -> EAD -> ECL. Blue cells are the run's "
            "inputs, black cells formulas: change an input and the provision follows. "
-           "The settings are on a hidden tab.")
+           "The settings are on a hidden tab."
+           + (" Facilities, Rating and Staging show every facility of the customer, "
+              "since the customer's worst facility sets the contract's rating and any "
+              "Stage 2 or 3 facility lifts it; LGD, EAD, ECL and this tab show the "
+              "contract." if facts.get("focus") else ""))
     ws.cell(21, 1, "Per position").font = B.f_sub
     hr = 22
     cols = ["Line", "Book", "Contract", "Original contract", "Product", "Portfolio",
@@ -2117,3 +2220,39 @@ def customer_ecl_workbook(run_dir, customer_id, dest=None):
     """The calculator for one customer of a run: bytes, or written to
     ``dest``."""
     return write_customer_workbook(customer_ecl_facts(run_dir, customer_id), dest)
+
+
+def contract_ecl_facts(run_dir, contract_id, book: str | None = None) -> dict:
+    """:func:`customer_ecl_facts` for the contract's customer, with ``focus``
+    on the contract's line(s)."""
+    from .etl.report import read_output_csv, _chr, _col
+    out_dir = _out_dir(_run_root(run_dir))
+    want = as_id(pd.Series([contract_id])).iloc[0]
+    cust = None
+    for suffix, b in (("_1", "Lending"), ("_2", "Investments")):
+        if book and book != b:
+            continue
+        am = read_output_csv(out_dir, f"AccountMaster{suffix}.csv")
+        if am is None or len(am) == 0:
+            continue
+        hit = as_id(_chr(_col(am, "ContractId"))) == want
+        if hit.any():
+            cust = as_id(_chr(_col(am, "CustomerId")))[hit].iloc[0]
+            book = b
+            break
+    if cust is None:
+        raise KeyError(f"Contract {contract_id!r} has no position in this run")
+    facts = customer_ecl_facts(run_dir, cust)
+    facts["focus"] = [l["line"] for l in facts["lines"]
+                      if l["contract"] == want and l["book"] == book]
+    if not facts["focus"]:
+        raise KeyError(f"Contract {contract_id!r} has no position in this run")
+    return facts
+
+
+def contract_ecl_workbook(run_dir, contract_id, book: str | None = None, dest=None):
+    """The calculator for one contract of a run: its customer's facilities
+    on Facilities, Rating and Staging, the contract alone from LGD to the
+    Summary. Bytes, or written to ``dest``."""
+    return write_customer_workbook(contract_ecl_facts(run_dir, contract_id, book),
+                                   dest)
