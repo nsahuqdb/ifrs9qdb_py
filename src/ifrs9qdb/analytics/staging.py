@@ -15,7 +15,7 @@ from .profile import (_stage_override_set, classify_stage,
 
 __all__ = ["dpd_by_stage", "stage2_trigger_overlap", "stage3_drivers",
            "rating_migration", "migration_summary", "customer_stage_migration",
-           "stage_movers", "staging_consistency"]
+           "stage_movers", "customer_moves", "staging_consistency"]
 
 _DPD_BREAKS = [-np.inf, 1, 31, 61, 91, np.inf]
 _DPD_LABELS = ["0", "1-30", "31-60", "61-90", "90+"]
@@ -289,6 +289,42 @@ def stage_movers(prev: pd.DataFrame, curr: pd.DataFrame) -> pd.DataFrame:
     return (moved.reindex(moved["ecl_change"].abs()
                           .sort_values(ascending=False).index)
             .reset_index(drop=True))
+
+
+MOVE_COLUMNS = ["customer", "customer_name", "portfolios", "contracts",
+                "rating_prev", "rating_curr", "stage_prev", "stage_curr",
+                "exposure_prev", "exposure_curr", "ecl_prev", "ecl_curr",
+                "ecl_change"]
+
+
+def customer_moves(prev: pd.DataFrame, curr: pd.DataFrame) -> pd.DataFrame:
+    """Every customer in both runs, one row each: its rating and stage in
+    each run, what it carried in each (exposure, ECL) and the change -- what
+    a migration cell is drilled down to. Sorted by the size of the change."""
+    empty = pd.DataFrame(columns=MOVE_COLUMNS)
+    if prev is None or curr is None or len(prev) == 0 or len(curr) == 0:
+        return empty
+    pv, cv = customer_view(prev), customer_view(curr)
+    if pv is None or cv is None or len(pv) == 0 or len(cv) == 0:
+        return empty
+    keep = ["customer", "customer_name", "portfolios", "contracts", "rating", "stage",
+            "exposure", "ecl"]
+    m = pv[[c for c in keep if c in pv.columns]].merge(
+        cv[[c for c in keep if c in cv.columns]], on="customer",
+        suffixes=("_prev", "_curr"))
+    if not len(m):
+        return empty
+    m["customer_name"] = m.get("customer_name_curr", "").where(
+        m.get("customer_name_curr", "").astype(str).str.strip() != "",
+        m.get("customer_name_prev", ""))
+    m["portfolios"] = m["portfolios_curr"]
+    m["contracts"] = m["contracts_curr"]
+    for c in ("stage_prev", "stage_curr"):
+        m[c] = pd.to_numeric(m[c], errors="coerce")
+    m["ecl_change"] = m["ecl_curr"] - m["ecl_prev"]
+    m = m[MOVE_COLUMNS]
+    return m.reindex(m["ecl_change"].abs().sort_values(ascending=False).index
+                     ).reset_index(drop=True)
 
 
 # ---------------------------------------------------------- consistency ----

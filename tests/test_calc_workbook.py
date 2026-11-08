@@ -103,18 +103,21 @@ def make_run(tmp: Path, *, annuity: bool = True, stage3: str = "full_outstanding
          "3/31/2031", 0.05, 3, "QAR", 9, 0.05, 4],
         [EXT, "1005", "C1", "LG", "", "1/1/2024", "QDB 4", 0, 200_000, 0,
          "12/31/2027", 0.05, 1, "QAR", 0, 0.05, 3],
-        # customer C2: DPD 75 (Stage 2) lifts its Stage 1 facility (contagion)
+        # PastDueDays is the customer's worst, as the ETL writes it (each
+        # facility's own is in the reference below)
+        # customer C2: 75 days past due (Stage 2) on one facility: both Stage 2
         [EXT, "2001", "C2", "Long Term", "", "1/1/2020", "QDB 5-", 75, 0, 400_000,
          "6/30/2028", 0.06, 1, "QAR", 0, 0.06, 3],
-        [EXT, "2002", "C2", "Murabaha", "", "1/1/2020", "QDB 5-", 0, 0, 100_000,
+        [EXT, "2002", "C2", "Murabaha", "", "1/1/2020", "QDB 5-", 75, 0, 100_000,
          "6/30/2027", 0.06, 1, "QAR", 0, 0.06, 4],
-        # customer C3: DPD 120 (Stage 3) and a manual Stage 2 on the other
+        # customer C3: 120 days past due on one facility: both Stage 3
         [EXT, "3001", "C3", "Long Term", "", "1/1/2019", "QDB 7", 120, 0, 250_000,
          "6/30/2027", 0.08, 1, "QAR", 0, 0.08, 4],
-        [EXT, "3002", "C3", "Long Term", "Stage 2", "1/1/2019", "QDB 7", 0, 0, 90_000,
+        [EXT, "3002", "C3", "Long Term", "", "1/1/2019", "QDB 7", 120, 0, 90_000,
          "6/30/2027", 0.08, 1, "QAR", 0, 0.08, 4],
-        # customer C4: Tasdeer, missing EIR on a second line, past maturity
-        [EXT, "4001", "C4", "Tasdeer", "", "1/1/2025", "QDB 4", 0, 0, 80_000,
+        # customer C4: Tasdeer (Stage 2 in the account master, as the ETL
+        # writes it) lifts the other facility; missing EIR there, past maturity
+        [EXT, "4001", "C4", "Tasdeer", "2", "1/1/2025", "QDB 4", 0, 0, 80_000,
          "12/31/2026", 0.05, 1, "QAR", 0, 0.05, 3],
         [EXT, "4002", "C4", "Long Term", "", "1/1/2018", "QDB 4", 0, 0, 60_000,
          "3/31/2026", "", 1, "QAR", 0, 0.05, 4],
@@ -185,7 +188,8 @@ def make_run(tmp: Path, *, annuity: bool = True, stage3: str = "full_outstanding
                  "C4": ("Unrated", "Agriculture"), "C5": ("QDB 6+", ""),
                  "C6": ("", "Others")}
         am1 = lend.reset_index(drop=True)
-        rows = [("AccountMaster_1", c, f"00{c}", k, "", d, *given[k])
+        own = {"2002": 0, "3002": 0}         # each facility's own days past due
+        rows = [("AccountMaster_1", c, f"00{c}", k, "", own.get(c, d), *given[k])
                 for c, k, d in zip(am1["ContractId"], am1["CustomerId"],
                                    am1["PastDueDays"])]
         rows += [("AccountMaster_2", "9001", "9001", "ISSUER", "Issuer plc", 0, "A2", ""),
@@ -270,10 +274,10 @@ class TestWorkbook:
         p = tmp_path / "c1.xlsx"
         customer_ecl_workbook(run, "C1", p)
         wb = openpyxl.load_workbook(p)
-        assert wb.sheetnames == ["Summary", "Facilities", "Rating", "Staging",
-                                 "PD internal", "PD curves", "LGD", "EAD", "ECL",
-                                 "Settings"]
-        assert [ws.title for ws in wb if ws.sheet_state == "hidden"] == ["Settings"]
+        assert wb.sheetnames == ["Summary", "Facilities", "Rating", "Staging", "PD",
+                                 "LGD", "EAD", "ECL", "Assumptions", "PD calculation"]
+        assert [ws.title for ws in wb if ws.sheet_state == "hidden"] == [
+            "Assumptions", "PD calculation"]
         # plain column names: no LIC flag names anywhere a reader looks
         for ws in wb:
             if ws.sheet_state == "visible":
@@ -305,10 +309,11 @@ class TestThePdCalculation:
         assert list(f["pd_model"]["calc_curves"]) == [(1, "11")]
         p = tmp_path / "c1.xlsx"
         write_customer_workbook(f, p)
-        wb = openpyxl.load_workbook(p)
-        assert wb["PD internal"]["A1"].value.startswith("PD internal")
-        assert "PD external" not in wb.sheetnames
-        keys = [c.value for c in wb["PD curves"][_keys_row(wb["PD curves"])]][1:]
+        ws = openpyxl.load_workbook(p)["PD calculation"]
+        text = [c.value for row in ws.iter_rows(max_col=1) for c in row]
+        assert "Internal bucket 11 (QDB 4)" in text
+        assert not any(str(t).startswith("External scale") for t in text)
+        keys = [c.value for c in ws[_keys_row(ws)]][1:]
         assert keys[0] == "Internal | bucket 11"
 
     def test_a_run_whose_stpd_is_not_the_models_prices_on_its_own(self, tmp_path):
@@ -322,7 +327,7 @@ class TestThePdCalculation:
         f = customer_ecl_facts(run, cust)
         p = tmp_path / f"{cust}.xlsx"
         write_customer_workbook(f, p)
-        ws = recalc(p, tmp_path)["PD curves"]
+        ws = recalc(p, tmp_path)["PD calculation"]
         hr = _keys_row(ws)
         keys = [c.value for c in ws[hr]]
         st = pd.read_csv(run / "Output" / "StPD.csv")
@@ -342,12 +347,11 @@ class TestThePdCalculation:
 
 @pytest.mark.skipif(SOFFICE is None, reason="LibreOffice is needed to recalculate")
 class TestFromStartToEnd:
-    """How each rating was set, why each stage, and the scenario weights,
-    rebuilt by formula and equal to the run."""
+    """How each rating was set and why each stage, rebuilt by formula and
+    equal to the run; the curve check reads no error."""
 
-    SET_BY = {"C1": "Customer master", "C2": "Override in the run",
-              "C4": "Program lending: Agriculture, 0 days past due",
-              "C6": "Fallback: Al Dhameen Customers"}
+    SET_BY = {"C1": "Rating in the customer master", "C2": "Override in the run",
+              "C4": "Program lending (Agriculture)", "C6": "Unrated: default rating"}
 
     @pytest.mark.parametrize("cust", ["C1", "C2", "C4", "C6", "ISSUER"])
     def test_the_rating_is_rebuilt(self, run, tmp_path, cust):
@@ -362,7 +366,7 @@ class TestFromStartToEnd:
             assert {r["How the rating was set"] for r in rows} == {self.SET_BY[cust]}
         else:
             assert [r["How the rating was set"] for r in rows] == [
-                "Investment extract", "Fallback: Investment Portfolio"]
+                "Rating in the extract", "Unrated: default rating"]
         checks = [c.value for row in wb["Rating"].iter_rows() for c in row
                   if c.value in ("OK", "DIFFERS")]
         assert checks and set(checks) == {"OK"}
@@ -371,22 +375,35 @@ class TestFromStartToEnd:
         f = customer_ecl_facts(run, "C2")
         p = tmp_path / "c2.xlsx"
         write_customer_workbook(f, p)
-        rows = summary_rows(recalc(p, tmp_path))
-        assert [r["Reason"] for r in rows] == [
-            "More than 60 days past due", "Another facility of the customer is Stage 2 or 3"]
+        wb = recalc(p, tmp_path)
+        rows = summary_rows(wb)
+        assert [r["Why"] for r in rows] == ["More than 60 days past due"] * 2
+        assert [r["Stage"] for r in rows] == [2, 2]
+        ws = wb["Staging"]
+        assert [ws.cell(5 + k, 2).value for k in range(3)] == [
+            2, "More than 60 days past due", "OK"]
 
-    def test_the_weights_are_the_runs(self, run, tmp_path):
-        f = customer_ecl_facts(run, "C1")
-        pdm = f["pd_model"]
-        assert pdm["int_weights"] is not None           # the package config: auto
-        p = tmp_path / "c1.xlsx"
+    @pytest.mark.parametrize("cust,why", [("C3", "More than 90 days past due"),
+                                          ("C4", "Has a Tasdeer facility"),
+                                          ("C5", "On the watchlist"),
+                                          ("C1", "Performing")])
+    def test_one_stage_per_customer(self, run, tmp_path, cust, why):
+        f = customer_ecl_facts(run, cust)
+        p = tmp_path / f"{cust}.xlsx"
         write_customer_workbook(f, p)
-        ws = recalc(p, tmp_path)["PD internal"]
-        names = [n for n, _ in pdm["scenarios"]]
-        hr = next(r for r in range(1, 80) if ws.cell(r, 1).value == "Scenario")
-        got = [ws.cell(hr + 1 + k, 3).value for k in range(len(names))]
-        assert [ws.cell(hr + 1 + k, 1).value for k in range(len(names))] == names
-        np.testing.assert_allclose(got, pdm["w_int"], rtol=0, atol=1e-12)
+        wb = recalc(p, tmp_path)
+        ws = wb["Staging"]
+        assert ws.cell(6, 2).value == why and ws.cell(7, 2).value == "OK"
+        assert {r["Stage"] for r in summary_rows(wb)} == {ws.cell(5, 2).value}
+
+    def test_the_curve_check_has_no_error(self, run, tmp_path):
+        p = tmp_path / "is.xlsx"
+        write_customer_workbook(customer_ecl_facts(run, "ISSUER"), p)
+        ws = recalc(p, tmp_path)["PD calculation"]
+        r = next(r for r in range(1, 400)
+                 if ws.cell(r, 1).value == "The run's curve (StPD.csv)")
+        got = [ws.cell(r + 1 + k, 3).value for k in range(2)]
+        assert all(isinstance(v, float) and v < 1e-12 for v in got), got
 
     def test_a_run_that_kept_no_rating_inputs_shows_its_rating(self, tmp_path):
         r = make_run(tmp_path, reference=False)
@@ -399,8 +416,8 @@ class TestFromStartToEnd:
 
 
 def _keys_row(ws) -> int:
-    """The row of the PD curves tab holding the curve labels."""
-    for r in range(1, 80):
+    """The row of the PD calculation tab holding the curve labels."""
+    for r in range(1, ws.max_row + 1):
         if ws.cell(r, 1).value == "Month":
             return r
     raise AssertionError("no Month header")
@@ -433,9 +450,9 @@ class TestRecalculated:
         for row, l in zip(rows, f["lines"]):
             assert row["ECL (this workbook)"] == pytest.approx(l["ecl_engine"],
                                                                rel=1e-9, abs=1e-6)
-        assert rows[0]["Stage"] == 3 and rows[0]["ECL (this workbook)"] == 0
-        assert rows[1]["Stage"] == 2             # the manual stage; contagion
-        assert rows[1]["Reason"] == "Stage 2 in the account master"
+        assert [x["Stage"] for x in rows] == [3, 3]       # one stage per customer
+        assert all(x["ECL (this workbook)"] == 0 for x in rows)
+        assert rows[0]["Why"] == "More than 90 days past due"
 
     def test_an_overlay_is_added_to_the_model_figure(self, tmp_path):
         r = make_run(tmp_path, overlay=True)
@@ -482,14 +499,14 @@ def test_the_summary_names_the_config_version(run, tmp_path):
     p = tmp_path / "c1.xlsx"
     write_customer_workbook(f, p)
     ws = openpyxl.load_workbook(p)["Summary"]
-    labels = {ws.cell(r, 1).value: ws.cell(r, 4).value for r in range(3, 12)}
+    labels = {ws.cell(r, 1).value: ws.cell(r, 3).value for r in range(3, 12)}
     assert labels["Config version"] == f["config_version"]
     assert all(w.freeze_panes is None for w in openpyxl.load_workbook(p).worksheets)
 
 
 class TestContractWorkbook:
-    """A contract's calculator: the customer's facilities where they decide
-    the rating and stage, the contract alone from LGD to the Summary."""
+    """A contract's calculator shows the contract only, on every tab: what the
+    customer's other facilities contribute is given as a value."""
 
     def test_the_contract_alone_from_lgd_to_the_summary(self, tmp_path):
         from ifrs9qdb.calc_workbook import (contract_ecl_workbook, run_contracts,
@@ -503,15 +520,22 @@ class TestContractWorkbook:
         wb = recalc(p, tmp_path)
         s = wb["Summary"]
         assert "contract 2002" in str(s["A1"].value)
-        rows = [r for r in s.iter_rows(min_row=23, values_only=True) if r[0]]
-        per = [r for r in rows if isinstance(r[0], (int, float))]
-        assert [str(r[2]) for r in per] == ["2002"]
-        assert per[0][-1] == "OK"
-        # the customer's other facility still decides the stage
-        n_cust = len(customer_ecl_facts(run, "C2")["lines"])
-        fac = [r for r in wb["Facilities"].iter_rows(min_row=5, values_only=True)
-               if r[0] is not None]
-        assert len(fac) == n_cust > 1
+        rows = summary_rows(wb)
+        assert [str(r["Contract"]) for r in rows] == ["2002"]
+        assert rows[0]["Check"] == "OK" and rows[0]["Stage"] == 2
+        assert rows[0]["Contract (source id)"] == "002002"
+        assert rows[0]["Customer name"] == "Beta"
+        # only the contract on every tab
+        for name in ("Facilities", "LGD", "EAD", "PD"):
+            ws = wb[name]
+            ids = {str(c.value) for row in ws.iter_rows(min_row=5) for c in row[:1]
+                   if c.value is not None}
+            assert "2001" not in ids, name
+        assert "2002" in {str(c.value) for c in wb["Facilities"]["A"]}
+        # the customer's worst days past due comes from its other facility
+        ws = wb["Staging"]
+        assert ws.cell(5, 2).value == 2 and ws.cell(6, 2).value == \
+            "More than 60 days past due"
 
     def test_an_unknown_contract(self, tmp_path):
         import pytest

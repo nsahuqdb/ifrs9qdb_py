@@ -27,7 +27,7 @@ from .scenarios import (  # noqa: F401
     scenario_stage_split,
 )
 from .staging import (  # noqa: F401
-    customer_stage_migration, dpd_by_stage, migration_summary,
+    customer_moves, customer_stage_migration, dpd_by_stage, migration_summary,
     rating_migration, stage2_trigger_overlap, stage3_drivers, stage_movers,
     staging_consistency,
 )

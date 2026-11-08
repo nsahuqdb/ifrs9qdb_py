@@ -307,3 +307,25 @@ class TestStagingConsistency:
     def test_a_report_with_no_stage_column_is_survivable(self):
         d = synthetic().drop(columns=["watchlist"])
         assert staging_consistency(d)["rule_available"]
+
+
+def test_customer_moves_drills_a_migration_cell():
+    """One row per customer in both runs, with both runs' figures."""
+    import pandas as pd
+    from ifrs9qdb.analytics import customer_moves
+    def frame(stage, ecl, rating):
+        return pd.DataFrame({
+            "contract": ["1", "2", "3"], "customer": ["A", "A", "B"],
+            "customer_name": ["Alpha", "Alpha", ""], "portfolio": ["BF", "Off BS", "BF"],
+            "rating": [rating, rating, "QDB 5"], "stage": stage,
+            "exposure": [100.0, 50.0, 70.0], "ecl": ecl, "dpd": 0, "watchlist": 0,
+            "restructured": 0, "default_flag": 0, "insolvency": 0})
+    prev = frame([1, 1, 2], [1.0, 1.0, 5.0], "QDB 4")
+    curr = frame([2, 1, 2], [3.0, 2.0, 5.0], "QDB 6")
+    m = customer_moves(prev, curr)
+    a = m[m["customer"] == "A"].iloc[0]
+    assert (a["stage_prev"], a["stage_curr"]) == (1, 2)
+    assert (a["rating_prev"], a["rating_curr"]) == ("QDB 4", "QDB 6")
+    assert a["ecl_prev"] == 2.0 and a["ecl_curr"] == 5.0 and a["ecl_change"] == 3.0
+    assert a["customer_name"] == "Alpha" and a["contracts"] == 2
+    assert list(m["customer"]) == ["A", "B"]          # largest change first

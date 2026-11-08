@@ -52,6 +52,7 @@ __all__ = [
 _COLUMNS = {
     "contractid": "contract",
     "customerid": "customer",
+    "customername": "customer_name",
     "portfoliocode": "portfolio",
     "accounttype": "account_type",
     "rating": "rating",
@@ -175,6 +176,8 @@ def customer_view(d: pd.DataFrame) -> pd.DataFrame:
         "portfolio": g["portfolio"].apply(portfolios),
         "portfolios": g["portfolio"].apply(
             lambda s: ", ".join(sorted({str(x) for x in s.dropna() if str(x)}))),
+        "customer_name": g["customer_name"].agg(
+            lambda s: next((str(x) for x in s.dropna() if str(x).strip()), "")),
         "rating": g["rating"].first(),
         "stage": g["stage"].max(),
         "dpd": g["dpd"].max(),
