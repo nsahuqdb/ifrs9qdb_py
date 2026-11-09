@@ -157,6 +157,12 @@ def load_bridge_run(run_dir, report_path=None) -> BridgeRun:
         rep = rep.merge(nm.drop_duplicates("contract"), on="contract", how="left")
     else:
         rep["name"] = pd.NA
+    # a run older than engine 0.48 has no names: from the other runs
+    from ..names import customer_names, fill_names
+    book = customer_names(run_dir)
+    if book:
+        rep["name"] = fill_names(rep["customer"], rep["name"], book).replace(
+            "", pd.NA).to_numpy()
 
     cu = run_dir / "config_used"
     has_cfg = (cu / "config").is_dir() and (cu / "static").is_dir()

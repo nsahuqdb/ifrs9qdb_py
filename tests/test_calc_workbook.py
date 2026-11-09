@@ -551,6 +551,12 @@ def test_names_from_the_input_folder_for_an_older_run(tmp_path):
     import openpyxl
     from ifrs9qdb.calc_workbook import _input_names, _reference_names
     run = make_run(tmp_path / "r", reference=False)
+    rep = run / "Output" / "FinalEclReport.csv"
+    if rep.is_file():                     # a report from before the names
+        r = pd.read_csv(rep, dtype=str)
+        if "Customer Name" in r.columns:
+            r["Customer Name"] = ""
+            r.to_csv(rep, index=False)
     inp = tmp_path / "input"
     inp.mkdir()
     wb = openpyxl.Workbook()

@@ -111,19 +111,14 @@ def _date(v):
 
 
 def _reference_names(out_dir: Path) -> dict:
-    """Customer id -> name: from the run's contract reference (engine 0.45
-    and later), else from the customer masters of the input folder the run
-    read (the LIC customer master leaves the name blank)."""
-    p = Path(out_dir).parent / "reference" / "contracts.csv"
-    if p.is_file():
-        try:
-            r = pd.read_csv(p, dtype=str, keep_default_na=False)
-            if "CustomerName" in r.columns and r["CustomerName"].str.strip().ne("").any():
-                return {a: b for a, b in zip(as_id(r["CustomerId"]), r["CustomerName"])
-                        if b}
-        except Exception:
-            pass
-    return _input_names(str(Path(out_dir).parent))
+    """Customer id -> name: the run's contract reference and report, then
+    the other runs of its runs folder (names.customer_names), then the
+    customer masters of the input folder the run read (the LIC customer
+    master leaves the name blank)."""
+    from .names import customer_names
+    root = Path(out_dir).parent
+    names = customer_names(root)
+    return names if names else _input_names(str(root))
 
 
 @functools.lru_cache(maxsize=16)
