@@ -123,6 +123,11 @@ def normalise(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[out["stage"] == 3, "lgd"] = np.nan
     for c in ("portfolio", "account_type", "rating", "rating_type"):
         out[c] = out[c].astype("string")
+    # A report from engine 0.50 or earlier put the whole investment book in
+    # "Investments"; the account type still says which rows are Banks and Fis.
+    banks = (out["account_type"].str.strip() == "Banks and Fis") & \
+        (out["portfolio"].str.strip() == "Investments")
+    out.loc[banks.fillna(False), "portfolio"] = "Banks and Fis"
     # Ids are join keys, so they go through the same normalisation the engine
     # inputs use. A column of whole numbers reads as float the moment one value
     # is blank, and "548840.0" never matches "548840" - silently.

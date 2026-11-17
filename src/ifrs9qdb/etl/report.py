@@ -591,7 +591,11 @@ def engine_frame(out_dir, suffix: str, portfolio_map: dict | None = None,
     ok_ = mapped.notna() & (mapped.astype(str) != "")
     portfolio[ok_] = mapped[ok_]
     if suffix == "_2":
-        portfolio[:] = "Investments"
+        # the investment book's own portfolios: "Banks and Fis" when the
+        # account type says so (as the ETL writes PortfolioCode and LIC
+        # reports it), else "Investments"
+        portfolio[:] = np.where(acct.astype(str).str.strip() == "Banks and Fis",
+                                "Banks and Fis", "Investments")
     rating_type = portfolio.map(DEFAULT_PORTFOLIOS)
     rating_type = rating_type.where(rating_type.notna(),
                                     "External" if suffix == "_2" else "Internal")
