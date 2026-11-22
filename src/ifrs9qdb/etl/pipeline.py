@@ -166,8 +166,20 @@ class PhaseState:
                 "restructuring_final", "watchlist_status", "exposure_total",
                 "dpd_status"]
         if self.cm_view is None:
-            return pd.DataFrame(columns=cols)
-        return self.cm_view[[c for c in cols if c in self.cm_view.columns]].copy()
+            return pd.DataFrame(columns=cols + ["portfolios"])
+        out = self.cm_view[[c for c in cols if c in self.cm_view.columns]].copy()
+        # The portfolios the customer's contracts sit in, so the reviewer can
+        # tell a guarantee customer from a term-loan one and filter by book.
+        out["portfolios"] = ""
+        v = self.view
+        if v is not None and {"customer_id", "portfolio_code"} <= set(v.columns):
+            per = (v.assign(_c=v["customer_id"].astype(str),
+                            _p=v["portfolio_code"].astype(str).str.strip())
+                   .loc[lambda d: d["_p"].ne("") & d["_p"].ne("nan")]
+                   .groupby("_c")["_p"].agg(lambda x: ", ".join(sorted(set(x)))))
+            out["portfolios"] = (out["customer_id"].astype(str).map(per)
+                                 .fillna("").to_numpy())
+        return out
 
 
 def run_etl(input_dir, runs_dir, reporting_date=None, run_id=None,
