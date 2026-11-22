@@ -153,6 +153,9 @@ class PhaseState:
     tables: dict = field(default_factory=dict)
     cm_view: pd.DataFrame | None = None
     inv_view: pd.DataFrame | None = None
+    # the investment counterparties' staging flags (customer_id, is_default,
+    # is_local1, is_local3): all FALSE as extracted, set by overrides
+    inv_flags: pd.DataFrame | None = None
     done: bool = False
 
     def say(self, step, msg):
@@ -166,8 +169,9 @@ class PhaseState:
                 "restructuring_final", "watchlist_status", "exposure_total",
                 "dpd_status"]
         if self.cm_view is None:
-            return pd.DataFrame(columns=cols + ["portfolios"])
+            return pd.DataFrame(columns=cols + ["book", "portfolios"])
         out = self.cm_view[[c for c in cols if c in self.cm_view.columns]].copy()
+        out["book"] = "Lending"
         # The portfolios the customer's contracts sit in, so the reviewer can
         # tell a guarantee customer from a term-loan one and filter by book.
         out["portfolios"] = ""
@@ -180,6 +184,78 @@ class PhaseState:
             out["portfolios"] = (out["customer_id"].astype(str).map(per)
                                  .fillna("").to_numpy())
         return out
+
+    def investment_view(self) -> pd.DataFrame:
+        """The investment book on the review page: one row per counterparty
+        (the extract's CUSTOMERID, which is its name), in the customer view's
+        shape. Rating is the worst of its holdings on the external scale;
+        stage is the one the report will price (the counterparty's flags and
+        days past due, R's rule), so an override is checked against it."""
+        cols = ["customer_id", "customer_name", "rating_final", "stage_final",
+                "restructuring_final", "watchlist_status", "exposure_total",
+                "dpd_status", "book", "portfolios"]
+        inv = self.inv
+        if inv is None or len(inv) == 0:
+            return pd.DataFrame(columns=cols)
+        from .report import classify_stage_report
+        cid = inv["customer_id"].astype(str).str.strip().reset_index(drop=True)
+        fl = self.inv_flags
+        fl = (fl.assign(customer_id=fl["customer_id"].astype(str))
+              .drop_duplicates("customer_id").set_index("customer_id")
+              if fl is not None and len(fl) else pd.DataFrame())
+
+        def flag(c):
+            if c not in fl.columns:
+                return pd.Series(False, index=cid.index)
+            return cid.map(fl[c]).fillna(False).astype(bool)
+
+        thr = 60.0
+        stt = (self.static or {}).get("staging_thresholds")
+        if stt is not None and len(stt) and "dpd_stage2_threshold_days" in stt.columns:
+            v = pd.to_numeric(stt["dpd_stage2_threshold_days"], errors="coerce").dropna()
+            thr = float(v.iloc[0]) if len(v) else thr
+        dpd = pd.to_numeric(inv["past_dues_worst"], errors="coerce").fillna(0) \
+            .reset_index(drop=True)
+        pf = inv["portfolio_code"].astype(str).reset_index(drop=True)
+        stage = classify_stage_report(dpd, flag("is_default").astype(int),
+                                      pd.Series(0, index=cid.index),
+                                      flag("is_local1") | flag("is_local3"),
+                                      pf, cid, thr)
+        scale = _master_scale_of(self.static)
+        ext = scale[scale["rating_type"] == "External"]
+        hier = dict(zip(ext["rating"], ext["hierarchy"]))
+        rat = inv["rating_worst"].astype(str).str.strip().reset_index(drop=True)
+        d = pd.DataFrame({"c": cid, "pf": pf, "r": rat, "h": rat.map(hier),
+                          "st": stage, "dpd": dpd,
+                          "x": pd.to_numeric(inv["on_balance"], errors="coerce")
+                          .fillna(0).reset_index(drop=True),
+                          "rs": flag("is_local1")})
+        rows = []
+        for c, g in d.groupby("c", sort=False):
+            gh = g.dropna(subset=["h"])
+            worst = gh.loc[gh["h"].idxmax(), "r"] if len(gh) else g["r"].iloc[0]
+            rows.append({"customer_id": c, "customer_name": c,
+                         "rating_final": worst,
+                         "stage_final": f"Stage {int(g['st'].max())}",
+                         "restructuring_final": "Restructured" if g["rs"].any()
+                         else "Not Restructured",
+                         "watchlist_status": "", "exposure_total": float(g["x"].sum()),
+                         "dpd_status": float(g["dpd"].max()), "book": "Investments",
+                         "portfolios": ", ".join(sorted(set(g["pf"])))})
+        return pd.DataFrame(rows, columns=cols)
+
+    def review_view(self) -> pd.DataFrame:
+        """Every customer the review step can override: lending, then the
+        investment counterparties, each row marked with its book."""
+        parts = [x for x in (self.customer_view(), self.investment_view()) if len(x)]
+        if not parts:
+            return self.customer_view()
+        return pd.concat(parts, ignore_index=True)
+
+
+def _master_scale_of(static) -> pd.DataFrame:
+    from .lending import _master_scale
+    return _master_scale(static or {})
 
 
 def run_etl(input_dir, runs_dir, reporting_date=None, run_id=None,
@@ -480,9 +556,11 @@ def run_etl_phase1(input_dir, runs_dir, reporting_date=None, run_id=None,
         st.flags = flags
         tables["CustomerStagingFlag_1.csv"] = transform_staging_flags(
             None, flags, extract_date)
+        st.inv_flags = pd.DataFrame({"customer_id": inv_ids.astype(str).to_numpy(),
+                                     "is_default": False, "is_local1": False,
+                                     "is_local3": False})
         tables["CustomerStagingFlag_2.csv"] = transform_staging_flags(
-            None, pd.DataFrame({"customer_id": inv_ids}), extract_date,
-            investments=True)
+            None, st.inv_flags, extract_date, investments=True)
         result.steps.append({
             "step": "Customers", "ok": True,
             "detail": (f"{len(tables['CustomerMaster_1.csv']):,} lending, "
@@ -561,12 +639,16 @@ def normalise_overrides(overrides, state: PhaseState) -> dict[str, pd.DataFrame]
     overrides = overrides or {}
     user = state.user or _who()
     now = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
-    cm = state.cm_view if state.cm_view is not None else pd.DataFrame(
-        columns=["customer_id", "rating_final", "stage_final",
-                 "restructuring_final"])
+    # lending customers and investment counterparties, each with its book: an
+    # override names the book (Lending when it does not), so a counterparty
+    # name can never be mistaken for a lending customer id
+    cm = state.review_view() if hasattr(state, "review_view") else pd.DataFrame()
+    if not len(cm):
+        cm = pd.DataFrame(columns=["customer_id", "rating_final", "stage_final",
+                                   "restructuring_final", "book"])
     prior_col = {"rating": "rating_final", "stage": "stage_final",
                  "restructuring": "restructuring_final"}
-    cols = ["customer_id", "value", "reason", "created_by", "created_at",
+    cols = ["customer_id", "book", "value", "reason", "created_by", "created_at",
             "prior_value", "source_run_id"]
     out = {}
     for kind, value_col in OVERRIDE_KINDS.items():
@@ -587,12 +669,18 @@ def normalise_overrides(overrides, state: PhaseState) -> dict[str, pd.DataFrame]
               else pd.Series([""] * len(df))).fillna("").astype(str)
         at = (df["created_at"] if "created_at" in df.columns
               else pd.Series([""] * len(df))).fillna("").astype(str)
-        lut = dict(zip(cm["customer_id"].astype(str),
+        book = (df["book"] if "book" in df.columns
+                else pd.Series([""] * len(df))).fillna("").astype(str).str.strip()
+        book = book.str.capitalize().where(book != "", "Lending")
+        if not book.isin(["Lending", "Investments"]).all():
+            raise ValueError("An override's book is Lending or Investments")
+        lut = dict(zip(zip(cm["book"].astype(str), cm["customer_id"].astype(str)),
                        cm[prior_col[kind]].fillna("").astype(str))) \
             if prior_col[kind] in cm.columns else {}
-        prior = cid.map(lambda c: lut.get(c, ""))
+        prior = pd.Series([lut.get((b, c), "") for b, c in zip(book, cid)])
         out[kind] = pd.DataFrame({
             "customer_id": cid.to_numpy(),
+            "book": book.to_numpy(),
             "value": df[vcol].astype(str).str.strip().to_numpy(),
             "reason": reason.to_numpy(),
             "created_by": by.where(by != "", user).to_numpy(),
@@ -631,12 +719,43 @@ def _apply_overrides(state: PhaseState, ov: dict[str, pd.DataFrame]) -> None:
         restructuring  restructuring_final; IsLocal1 is "Restructured"
     """
     view, flags, cm = state.view, state.flags, state.cm_view
+    inv, iflags = state.inv, state.inv_flags
 
-    def lookup(frame, kind):
-        lut = dict(zip(ov[kind]["customer_id"], ov[kind]["value"]))
-        cid = frame["customer_id"].astype(str)
+    def lookup(frame, kind, book="Lending"):
+        o = ov[kind]
+        if "book" in o.columns:
+            o = o[o["book"].fillna("Lending").astype(str) == book]
+        lut = dict(zip(o["customer_id"].astype(str), o["value"]))
+        cid = frame["customer_id"].astype(str).str.strip()
         hit = cid.isin(lut)
         return hit, cid[hit].map(lut).to_numpy(dtype=object)
+
+    # ---- the investment book: holdings and counterparty flags ------------
+    inv_rating = inv_flags_changed = False
+    if inv is not None and len(inv):
+        if len(ov["rating"]):
+            hit, new = lookup(inv, "rating", "Investments")
+            if hit.any():
+                _put(inv, "rating_worst", hit, new)
+                inv_rating = True
+        if iflags is not None and len(iflags):
+            if len(ov["stage"]):
+                hit, new = lookup(iflags, "stage", "Investments")
+                if hit.any():
+                    _put(iflags, "is_default", hit, new == "Stage 3")
+                    _put(iflags, "is_local3", hit, new == "Stage 2")
+                    inv_flags_changed = True
+            if len(ov["restructuring"]):
+                hit, new = lookup(iflags, "restructuring", "Investments")
+                if hit.any():
+                    _put(iflags, "is_local1", hit, new == "Restructured")
+                    inv_flags_changed = True
+    if inv_rating:
+        state.tables["AccountMaster_2.csv"] = build_account_master(
+            inv, state.extract_date, investments=True)
+    if inv_flags_changed:
+        state.tables["CustomerStagingFlag_2.csv"] = transform_staging_flags(
+            None, iflags, state.extract_date, investments=True)
 
     if len(ov["rating"]):
         if view is not None:

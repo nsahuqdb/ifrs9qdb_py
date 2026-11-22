@@ -345,6 +345,11 @@ def transform_staging_flags(raw: pd.DataFrame, flags: pd.DataFrame | None = None
         out["IsLocal1"] = _bool(col("is_local1", False))
         for i in range(2, 7):
             out[f"IsLocal{i}"] = ""
+        # A Stage 2 override is written as IsLocal3, as on the lending book;
+        # every other row stays blank as the reference writes it.
+        l3 = col("is_local3", False).fillna(False).astype(bool).reset_index(drop=True)
+        if l3.any():
+            out["IsLocal3"] = np.where(l3.to_numpy()[:n], "TRUE", "")
         return out
 
     out["IsWatchlist"] = _bool(col("is_watchlist", False))

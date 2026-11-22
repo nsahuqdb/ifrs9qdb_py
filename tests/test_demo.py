@@ -36,3 +36,56 @@ def test_override_view_names_each_customers_portfolios(tmp_path):
     # lending only: the investment books are not offered for override
     assert not books & {"Investments", "Banks and Fis"}
     assert (cv["portfolios"] != "").all()
+
+
+def _phase1(tmp_path):
+    from ifrs9qdb.etl.pipeline import run_etl_phase1
+    folder = write_demo_inputs(tmp_path / "in", dates=("2026-06-30",))[0]
+    return run_etl_phase1(folder, tmp_path / "runs", run_id="run_00001")
+
+
+def test_review_view_holds_both_books(tmp_path):
+    st = _phase1(tmp_path)
+    rv = st.review_view()
+    assert set(rv["book"]) == {"Lending", "Investments"}
+    iv = rv[rv["book"] == "Investments"]
+    assert len(iv) == iv["customer_id"].nunique() > 0
+    assert set(iv["portfolios"]) <= {"Investments", "Banks and Fis"}
+    assert (iv["stage_final"] == "Stage 1").all()     # nothing flags them as extracted
+    # the investment staging file is unchanged when nothing is overridden
+    csf = st.tables["CustomerStagingFlag_2.csv"]
+    assert (csf["IsLocal3"] == "").all() and (csf["IsDefault"] == "FALSE").all()
+
+
+def test_investment_overrides_reach_the_report(tmp_path):
+    from ifrs9qdb.etl.pipeline import run_etl_phase2
+    st = _phase1(tmp_path)
+    iv = st.investment_view().sort_values("exposure_total", ascending=False)
+    a, b, c = iv["customer_id"].iloc[:3]
+    res = run_etl_phase2(st, overrides={
+        "stage": [{"customer_id": a, "book": "Investments", "value": "Stage 2",
+                   "reason": "sukuk issuer on negative watch"},
+                  {"customer_id": b, "book": "Investments", "value": "Stage 3",
+                   "reason": "coupon missed"}],
+        "rating": [{"customer_id": c, "book": "Investments", "value": "Caa1",
+                    "reason": "downgraded after the extract"}]})
+    assert res.ok, res.error
+    run = tmp_path / "runs" / "run_00001"
+    import pandas as pd
+    rep = pd.read_csv(next(run.rglob("FinalEclReport.csv")), dtype=str)
+    cust, stg, rat = "Customer Id", "Ifrs Stage", "Rating"
+    by = rep.groupby(cust)
+    assert set(by.get_group(a)[stg].str.extract(r"(\d)")[0]) == {"2"}
+    assert set(by.get_group(b)[stg].str.extract(r"(\d)")[0]) == {"3"}
+    assert set(by.get_group(c)[rat]) == {"Caa1"}
+    ov = pd.read_csv(run / "overrides" / "stage_overrides.csv", dtype=str)
+    assert set(ov["book"]) == {"Investments"} and set(ov["prior_value"]) == {"Stage 1"}
+
+
+def test_an_investment_override_never_touches_a_lending_customer(tmp_path):
+    from ifrs9qdb.etl.pipeline import normalise_overrides
+    st = _phase1(tmp_path)
+    lend = st.customer_view()["customer_id"].iloc[0]
+    ov = normalise_overrides({"stage": [{"customer_id": lend, "book": "Investments",
+                                         "value": "Stage 2", "reason": "x"}]}, st)
+    assert ov["stage"]["prior_value"].iloc[0] == ""      # no such counterparty
