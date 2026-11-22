@@ -74,6 +74,14 @@ def _cmd_reconcile(args) -> int:
     return 0
 
 
+def _cmd_demo(args) -> int:
+    from .demo import DEMO_DATES, write_demo_inputs
+    dates = args.dates.split(",") if args.dates else DEMO_DATES
+    for f in write_demo_inputs(Path(args.out).expanduser(), dates):
+        print(f"  wrote {f}")
+    return 0
+
+
 def _cmd_version(args) -> int:
     from . import __version__
     print(__version__)
@@ -107,6 +115,11 @@ def main(argv=None) -> int:
     r.add_argument("--produced", required=True)
     r.add_argument("--expected", required=True)
     r.set_defaults(func=_cmd_reconcile)
+
+    d = sub.add_parser("demo", help="Write a synthetic demo book (no client data).")
+    d.add_argument("--out", required=True, help="Folder for one sub-folder per date.")
+    d.add_argument("--dates", help="Comma-separated dates, default 2026-06-30,2026-09-30.")
+    d.set_defaults(func=_cmd_demo)
 
     sub.add_parser("version", help="Print the engine version.").set_defaults(
         func=_cmd_version)
